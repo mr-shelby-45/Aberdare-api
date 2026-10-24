@@ -72,3 +72,40 @@ The movement row is inserted right after, in the same tenant transaction. A sale
 2. Break bulk takes two row locks (carton pool, then piece pool) in one transaction. Concurrent conversions always lock in the same order, so no deadlock in the tests. Future operations that touch several balance rows must lock in a consistent order too, or deadlocks become possible. Not covered by the spike.
 3. `prisma migrate dev --create-only` refused to run because it wanted an interactive "yes" for a warning (a new unique index on `product`). The same SQL was produced with `prisma migrate diff --from-migrations` and was identical to the reviewed SQL, with no DROP or policy changes. Replaying the migrations this way also showed Prisma left step 1's hand-written RLS policy untouched (relevant to step 4).
 4. Environment, not code: with an 8 GB machine and a 2 GB page file, Windows ran out of commit memory and several tools crashed at random (Prisma CLI, tsc, the linter, Vitest workers). Fixed by a 6 GB page file and a 2 GB WSL cap. No test result was trusted from a run that crashed.
+
+## Step 3: Idempotent commands (passed)
+
+**Result:** all 7 tests in `docs/spike.md` pass, plus 6 supporting checks. The step 3 file passed 10 runs in a row; full suite 44 of 44, twice in a row.
+
+**Table** (approved by Ian): `sync_command` with `command_id` (phone UUID), `type`, `status` (`PROCESSING`, `ACCEPTED`, `FLAGGED`, `REJECTED`), `result jsonb`, `created_at`; unique `(business_id, command_id)`. RLS enabled and forced with the NULLIF policy, plus a restrictive `outcome_is_final` policy (UPDATE only while `PROCESSING`, `WITH CHECK (true)`). Check: `result` is NULL exactly while `PROCESSING`. app_user: SELECT, INSERT, UPDATE; no DELETE.
+
+**Pattern** (`src/modules/sync/sync.service.ts`), one tenant transaction per command:
+
+```sql
+-- First write of the transaction. No row back = already processed.
+INSERT INTO sync_command (business_id, command_id, type, status)
+VALUES ($biz, $cmd, $type, 'PROCESSING')
+ON CONFLICT (business_id, command_id) DO NOTHING
+RETURNING id;
+```
+
+Then permission check, payload validation (class-validator), the handler inside a savepoint, and `UPDATE ... SET status, result WHERE status = 'PROCESSING'`. A concurrent duplicate's `INSERT` waits on the unique index until the first transaction commits (it then returns the stored result) or rolls back (it then processes the command itself).
+
+**Test 7 behaviour (chosen by Ian):** an unexpected error rolls back the whole transaction, command row included. Nothing is stored, the response is `FAILED` / `INTERNAL_ERROR`, and the retry processes the command normally (tested with a crash between the balance update and the ledger insert). A row that says "done" without its effect cannot exist, because both are in one transaction. Reason: a crash is not the phone's fault, and recording it as failed would block a valid command for good.
+
+**Proof the tests catch the mistakes they target** (each mutation applied temporarily, then reverted):
+- Check-then-insert instead of `ON CONFLICT`: test 2 failed. The duplicates hit the unique index and came back `FAILED` instead of the stored result.
+- Handler without a savepoint: two checks failed. A rejection after a write committed `balance 5` with a ledger sum of `0` (balance and ledger disagree), and a foreign key failure left the transaction aborted, so the rejection could not be stored and the command came back `FAILED` (it would be retried forever).
+
+**Findings worth knowing:**
+
+1. The savepoint is essential, not optional. After any failed SQL statement Postgres refuses further statements in that transaction, so without `ROLLBACK TO SAVEPOINT` a rejection caused by the database cannot be recorded.
+2. A reference to something that does not exist (or belongs to another business, thanks to the composite foreign keys) is a permanent rejection, `INVALID_REFERENCE`. Treating it as a crash would make the phone retry it forever. Detected through the Postgres code `23503`.
+3. Prisma 7 puts the Postgres SQLSTATE at `meta.driverAdapterError.cause.originalCode` for raw queries (P2010) and model calls (P2003) alike (checked with a throwaway probe).
+4. Validation is strict: no type coercion (`"5"` is rejected), no fractions, no unknown properties (a `businessId` in the payload is rejected, CLAUDE.md rule 2).
+5. Added for test 4: a minimal `stock.adjust` handler (strict decreases only), because a permission test needs two command types with different permissions.
+
+**Open risks from this step:**
+- A command that crashes the server every time is retried forever. Counting attempts needs a separate transaction; not built in the spike.
+- A phone that reuses a command UUID with a different payload gets the original result back; the change is silently ignored. A payload hash column would catch it.
+- Crashed commands are not logged yet (`TODO(step 5)` in `sync.service.ts`); the project logger comes in step 5.

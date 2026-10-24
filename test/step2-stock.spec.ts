@@ -2,19 +2,13 @@ import { PrismaService } from '../src/database/prisma.service.js';
 import { TenantRunner, currentTx } from '../src/database/tenant.js';
 import { StockRepository } from '../src/modules/stock/stock.repository.js';
 import { StockService } from '../src/modules/stock/stock.service.js';
-import { createBusiness, resetTables } from './helpers/db.js';
+import { resetTables } from './helpers/db.js';
 import { prismaWithPool } from './helpers/prisma.js';
+import { type Shop, seedShop as seedShopWith } from './helpers/shop.js';
 
 // Spike step 2: atomic stock updates under concurrency (docs/spike.md).
 // Numbered tests match the numbered list in the spike document. Each
 // concurrency scenario is a function so test 6 can repeat all of them.
-
-interface Shop {
-  biz: string;
-  loc: string;
-  piece: string;
-  carton: string;
-}
 
 describe('step 2: atomic stock updates under concurrency', () => {
   const repo = new StockRepository();
@@ -40,36 +34,7 @@ describe('step 2: atomic stock updates under concurrency', () => {
     vi.restoreAllMocks();
   });
 
-  /** A business with one location and a product sold as pieces and cartons of 24. */
-  async function seedShop(name = 'Shop A'): Promise<Shop> {
-    const biz = await createBusiness(name);
-    return tenants.run(biz, async () => {
-      const tx = currentTx();
-      const loc = await tx.location.create({
-        data: { businessId: biz, name: 'Main shop' },
-      });
-      const product = await tx.product.create({
-        data: { businessId: biz, name: 'Soda 300ml' },
-      });
-      const piece = await tx.packType.create({
-        data: {
-          businessId: biz,
-          productId: product.id,
-          name: 'piece',
-          unitsPerPack: 1,
-        },
-      });
-      const carton = await tx.packType.create({
-        data: {
-          businessId: biz,
-          productId: product.id,
-          name: 'carton of 24',
-          unitsPerPack: 24,
-        },
-      });
-      return { biz, loc: loc.id, piece: piece.id, carton: carton.id };
-    });
-  }
+  const seedShop = (name?: string): Promise<Shop> => seedShopWith(tenants, name);
 
   /** Balance, ledger sum and ledger row count for one pool, read as the tenant. */
   async function ledger(shop: Shop, packTypeId: string) {

@@ -107,6 +107,13 @@ The server, for each command:
 - Runs the handler in its own transaction (or savepoint) so one bad command does not undo the others.
 - Returns per command: `accepted`, `flagged` (accepted but needs the owner's attention, for example an oversell), or `rejected` (with a reason code).
 
+As built in spike step 3 (**DECIDED** with Ian):
+- Each command runs in its own tenant transaction. Its first write claims the row: `INSERT INTO sync_command ... ON CONFLICT (business_id, command_id) DO NOTHING RETURNING id`. No row back means it was already processed, and the stored result is returned. A concurrent duplicate waits on the unique index until the first transaction ends.
+- The handler runs inside a savepoint. An expected rejection (validation, permission, business rule, a reference to something that does not exist) rolls back to the savepoint and is stored as `rejected`, so a re-send gets the same answer.
+- An unexpected error rolls back the whole transaction, command row included. Nothing is stored, the response says `failed` (`INTERNAL_ERROR`), and the phone's retry processes the command again.
+- Once committed, an outcome cannot change: a restrictive RLS policy only allows UPDATE while the row is `PROCESSING`, and app_user has no DELETE.
+- A command without a valid UUID cannot be stored; it is rejected (`VALIDATION_FAILED`) without a row.
+
 Command types and required permission:
 
 | Command | Permission |

@@ -27,6 +27,25 @@ export function currentTx(): TenantTx {
   return ctx.tx;
 }
 
+/**
+ * Runs fn inside a savepoint of the current tenant transaction. If fn throws,
+ * everything it wrote is undone, the outer transaction stays usable (even after
+ * a failed SQL statement), and the error is rethrown.
+ * Prisma 7 has no savepoint API, so this uses plain SQL on the tenant client.
+ */
+export async function withSavepoint<T>(fn: () => Promise<T>): Promise<T> {
+  const tx = currentTx();
+  await tx.$executeRawUnsafe('SAVEPOINT tenant_step');
+  try {
+    const result = await fn();
+    await tx.$executeRawUnsafe('RELEASE SAVEPOINT tenant_step');
+    return result;
+  } catch (err) {
+    await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT tenant_step');
+    throw err;
+  }
+}
+
 /** The business of the current tenant transaction. Throws if there is none. */
 export function currentBusinessId(): string {
   const ctx = storage.getStore();
