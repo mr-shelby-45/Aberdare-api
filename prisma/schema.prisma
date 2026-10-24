@@ -1,0 +1,11 @@
+// Models are added from spike step 1 onward. Every tenant table also needs a
+// hand-written RLS migration (see docs/architecture.md section 3).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}

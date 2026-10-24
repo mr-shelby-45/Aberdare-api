@@ -1,0 +1,29 @@
+# Local development database only. Never use these passwords anywhere else.
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: aberdare-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_dev_only}
+      # Read by docker/postgres/init/01-roles.sql to create the two roles.
+      MIGRATOR_PASSWORD: ${MIGRATOR_PASSWORD:-migrator_dev_only}
+      APP_USER_PASSWORD: ${APP_USER_PASSWORD:-app_user_dev_only}
+    ports:
+      # 5432 is inside a port range Windows (Hyper-V/WSL) often reserves, so the
+      # host side defaults to 15432. Inside the container Postgres still uses 5432.
+      - '${POSTGRES_PORT:-15432}:5432'
+    volumes:
+      # Postgres 18 images keep data under /var/lib/postgresql/18/docker,
+      # so the volume is mounted one level up (not at .../data as in older images).
+      - pgdata:/var/lib/postgresql
+      # Runs only when the volume is empty (first start or after a reset).
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:
