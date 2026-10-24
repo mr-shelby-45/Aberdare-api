@@ -16,7 +16,7 @@ The owner of the project is Ian, a developer who knows Next.js and TypeScript we
 
 The spike is a small proof that the risky parts of the design work before any feature is written. It is described in `docs/spike.md`. Until Ian writes "spike passed" in this file (section 2), do NOT build auth, sales, M-Pesa, notifications, sync endpoints, or any feature module. If a task seems to need one, stop and ask.
 
-Status: step 0 (project setup) done. Step 1 (RLS through Prisma) is next.
+Status: steps 0 and 1 done (see `docs/spike-results.md`). Step 2 (atomic stock updates) is next.
 
 ## 3. Fixed technology decisions
 
@@ -159,15 +159,19 @@ Fill this in as the project grows. Keep it accurate.
 First-time setup:       cp .env.example .env   then   pnpm install   then   pnpm exec prisma generate
 Start local database:   docker compose up -d --wait
 Stop local database:    docker compose down          (keeps data)
-Run tests:              pnpm test                    (needs the database running)
+Run tests:              pnpm test                    (needs the database running; migrates aberdare_test first)
 Lint:                   pnpm lint
+Type-check (incl tests):pnpm typecheck
 Build:                  pnpm build
 Run API (dev):          pnpm start:dev               then GET http://127.0.0.1:3000/health
 Run API (built):        pnpm build   then   pnpm start:prod
 Run worker:             (to be added)
 Generate Prisma client: pnpm exec prisma generate    (after every schema.prisma change)
 Migration status:       pnpm exec prisma migrate status
-Create migration:       (to be added in spike step 1/4)
+Create migration:       pnpm exec prisma migrate dev --create-only --name <name>   then READ the SQL
+Apply migrations (dev): pnpm exec prisma migrate dev
+Hand-written migration: pnpm exec prisma migrate dev --create-only --name <name>   (with no schema change it is
+                        empty; write the SQL into it, then apply). Keep RLS/grants/triggers in their own files.
 Reset local database:   docker compose down -v   then   docker compose up -d --wait
                         (LOCAL DOCKER ONLY: deletes all local data and re-runs the role init script)
 ```
@@ -185,4 +189,9 @@ Notes:
 - Prisma 7.10.1 prints "only supports Node.js 20.19+, 22.12+, 24.0+" on install under Node 26. It works in all step 0 checks. If anything odd appears, test on Node 24 LTS first.
 - pnpm 12 blocks dependency install scripts. Approved ones are listed under `allowBuilds` in `pnpm-workspace.yaml` (`pnpm approve-builds <pkg> -y`).
 - On Windows use `127.0.0.1`, not `localhost`, to reach the API: `localhost` may resolve to IPv6 `::1`, and the API listens on IPv4 `0.0.0.0`.
+- Tenant wrapper (spike step 1): `TenantRunner.run(businessId, fn)` in `src/database/tenant.ts` opens one Prisma interactive transaction, runs `set_config('app.business_id', id, true)` first, and puts the transaction client in a module-private AsyncLocalStorage. Repositories call `currentTx()` / `currentBusinessId()`; both throw `TENANT_CONTEXT_MISSING` outside `run()`. Nested `run()` calls are refused.
+- Three guards keep the raw client out of repositories: `DatabaseModule` does not export `PrismaService` (Nest fails with "can't resolve dependencies"), oxlint `no-restricted-imports` bans `prisma.service`, the generated client, `@prisma/*` and `pg` in `src/` outside `src/database/`, and RLS returns zero rows if both are bypassed. Do not weaken any of them.
+- Repository methods must be `async`, so a missing tenant context is always a rejected promise, never a synchronous throw.
+- New tenant tables: copy the pattern in `prisma/migrations/*_step1_product_rls/migration.sql` (GRANT, ENABLE + FORCE RLS, `shop_only` policy with NULLIF).
+- Test files run one at a time (`fileParallelism: false`) because they share and wipe `aberdare_test`. Test helpers in `test/helpers/db.ts` seed and wipe as migrator; code under test always runs as app_user.
 - Docker Desktop's engine crashed once on start (WSL exit `0xc00000fd`) and recovered on retry. If `docker` commands fail with a 500 error, wait and retry, or restart Docker Desktop.

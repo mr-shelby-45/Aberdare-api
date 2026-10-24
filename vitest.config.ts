@@ -8,6 +8,10 @@ export default defineConfig({
     globals: true,
     root: './',
     include: ['src/**/*.spec.ts', 'test/**/*.spec.ts'],
+    globalSetup: ['test/global-setup.ts'],
     setupFiles: ['test/setup-env.ts'],
+    // Test files share one real database and wipe tables, so run them one
+    // at a time. Tests inside a file still use real concurrency where needed.
+    fileParallelism: false,
   },
 });

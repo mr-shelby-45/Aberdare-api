@@ -1,5 +1,5 @@
-// Models are added from spike step 1 onward. Every tenant table also needs a
-// hand-written RLS migration (see docs/architecture.md section 3).
+// Every tenant table also needs a hand-written RLS migration
+// (see docs/architecture.md section 3 and CLAUDE.md section 5).
 
 generator client {
   provider = "prisma-client"
@@ -8,4 +8,28 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+}
+
+// The tenant itself. No RLS in the spike (docs/spike.md step 1).
+model Business {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  products  Product[]
+
+  @@map("business")
+}
+
+// Tenant table: RLS enabled and forced in 20261024_step1_product_rls.
+model Product {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId String   @map("business_id") @db.Uuid
+  name       String
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  business   Business @relation(fields: [businessId], references: [id])
+
+  @@index([businessId])
+  @@map("product")
 }

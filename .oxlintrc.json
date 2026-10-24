@@ -6,5 +6,33 @@
   },
   "env": {
     "node": true
-  }
+  },
+  "overrides": [
+    {
+      "files": ["src/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["**/database/prisma.service*", "**/generated/prisma/**"],
+                "message": "Only src/database may use the raw Prisma client. Repositories call currentTx() from src/database/tenant.ts (CLAUDE.md section 5)."
+              },
+              {
+                "group": ["@prisma/*", "pg"],
+                "message": "Only src/database may open database connections. Repositories call currentTx() from src/database/tenant.ts."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/database/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": "off"
+      }
+    }
+  ]
 }
