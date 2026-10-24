@@ -68,6 +68,10 @@ Per-request flow:
 4. Repositories receive the transaction client from the context and run all queries on it. They never import the global Prisma client.
 5. Commit or roll back at the end of the request.
 
+As built in the spike (step 1): `TenantRunner.run(businessId, fn)` in `src/database/tenant.ts` does steps 2 to 5 with Prisma 7 and the pg driver adapter. Repositories call `currentTx()`, which throws `TENANT_CONTEXT_MISSING` outside a tenant transaction; nested `run()` calls are refused. The interceptor in step 2 is not built yet: it needs the guard and token from section 4 and will call `TenantRunner.run()`. `withSavepoint()` in the same file is used when a failure must be recorded inside the transaction (section 5). Schema-level privileges for app_user live in a migration, not only in the Docker init script, because a fresh database or `prisma migrate reset` only gets what migrations contain (step 4).
+
+**OPEN (decision for Ian):** the database role is called `app_user`, and so is the person table in section 12. Postgres keeps roles and tables apart, so it works, but it is easy to misread. Rename one of them before the auth tables are created.
+
 Tables that are not tenant-owned (no RLS): `app_user` lookups during login, and the lookup of a shop key. Those code paths use a separate, narrowly scoped access path (a small set of SQL functions or a limited repository) and are reviewed carefully. Keep this list as short as possible.
 
 Constraints:
@@ -301,6 +305,13 @@ Standard columns on tenant tables: `id uuid`, `business_id uuid`, `created_at ti
 
 Hand-written SQL migrations are required for: RLS policies, the change-log triggers, trigram indexes, and partial or unique indexes Prisma cannot express. Keep each of those in its own clearly named migration file.
 
+As built in the spike (columns approved by Ian per step):
+- Tables that exist: `business` (no RLS yet), `product` (with `sku`), `location`, `pack_type`, `stock_balance`, `stock_movement`, `stock_conversion`, `sync_command`, `change_log`. Columns were kept to what each spike step needed; the rest of each table (prices, categories, `reason` on movements, `approved_by` on conversions and so on) is added with the feature that uses it.
+- Exceptions to the standard columns: append-only tables (`stock_movement`, `stock_conversion`, `sync_command`, `change_log`) have no `updated_at`. `change_log.id` is a `BIGSERIAL`, not a UUID, because it is the sync cursor and must grow.
+- `change_log` (`id`, `business_id`, `table_name`, `row_id`, `operation`, `changed_at`) is written only by triggers (`product_change_log` so far, `SECURITY INVOKER`).
+- Special indexes: GIN trigram `product_name_trgm_idx` (declared in `schema.prisma` too, so Prisma does not drop it) and the partial unique `pack_type_one_base_unit_per_product` (one pack type with `units_per_pack = 1` per product).
+- Every reference between tenant tables is a composite foreign key (section 3).
+
 ## 13. API endpoints
 
 All under `/v1`, JSON, access token required unless stated.
@@ -337,6 +348,13 @@ Every protected endpoint and sync command checks its permission in the controlle
 
 Rule for the code: it must run on any plain PostgreSQL via environment variables (`DATABASE_URL` for the app role, `MIGRATION_DATABASE_URL` for the migrator role). Local development uses Docker.
 
+All environment variables as of the end of the spike (see `.env.example`; HTTP settings are validated at startup by `src/config/app.config.ts`):
+- Database: `DATABASE_URL` (app_user), `MIGRATION_DATABASE_URL` and `SHADOW_DATABASE_URL` (migrator, Prisma CLI only), `DATABASE_POOL_MAX` (default 10), `DATABASE_TX_MAX_WAIT_MS` (default 2000).
+- HTTP: `PORT`, `LOG_LEVEL`, `TRUST_PROXY` (the load balancer's range; empty = trust nobody), `WEBHOOK_IP_ALLOWLIST`, `WEBHOOK_IP_ALLOWLIST_MODE` (`log` or `enforce`), `RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW_MS`.
+- Tests only: `TEST_DATABASE_URL`, `TEST_MIGRATION_DATABASE_URL`.
+
+On a hosted database the two roles and the databases must be created once by an administrator (the Docker init script does not run there); everything else comes from migrations.
+
 ## 16. Open items
 
 1. Hosting provider, region and cost.
@@ -346,3 +364,13 @@ Rule for the code: it must run on any plain PostgreSQL via environment variables
 5. Exact table columns (reviewed per group before migrating).
 6. Fractional quantities (kg, litres) are unsupported for now.
 7. Mobile app repository and API contract sharing (OpenAPI generation is the likely route).
+
+Added at the end of the spike (details in `docs/spike-results.md`, "Open risks"):
+
+8. Rename the `app_user` table or the `app_user` role (section 3).
+9. A database home for pg-boss: its schema created by a migration or its own role, since app_user cannot create anything.
+10. Production pool size and connection wait (`DATABASE_POOL_MAX`, `DATABASE_TX_MAX_WAIT_MS`), after a load test on the chosen host. Also whether a connection pooler sits in front of Postgres.
+11. A shared rate-limit store for several API instances (Postgres-backed; Redis is ruled out).
+12. Sentry: approve its SDK.
+13. Sync commands: an attempt limit for commands that always crash, and a payload hash to catch a reused command UUID.
+14. A fixed lock order for any operation that changes several stock balance rows.

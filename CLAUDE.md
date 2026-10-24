@@ -16,7 +16,7 @@ The owner of the project is Ian, a developer who knows Next.js and TypeScript we
 
 The spike is a small proof that the risky parts of the design work before any feature is written. It is described in `docs/spike.md`. Until Ian writes "spike passed" in this file (section 2), do NOT build auth, sales, M-Pesa, notifications, sync endpoints, or any feature module. If a task seems to need one, stop and ask.
 
-Status: steps 0 to 5 done (see `docs/spike-results.md`). Next: the "Finishing the spike" write-up in `docs/spike.md`. Only Ian marks the spike as passed.
+Status: all five steps done and written up in `docs/spike-results.md` (summary, versions, things to know, open risks). Waiting for Ian's review. Only Ian marks the spike as passed.
 
 ## 3. Fixed technology decisions
 
