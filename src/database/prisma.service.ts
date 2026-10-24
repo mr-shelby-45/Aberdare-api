@@ -20,7 +20,17 @@ export class PrismaService
     if (!Number.isInteger(max) || max < 1) {
       throw new Error('DATABASE_POOL_MAX must be a positive integer');
     }
-    super({ adapter: new PrismaPg({ connectionString, max }) });
+    // How long a transaction may wait for a free pool connection before
+    // Prisma gives up ("Unable to start a transaction in the given time").
+    // Defaults to Prisma's own 2000 ms. Production value: open item.
+    const maxWait = Number(process.env.DATABASE_TX_MAX_WAIT_MS ?? 2000);
+    if (!Number.isInteger(maxWait) || maxWait < 1) {
+      throw new Error('DATABASE_TX_MAX_WAIT_MS must be a positive integer');
+    }
+    super({
+      adapter: new PrismaPg({ connectionString, max }),
+      transactionOptions: { maxWait },
+    });
   }
 
   async onModuleInit(): Promise<void> {

@@ -73,6 +73,7 @@ Tables that are not tenant-owned (no RLS): `app_user` lookups during login, and 
 Constraints:
 - Transactions must stay short (Prisma's default interactive transaction timeout is about 5 seconds). No network calls inside them.
 - Background jobs set the tenant the same way for each business they process.
+- Foreign key checks ignore RLS, so a plain foreign key would accept a row that points at another business's row. **DECIDED (spike step 2):** every reference between tenant tables is a composite foreign key, `(business_id, x_id) REFERENCES x(business_id, id)`, backed by a unique `(business_id, id)` index on the referenced table.
 
 ## 4. Authentication
 
@@ -155,6 +156,8 @@ Zero rows returned means insufficient stock. Two modes exist:
 - **Sale mode** (sale.create from sync): the sale already happened, so allow the balance to go below zero, still in one atomic statement (`quantity = quantity - $1` without the guard), insert the movement, and flag the command if the result is negative.
 
 In both modes the movement insert and the balance update happen in one transaction, and the balance always equals the sum of movements.
+
+As built in spike step 2: sale-mode decreases and receipts use one atomic upsert, `INSERT INTO stock_balance ... ON CONFLICT (business_id, location_id, pack_type_id) DO UPDATE SET quantity = stock_balance.quantity + EXCLUDED.quantity RETURNING quantity`, so a missing balance row is created in the same statement. Strict decreases use the conditional `UPDATE` above; a missing row means zero rows, so `STOCK_INSUFFICIENT`. Isolation level: READ COMMITTED (the default). `stock_movement` and `stock_conversion` are append-only through grants (app_user has SELECT and INSERT only).
 
 Level of tracking: counts only. Lot numbers and individual box serials are out of scope.
 

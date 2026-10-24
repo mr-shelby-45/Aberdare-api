@@ -12,24 +12,123 @@ datasource db {
 
 // The tenant itself. No RLS in the spike (docs/spike.md step 1).
 model Business {
-  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  name      String
-  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  products  Product[]
+  id               String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name             String
+  createdAt        DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  products         Product[]
+  locations        Location[]
+  packTypes        PackType[]
+  stockBalances    StockBalance[]
+  stockMovements   StockMovement[]
+  stockConversions StockConversion[]
 
   @@map("business")
 }
 
 // Tenant table: RLS enabled and forced in 20261024_step1_product_rls.
 model Product {
+  id         String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId String     @map("business_id") @db.Uuid
+  name       String
+  createdAt  DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime   @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  business   Business   @relation(fields: [businessId], references: [id])
+  packTypes  PackType[]
+
+  // Target for composite foreign keys, so references cannot cross businesses.
+  @@unique([businessId, id])
+  @@index([businessId])
+  @@map("product")
+}
+
+// A shop or warehouse of a business.
+model Location {
+  id         String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId String         @map("business_id") @db.Uuid
+  name       String
+  createdAt  DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  business   Business       @relation(fields: [businessId], references: [id])
+  balances   StockBalance[]
+  movements  StockMovement[]
+
+  @@unique([businessId, id])
+  @@map("location")
+}
+
+// A way a product is stocked and sold: piece, carton of 24, and so on.
+// Each pack type has its own stock pool (docs/architecture.md section 6).
+model PackType {
+  id           String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId   String          @map("business_id") @db.Uuid
+  productId    String          @map("product_id") @db.Uuid
+  name         String
+  // Pieces in one of this pack. 1 for a piece, 24 for a carton of 24.
+  unitsPerPack Int             @map("units_per_pack")
+  createdAt    DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime        @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  business     Business        @relation(fields: [businessId], references: [id])
+  product      Product         @relation(fields: [businessId, productId], references: [businessId, id])
+  balances     StockBalance[]
+  movements    StockMovement[]
+
+  @@unique([businessId, id])
+  @@index([businessId, productId])
+  @@map("pack_type")
+}
+
+// Cached current quantity per location and pack type. Updated in the same
+// transaction as every stock_movement insert. May go negative (sale mode).
+model StockBalance {
   id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   businessId String   @map("business_id") @db.Uuid
-  name       String
+  locationId String   @map("location_id") @db.Uuid
+  packTypeId String   @map("pack_type_id") @db.Uuid
+  quantity   Int      @default(0)
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt  DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   business   Business @relation(fields: [businessId], references: [id])
+  location   Location @relation(fields: [businessId, locationId], references: [businessId, id])
+  packType   PackType @relation(fields: [businessId, packTypeId], references: [businessId, id])
 
-  @@index([businessId])
-  @@map("product")
+  @@unique([businessId, locationId, packTypeId])
+  @@map("stock_balance")
+}
+
+// Append-only ledger. Never updated or deleted (app_user has no UPDATE or
+// DELETE grant). Corrections are new rows. No updated_at for that reason.
+model StockMovement {
+  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId     String           @map("business_id") @db.Uuid
+  locationId     String           @map("location_id") @db.Uuid
+  packTypeId     String           @map("pack_type_id") @db.Uuid
+  quantityChange Int              @map("quantity_change")
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  business       Business         @relation(fields: [businessId], references: [id])
+  location       Location         @relation(fields: [businessId, locationId], references: [businessId, id])
+  packType       PackType         @relation(fields: [businessId, packTypeId], references: [businessId, id])
+  conversionOut  StockConversion? @relation("ConversionOut")
+  conversionIn   StockConversion? @relation("ConversionIn")
+
+  @@unique([businessId, id])
+  @@index([businessId, locationId, packTypeId])
+  @@map("stock_movement")
+}
+
+// Links the two movements of one break-bulk (minus 1 carton, plus N pieces).
+model StockConversion {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId    String        @map("business_id") @db.Uuid
+  outMovementId String        @map("out_movement_id") @db.Uuid
+  inMovementId  String        @map("in_movement_id") @db.Uuid
+  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  business      Business      @relation(fields: [businessId], references: [id])
+  outMovement   StockMovement @relation("ConversionOut", fields: [businessId, outMovementId], references: [businessId, id])
+  inMovement    StockMovement @relation("ConversionIn", fields: [businessId, inMovementId], references: [businessId, id])
+
+  // Each movement belongs to at most one conversion.
+  @@unique([businessId, outMovementId])
+  @@unique([businessId, inMovementId])
+  @@map("stock_conversion")
 }

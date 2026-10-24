@@ -10,21 +10,10 @@ import {
   createBusiness,
   resetTables,
 } from './helpers/db.js';
+import { prismaWithPool } from './helpers/prisma.js';
 
 // Spike step 1: tenant isolation through Prisma (docs/spike.md).
 // Numbered tests match the numbered list in the spike document.
-
-/** A PrismaService with a fixed pool size, connected as app_user. */
-function prismaWithPool(max: number): PrismaService {
-  const previous = process.env.DATABASE_POOL_MAX;
-  process.env.DATABASE_POOL_MAX = String(max);
-  try {
-    return new PrismaService();
-  } finally {
-    if (previous === undefined) delete process.env.DATABASE_POOL_MAX;
-    else process.env.DATABASE_POOL_MAX = previous;
-  }
-}
 
 describe('step 1: tenant isolation (RLS) through Prisma', () => {
   const repo = new ProductsRepository();
@@ -124,38 +113,49 @@ describe('step 1: tenant isolation (RLS) through Prisma', () => {
     expect(await prisma.product.count()).toBe(0);
   });
 
-  it('5. no leak between pooled connections (200 interleaved requests, pool of 3)', async () => {
+  // 200 transactions queue for 3 connections, so the last ones can wait longer
+  // than Prisma's default 2 s maxWait on a slow machine. This test checks
+  // isolation, not throughput, so it waits up to 10 s for a connection (and
+  // gives Vitest 30 s instead of its default 5 s so that wait is usable).
+  it('5. no leak between pooled connections (200 interleaved requests, pool of 3)', { timeout: 30_000 }, async () => {
     const expected = new Map([
       [bizA, ['A maize flour', 'A sugar']],
       [bizB, ['B cooking oil', 'B rice', 'B salt']],
     ]);
     const pids = new Set<number>();
+    const pool3 = prismaWithPool(3, { txMaxWaitMs: 10_000 });
+    await pool3.$connect();
 
-    const requests = Array.from({ length: 200 }, (_, i) => {
-      const biz = i % 2 === 0 ? bizA : bizB;
-      return tenants.run(biz, async () => {
-        const [{ pid, setting }] = await currentTx().$queryRaw<
-          { pid: number; setting: string }[]
-        >`SELECT pg_backend_pid() AS pid, current_setting('app.business_id', true) AS setting`;
-        // Yield inside the transaction so requests genuinely interleave.
-        await currentTx().$executeRaw`SELECT pg_sleep(0.001)`;
-        const rows = await repo.list();
-        pids.add(pid);
-        return { biz, setting, rows };
+    try {
+      const runner = new TenantRunner(pool3);
+      const requests = Array.from({ length: 200 }, (_, i) => {
+        const biz = i % 2 === 0 ? bizA : bizB;
+        return runner.run(biz, async () => {
+          const [{ pid, setting }] = await currentTx().$queryRaw<
+            { pid: number; setting: string }[]
+          >`SELECT pg_backend_pid() AS pid, current_setting('app.business_id', true) AS setting`;
+          // Yield inside the transaction so requests genuinely interleave.
+          await currentTx().$executeRaw`SELECT pg_sleep(0.001)`;
+          const rows = await repo.list();
+          pids.add(pid);
+          return { biz, setting, rows };
+        });
       });
-    });
 
-    const results = await Promise.all(requests);
+      const results = await Promise.all(requests);
 
-    expect(results).toHaveLength(200);
-    for (const r of results) {
-      expect(r.setting).toBe(r.biz);
-      expect(r.rows.map((p) => p.name)).toEqual(expected.get(r.biz));
-      expect(r.rows.every((p) => p.businessId === r.biz)).toBe(true);
+      expect(results).toHaveLength(200);
+      for (const r of results) {
+        expect(r.setting).toBe(r.biz);
+        expect(r.rows.map((p) => p.name)).toEqual(expected.get(r.biz));
+        expect(r.rows.every((p) => p.businessId === r.biz)).toBe(true);
+      }
+      // Proves connections were reused: at most 3 backends served 200 requests.
+      expect(pids.size).toBeGreaterThanOrEqual(2);
+      expect(pids.size).toBeLessThanOrEqual(3);
+    } finally {
+      await pool3.$disconnect();
     }
-    // Proves connections were reused: at most 3 backends served 200 requests.
-    expect(pids.size).toBeGreaterThanOrEqual(2);
-    expect(pids.size).toBeLessThanOrEqual(3);
   });
 
   it('6. after a transaction, the same connection with no setting sees zero rows', async () => {

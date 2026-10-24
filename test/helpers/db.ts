@@ -32,9 +32,17 @@ export async function asAppUser<T>(
   }
 }
 
-/** Empties all spike tables. TRUNCATE is not subject to RLS. */
+/**
+ * Empties all spike tables. TRUNCATE is not subject to RLS and, as migrator,
+ * is the only way rows of the append-only ledger are ever removed (tests only).
+ */
 export async function resetTables(): Promise<void> {
-  await asMigrator((c) => c.query('TRUNCATE product, business CASCADE'));
+  await asMigrator((c) =>
+    c.query(
+      `TRUNCATE stock_conversion, stock_movement, stock_balance, pack_type,
+                location, product, business CASCADE`,
+    ),
+  );
 }
 
 /** Creates a business (no RLS on business) and returns its id. */

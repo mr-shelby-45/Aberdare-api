@@ -16,7 +16,7 @@ The owner of the project is Ian, a developer who knows Next.js and TypeScript we
 
 The spike is a small proof that the risky parts of the design work before any feature is written. It is described in `docs/spike.md`. Until Ian writes "spike passed" in this file (section 2), do NOT build auth, sales, M-Pesa, notifications, sync endpoints, or any feature module. If a task seems to need one, stop and ask.
 
-Status: steps 0 and 1 done (see `docs/spike-results.md`). Step 2 (atomic stock updates) is next.
+Status: steps 0, 1 and 2 done (see `docs/spike-results.md`). Step 3 (idempotent commands) is next.
 
 ## 3. Fixed technology decisions
 
@@ -194,4 +194,9 @@ Notes:
 - Repository methods must be `async`, so a missing tenant context is always a rejected promise, never a synchronous throw.
 - New tenant tables: copy the pattern in `prisma/migrations/*_step1_product_rls/migration.sql` (GRANT, ENABLE + FORCE RLS, `shop_only` policy with NULLIF).
 - Test files run one at a time (`fileParallelism: false`) because they share and wipe `aberdare_test`. Test helpers in `test/helpers/db.ts` seed and wipe as migrator; code under test always runs as app_user.
+- References between tenant tables are composite foreign keys including `business_id` (FK checks ignore RLS). Referenced tables need `@@unique([businessId, id])`.
+- `prisma migrate dev --create-only` refuses to run here (non-interactive shell) whenever it wants to confirm a warning. Then generate the same SQL with `pnpm exec prisma migrate diff --from-migrations prisma/migrations --to-schema prisma/schema.prisma --script`, save it as `prisma/migrations/<UTC timestamp>_<name>/migration.sql`, read it, and apply with `pnpm exec prisma migrate deploy`. Check for drift with `pnpm exec prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --exit-code`.
+- `PrismaService` reads `DATABASE_POOL_MAX` (default 10) and `DATABASE_TX_MAX_WAIT_MS` (default 2000, Prisma's own). A burst bigger than the pool fails with "Unable to start a transaction in the given time" after that wait. Only step 1 test 5 raises it (10000 ms).
+- When a test run is filtered for display, save the full log first (`pnpm test 2>&1 | Out-File ...`). A filtered run once hid the only copy of an error.
+- Machine memory: this PC has 8 GB RAM. With a 2 GB page file, Windows ran out of commit memory and Node, Prisma, tsc and the linter crashed at random (`0xC0000409`, exit 134). Fixed by a 6 GB page file (set by Ian) and `C:\Users\kyrex\.wslconfig` with `memory=2GB`. If random native crashes return, check: `Get-CimInstance Win32_OperatingSystem` FreeVirtualMemory.
 - Docker Desktop's engine crashed once on start (WSL exit `0xc00000fd`) and recovered on retry. If `docker` commands fail with a 500 error, wait and retry, or restart Docker Desktop.
