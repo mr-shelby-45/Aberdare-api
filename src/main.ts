@@ -1,16 +1,12 @@
-import { NestFactory } from '@nestjs/core';
-import {
-  FastifyAdapter,
-  type NestFastifyApplication,
-} from '@nestjs/platform-fastify';
 import { AppModule } from './app.module.js';
+import { loadConfig } from './config/app.config.js';
+import { createApp } from './create-app.js';
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create<NestFastifyApplication>(
-    AppModule,
-    new FastifyAdapter(),
-  );
+  // Stops here with a clear message if any setting is invalid.
+  const config = loadConfig();
+  const app = await createApp(AppModule, config);
   // Fastify only listens on 127.0.0.1 by default; 0.0.0.0 is needed inside containers.
-  await app.listen(process.env.PORT ?? 3000, '0.0.0.0');
+  await app.listen(config.port, '0.0.0.0');
 }
 await bootstrap();

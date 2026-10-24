@@ -144,3 +144,34 @@ Prisma understands GIN indexes, so an undeclared one looks like something to rem
 - `prisma migrate dev --create-only` worked normally here. In step 2 it refused only because it wanted an interactive "yes" to a warning.
 - `pg_trgm` is a trusted extension in Postgres 18, so `migrator` (database owner, not superuser) can install it.
 - The trigger is `SECURITY INVOKER`: it runs as app_user, so its `change_log` row passes the same RLS check, and a rollback removes it with the product change (tested).
+
+## Step 5: Fastify specifics (passed)
+
+**Result:** all 7 groups of tests in `docs/spike.md` pass (23 tests, including config checks). The step 5 file passed 10 runs in a row; full suite 80 of 80, twice. The built app (`dist/main.js`) starts through the same `createApp()` and answers `/health` with security headers and one JSON log line.
+
+**Packages:** `@fastify/helmet` 13.2.0 and `@fastify/rate-limit` 11.2.1 (approved by Ian) both register on the Nest Fastify adapter with `app.register()` and work. **No package failed to work with the adapter.** `fastify` 5.12.7 was added as a direct dependency, pinned to the exact version Nest's adapter pins, only so our code can import its types and `LogController` (pnpm does not allow importing an indirect dependency). One copy is installed.
+
+**Patterns chosen:**
+
+1. **Client IP:** Fastify `trustProxy` set from `TRUST_PROXY` (addresses or CIDR ranges). Default empty: no proxy is trusted and `request.ip` is the socket address. Tested: a trusted proxy's `X-Forwarded-For` is used; a forged header from an untrusted address is ignored; a client cannot spoof through the trusted proxy by sending its own header (only the address the proxy saw counts). **Per environment:** empty locally and in tests; in production, the load balancer's private range once hosting is chosen.
+2. **Raw body:** Nest's `rawBody: true` option; `req.rawBody` is the exact bytes (tested with odd spacing, a newline and non-ASCII text, compared by SHA-256).
+3. **IP allowlist guard** (`src/common/security/ip-allowlist.guard.ts`): Node's built-in `net.BlockList`, `log` and `enforce` modes, IPv4-mapped IPv6 handled. Tested with RFC 5737 documentation ranges only.
+4. **Secret in path:** SHA-256 both sides, then `crypto.timingSafeEqual`. A wrong secret returns exactly the same 404 as a route that does not exist (tested by comparing the two responses). Secrets never reach the log because the log has the route pattern, not the URL (tested).
+5. **Errors:** one global filter for every error, including Fastify's unknown-route 404s, bad JSON (400) and rate-limit 429s. Invalid DTOs give 422 `VALIDATION_FAILED` naming the fields (never their values). Unexpected errors give 500 `INTERNAL_ERROR` with nothing internal in the response.
+6. **Logging:** Fastify's `LogController` (the non-deprecated way in Fastify 5.12) replaced the default two lines per request with one. pino redaction for secret field names, and phone numbers masked to the last 3 digits. Tested: pin and otp values never appear, even when a handler logs the whole body by mistake, on the validation-failure path and on the 500 path.
+7. **Helmet and rate limit:** security headers present on responses; a burst gets 429 in the standard shape with `Retry-After`, per client IP.
+
+**Proof the tests catch the mistakes they target** (each applied temporarily, then reverted):
+- `trustProxy: true` (trust everyone): 3 IP tests failed. A client could claim `192.0.2.50`, an address inside the test allowlist, which is exactly how an attacker would pass a webhook allowlist.
+- Redaction removed: the pin/otp test failed with the PIN visible in the log line.
+
+**Findings worth knowing:**
+1. Error messages are not safe to log: database driver messages can quote the values being written (a PIN, a phone number). 500s are logged with error name, code and stack frames only.
+2. The first app start on a cold machine took about 20 s once (most likely Windows Defender scanning freshly installed packages), which timed out the first test. Later starts take about 50 ms. The step 5 file warms up once in `beforeAll` (60 s limit); no assertion changed.
+3. Fastify 5.12 deprecates `disableRequestLogging` and `requestIdLogLabel` (removed in Fastify 6); `LogController` replaces them and is what we use.
+
+**Open risks from this step:**
+- Rate limits live in process memory: with several API instances, each counts separately, so a client gets N times the limit. A Postgres-backed store is the likely fix (Redis is ruled out).
+- Sentry is not added; 500s are only logged until its SDK is approved.
+- The real webhook allowlist ranges are still unconfirmed with Safaricom (`docs/architecture.md` section 8); start in `log` mode.
+- Crashed sync commands are still not logged (`TODO(step 5)` in `sync.service.ts`): there is no HTTP request around `processCommands` yet. It is resolved when the sync endpoint exists.

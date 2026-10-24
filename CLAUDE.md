@@ -16,7 +16,7 @@ The owner of the project is Ian, a developer who knows Next.js and TypeScript we
 
 The spike is a small proof that the risky parts of the design work before any feature is written. It is described in `docs/spike.md`. Until Ian writes "spike passed" in this file (section 2), do NOT build auth, sales, M-Pesa, notifications, sync endpoints, or any feature module. If a task seems to need one, stop and ask.
 
-Status: steps 0 to 4 done (see `docs/spike-results.md`). Step 5 (Fastify specifics) is next.
+Status: steps 0 to 5 done (see `docs/spike-results.md`). Next: the "Finishing the spike" write-up in `docs/spike.md`. Only Ian marks the spike as passed.
 
 ## 3. Fixed technology decisions
 
@@ -215,6 +215,11 @@ Notes:
   5. Every new table with `business_id` is checked by the RLS coverage test, so forgetting its RLS migration fails the build.
   6. Anything the app needs must be in a migration, not only in `docker/postgres/init/01-roles.sql`. `prisma migrate reset` (and a fresh hosted database) only gets what migrations contain. Only the roles and databases themselves live in the init script.
 - `change_log` is written only by the `product_change_log` trigger (SECURITY INVOKER, so it runs as app_user and passes RLS). Its `id` is a BIGSERIAL because it is the sync cursor.
+- HTTP setup (spike step 5): `createApp(rootModule, config)` in `src/create-app.ts` builds the app for both `main.ts` and the tests. Settings come from `loadConfig()` in `src/config/app.config.ts` (validated at startup; see `.env.example`). Test-only routes live in `test/spike/` and never ship.
+- `fastify` is a direct dependency only so code can import its types and `LogController`. It must stay pinned to exactly the version `@nestjs/platform-fastify` pins (5.12.7 now); check with `pnpm ls fastify` after upgrading Nest. Two copies would break the types.
+- Logging: Fastify's built-in pino, one line per request from `RequestLogController` (route pattern, never the URL, so path secrets stay out of logs). Sensitive field names are redacted and phone numbers masked by `src/common/logging/logger.options.ts`. 500s are logged with error name, code and stack frames but not the message (Prisma messages can contain the data being written).
+- Errors: `AllExceptionsFilter` gives every error, including Fastify's 404s, bad JSON and rate-limit 429s, the shape `{ error: { code, message, requestId, timestamp } }`. Throw `ApiError(status, code, message)` for an error we choose; its message is shown to users.
+- Proxies: with `TRUST_PROXY` empty, `X-Forwarded-For` is ignored. Never set `trustProxy: true` (trust everyone): a client could then claim any IP and pass an IP allowlist (shown by a mutation test in step 5).
 - When a test run is filtered for display, save the full log first (`pnpm test 2>&1 | Out-File ...`). A filtered run once hid the only copy of an error.
 - Machine memory: this PC has 8 GB RAM. With a 2 GB page file, Windows ran out of commit memory and Node, Prisma, tsc and the linter crashed at random (`0xC0000409`, exit 134). Fixed by a 6 GB page file (set by Ian) and `C:\Users\kyrex\.wslconfig` with `memory=2GB`. If random native crashes return, check: `Get-CimInstance Win32_OperatingSystem` FreeVirtualMemory.
 - Docker Desktop's engine crashed once on start (WSL exit `0xc00000fd`) and recovered on retry. If `docker` commands fail with a 500 error, wait and retry, or restart Docker Desktop.
