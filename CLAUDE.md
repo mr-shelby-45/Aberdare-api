@@ -16,7 +16,7 @@ The owner of the project is Ian, a developer who knows Next.js and TypeScript we
 
 The spike is a small proof that the risky parts of the design work before any feature is written. It is described in `docs/spike.md`. Until Ian writes "spike passed" in this file (section 2), do NOT build auth, sales, M-Pesa, notifications, sync endpoints, or any feature module. If a task seems to need one, stop and ask.
 
-Status: steps 0 to 3 done (see `docs/spike-results.md`). Step 4 (Prisma migrations with hand-written SQL) is next.
+Status: steps 0 to 4 done (see `docs/spike-results.md`). Step 5 (Fastify specifics) is next. Open from step 4: `prisma migrate reset` loses the schema grant for app_user (fix proposed, awaiting Ian).
 
 ## 3. Fixed technology decisions
 
@@ -172,8 +172,14 @@ Create migration:       pnpm exec prisma migrate dev --create-only --name <name>
 Apply migrations (dev): pnpm exec prisma migrate dev
 Hand-written migration: pnpm exec prisma migrate dev --create-only --name <name>   (with no schema change it is
                         empty; write the SQL into it, then apply). Keep RLS/grants/triggers in their own files.
-Reset local database:   docker compose down -v   then   docker compose up -d --wait
-                        (LOCAL DOCKER ONLY: deletes all local data and re-runs the role init script)
+Reset local database:   docker compose down -v   then   docker compose up -d --wait   then   pnpm exec prisma migrate deploy
+                        (LOCAL DOCKER ONLY: deletes all local data in aberdare AND aberdare_test, re-runs the
+                        role init script; tests rebuild aberdare_test themselves). This is the reset to use.
+Prisma reset (dev DB):  pnpm exec prisma migrate reset --force   (LOCAL ONLY. Prisma refuses when run by an AI agent
+                        unless Ian consents in that moment. Currently leaves app_user without access to the
+                        public schema: see the step 4 notes. Prefer the Docker reset.)
+Check for drift:        pnpm exec prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --exit-code
+Migration guard:        part of pnpm test (test/step4-migrations.spec.ts)
 ```
 
 Notes:
@@ -201,6 +207,13 @@ Notes:
 - Savepoints: `withSavepoint(fn)` in `src/database/tenant.ts`. Needed whenever a failure must be recorded in the same transaction: after a failed SQL statement Postgres aborts the transaction, and only `ROLLBACK TO SAVEPOINT` makes it usable again.
 - Postgres error codes from Prisma 7: read them with `src/database/db-errors.ts`. The SQLSTATE is at `meta.driverAdapterError.cause.originalCode` for raw queries (Prisma code P2010) and model calls (P2003 and others) alike.
 - Untrusted input is validated with `validateDto()` in `src/common/validation/validate-dto.ts` (class-validator: whitelist, forbid unknown properties, no type coercion).
+- **Workflow rule for hand-written SQL (spike step 4):**
+  1. Every RLS policy, grant, trigger, function, extension and special index lives in its own hand-written migration file, named after what it does.
+  2. Read every generated migration before applying it. The migration guard test fails on any `DROP POLICY`, `ALTER POLICY`, `DROP`/`DISABLE TRIGGER`, `DROP FUNCTION`, `DROP EXTENSION`, `DISABLE`/`NO FORCE ROW LEVEL SECURITY`, or `DROP INDEX` of a hand-written index, unless the file has a `-- allow-destructive: <reason>` line. Never add that line without Ian's approval.
+  3. An index Prisma can express (for example the GIN trigram index) must also be declared in `schema.prisma` with `map:` set to its real name, or Prisma generates a DROP for it in every migration. Add new hand-written index names to `HAND_WRITTEN_INDEXES` in `test/helpers/migration-guard.ts`.
+  4. Prisma ignores policies, triggers, functions, extensions and partial indexes; it does not try to drop them.
+  5. Every new table with `business_id` is checked by the RLS coverage test, so forgetting its RLS migration fails the build.
+- `change_log` is written only by the `product_change_log` trigger (SECURITY INVOKER, so it runs as app_user and passes RLS). Its `id` is a BIGSERIAL because it is the sync cursor.
 - When a test run is filtered for display, save the full log first (`pnpm test 2>&1 | Out-File ...`). A filtered run once hid the only copy of an error.
 - Machine memory: this PC has 8 GB RAM. With a 2 GB page file, Windows ran out of commit memory and Node, Prisma, tsc and the linter crashed at random (`0xC0000409`, exit 134). Fixed by a 6 GB page file (set by Ian) and `C:\Users\kyrex\.wslconfig` with `memory=2GB`. If random native crashes return, check: `Get-CimInstance Win32_OperatingSystem` FreeVirtualMemory.
 - Docker Desktop's engine crashed once on start (WSL exit `0xc00000fd`) and recovered on retry. If `docker` commands fail with a 500 error, wait and retry, or restart Docker Desktop.

@@ -109,3 +109,38 @@ Then permission check, payload validation (class-validator), the handler inside 
 - A command that crashes the server every time is retried forever. Counting attempts needs a separate transaction; not built in the spike.
 - A phone that reuses a command UUID with a different payload gets the original result back; the change is silently ignored. A payload hash column would catch it.
 - Crashed commands are not logged yet (`TODO(step 5)` in `sync.service.ts`); the project logger comes in step 5.
+
+## Step 4: Prisma migrations with hand-written SQL (passed, one open fix)
+
+**Result:** 12 new tests pass. Full suite 56 of 56 before the resets, and again 56 of 56 after deleting the Docker volume and rebuilding both databases from nothing (the test run built `aberdare_test` from an empty database).
+
+**Hand-written objects** (each in its own migration, approved by Ian): the RLS policies from steps 1 to 3 and a new one on `change_log`; the `product_change_log` trigger and `log_product_change()` function writing `change_log` rows; `pg_trgm` and the GIN trigram index `product_name_trgm_idx`; the partial unique index `pack_type_one_base_unit_per_product` (`WHERE units_per_pack = 1`).
+
+**1. What Prisma's diff did** (`prisma migrate diff`, and then the real `prisma migrate dev --create-only` for the ordinary change):
+
+| Hand-written object | Prisma's diff |
+|---|---|
+| RLS policies, `FORCE ROW LEVEL SECURITY` | ignored, never dropped |
+| Trigger and function | ignored |
+| `pg_trgm` extension | ignored |
+| Partial unique index | ignored |
+| **GIN trigram index** | **`DROP INDEX "product_name_trgm_idx";` in every migration, even with no schema change** |
+
+Prisma understands GIN indexes, so an undeclared one looks like something to remove. It cannot express a partial index, so it leaves that alone. Fix: declare the index in `schema.prisma` (`@@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "product_name_trgm_idx")`) while the hand-written migration still creates it. With that, the diff is empty, and adding `product.sku String?` generated exactly `ALTER TABLE "product" ADD COLUMN "sku" TEXT;`. Checked against the real dev database, not only a scratch copy.
+
+**2. After applying:** the catalog still has every policy (8 tables, all enabled and forced), the trigger, the function, the extension, and both indexes. Now automated in `test/step4-migrations.spec.ts`.
+
+**3. Resets of the local Docker database:**
+
+- `docker compose down -v`, then up, then migrate: everything comes back (roles from the init script, all objects from migrations) and the full suite passes. **This is the reset to use.**
+- `prisma migrate reset --force` (run with Ian's explicit consent; Prisma's CLI refuses when it detects an AI agent): all 12 migrations re-apply, RLS and table grants come back, **but the app cannot work afterwards.** Prisma drops and recreates the `public` schema, now owned by `migrator` with default privileges, so `app_user` loses `USAGE` on it (`relation "product" does not exist`). That grant lived only in the Docker init script. Safe failure (nothing visible), but total. Fix proposed: a hand-written migration with `REVOKE ALL ON SCHEMA public FROM PUBLIC; GRANT USAGE ON SCHEMA public TO app_user;`. Awaiting Ian's approval.
+- Difference in short: the Docker reset rebuilds the server (roles, databases, schema privileges) and then migrations; Prisma's reset only rebuilds what migrations contain. Anything outside migrations is lost by Prisma's reset. Nothing here was tested with Drizzle and no claim is made about it.
+
+**4. Commands:** in CLAUDE.md section 8 (create, hand-write, apply, drift check, both resets).
+
+**5. Workflow rule adopted:** in CLAUDE.md section 8 notes. In short: one hand-written file per custom object; read every generated migration; a guard test fails on any drop or weakening of policies, triggers, functions, extensions or hand-written indexes unless marked `-- allow-destructive:`; Prisma-expressible custom indexes are also declared in `schema.prisma`; an RLS coverage test fails if any table with `business_id` lacks forced RLS and the NULLIF policy.
+
+**Other findings:**
+- `prisma migrate dev --create-only` worked normally here. In step 2 it refused only because it wanted an interactive "yes" to a warning.
+- `pg_trgm` is a trusted extension in Postgres 18, so `migrator` (database owner, not superuser) can install it.
+- The trigger is `SECURITY INVOKER`: it runs as app_user, so its `change_log` row passes the same RLS check, and a rollback removes it with the product change (tested).
