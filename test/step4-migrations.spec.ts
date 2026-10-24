@@ -114,6 +114,18 @@ describe('step 4: migrations keep hand-written SQL', () => {
       expect(found.indexes[1].indexdef).toMatch(/USING gin \(name gin_trgm_ops\)/);
     });
 
+    it('migrations alone give app_user access to the public schema, and nobody else can create in it', async () => {
+      const privs = await asAppUser(async (c) =>
+        (
+          await c.query(`
+            SELECT has_schema_privilege('app_user', 'public', 'USAGE')  AS app_usage,
+                   has_schema_privilege('app_user', 'public', 'CREATE') AS app_create,
+                   has_schema_privilege('public', 'public', 'CREATE')   AS public_create`)
+        ).rows[0],
+      );
+      expect(privs).toEqual({ app_usage: true, app_create: false, public_create: false });
+    });
+
     it('the ordinary schema change (product.sku) is present', async () => {
       const cols = await asAppUser(async (c) =>
         (

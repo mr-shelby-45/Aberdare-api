@@ -110,9 +110,9 @@ Then permission check, payload validation (class-validator), the handler inside 
 - A phone that reuses a command UUID with a different payload gets the original result back; the change is silently ignored. A payload hash column would catch it.
 - Crashed commands are not logged yet (`TODO(step 5)` in `sync.service.ts`); the project logger comes in step 5.
 
-## Step 4: Prisma migrations with hand-written SQL (passed, one open fix)
+## Step 4: Prisma migrations with hand-written SQL (passed)
 
-**Result:** 12 new tests pass. Full suite 56 of 56 before the resets, and again 56 of 56 after deleting the Docker volume and rebuilding both databases from nothing (the test run built `aberdare_test` from an empty database).
+**Result:** 13 new tests pass. Full suite 56 of 56 before the resets, 56 of 56 after deleting the Docker volume and rebuilding both databases from nothing (the test run built `aberdare_test` from an empty database), and 57 of 57 (with the schema privileges test) against the dev database right after `prisma migrate reset`.
 
 **Hand-written objects** (each in its own migration, approved by Ian): the RLS policies from steps 1 to 3 and a new one on `change_log`; the `product_change_log` trigger and `log_product_change()` function writing `change_log` rows; `pg_trgm` and the GIN trigram index `product_name_trgm_idx`; the partial unique index `pack_type_one_base_unit_per_product` (`WHERE units_per_pack = 1`).
 
@@ -133,7 +133,7 @@ Prisma understands GIN indexes, so an undeclared one looks like something to rem
 **3. Resets of the local Docker database:**
 
 - `docker compose down -v`, then up, then migrate: everything comes back (roles from the init script, all objects from migrations) and the full suite passes. **This is the reset to use.**
-- `prisma migrate reset --force` (run with Ian's explicit consent; Prisma's CLI refuses when it detects an AI agent): all 12 migrations re-apply, RLS and table grants come back, **but the app cannot work afterwards.** Prisma drops and recreates the `public` schema, now owned by `migrator` with default privileges, so `app_user` loses `USAGE` on it (`relation "product" does not exist`). That grant lived only in the Docker init script. Safe failure (nothing visible), but total. Fix proposed: a hand-written migration with `REVOKE ALL ON SCHEMA public FROM PUBLIC; GRANT USAGE ON SCHEMA public TO app_user;`. Awaiting Ian's approval.
+- `prisma migrate reset --force` (run with Ian's explicit consent; Prisma's CLI refuses when it detects an AI agent): all 12 migrations re-apply, RLS and table grants come back, **but the app cannot work afterwards.** Prisma drops and recreates the `public` schema, now owned by `migrator` with default privileges, so `app_user` loses `USAGE` on it (`relation "product" does not exist`). That grant lived only in the Docker init script. Safe failure (nothing visible), but total. **Fixed** (approved by Ian) by the hand-written migration `*_step4_schema_privileges`: `REVOKE ALL ON SCHEMA public FROM PUBLIC; GRANT USAGE ON SCHEMA public TO app_user;`. Verified with a second `prisma migrate reset --force` (Ian consented again): the schema is now owned by migrator with `app_user=U`, app_user can query (0 rows with no tenant set) but still cannot create tables, and the full suite run against that freshly reset database passed 57 of 57. A test now checks the schema privileges after migrations.
 - Difference in short: the Docker reset rebuilds the server (roles, databases, schema privileges) and then migrations; Prisma's reset only rebuilds what migrations contain. Anything outside migrations is lost by Prisma's reset. Nothing here was tested with Drizzle and no claim is made about it.
 
 **4. Commands:** in CLAUDE.md section 8 (create, hand-write, apply, drift check, both resets).
