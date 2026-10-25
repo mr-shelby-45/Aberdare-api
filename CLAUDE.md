@@ -12,11 +12,30 @@ The owner of the project is Ian, a developer who knows Next.js and TypeScript we
 
 ## 2. Current phase
 
-**PHASE 0: THE SPIKE. Build nothing else.**
+**SPIKE: PASSED.** Confirmed by Ian on 2026-10-24 (80 of 80 tests passing, results in `docs/spike-results.md`). Only Ian edits this line. Claude Code must never change it.
 
-The spike is a small proof that the risky parts of the design work before any feature is written. It is described in `docs/spike.md`. Until Ian writes "spike passed" in this file (section 2), do NOT build auth, sales, M-Pesa, notifications, sync endpoints, or any feature module. If a task seems to need one, stop and ask.
+**PHASE A: IDENTITY. Design first, then build.**
 
-Status: all five steps done and written up in `docs/spike-results.md` (summary, versions, things to know, open risks). Waiting for Ian's review. Only Ian marks the spike as passed.
+The spike proved the risky foundations. Real features are now built in the order below, one phase at a time. Do not start a phase until Ian writes "Phase X approved" in the status line at the end of this section. Do not build features from a later phase, even if it seems convenient.
+
+| Phase | Contents |
+|---|---|
+| A. Identity | people, memberships, devices, SMS login codes, PIN login, tokens, shared tablets, per-request tenant interceptor, non-tenant access paths |
+| B. Catalogue | products, pack types, barcodes, search, locations |
+| C. Stock | receive, adjust, convert, count handlers and stock reads |
+| D. Sync | `/sync/commands`, `/sync/snapshot`, `/sync/changes` |
+| E. Sales and payments | `sale.create`, payment attach, void and approve, manual M-Pesa matching, then Daraja |
+| F. Worker | pg-boss, notifications, SMS and push integrations |
+| G. Business features | subscriptions, website orders slot, reports, audit log, error events |
+| H. Launch work | hosting, Linux container, load test, Sentry |
+
+Rules for every phase:
+- Before writing code, present the design for that phase (tables, endpoints, who can do what, what could go wrong) and wait for Ian's approval. Update `docs/architecture.md` when the design is approved.
+- Every phase keeps the rules in section 5 and the layer rules in section 4. The patterns proven in the spike (see `docs/spike-results.md`, "Final patterns") are the way to do these things. Do not invent new ones without asking.
+- Every phase ends with passing tests shown in the session and a commit.
+- Open risks listed in `docs/spike-results.md` are handled in the phase where they first matter. Do not ignore them, and do not fix them early without asking.
+
+Status: Phase A design not yet approved. Do not write Phase A code.
 
 ## 3. Fixed technology decisions
 
