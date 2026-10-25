@@ -13,6 +13,19 @@ const SECRET_FIELDS = [
   'shopKey',
   'secret',
   'authorization',
+  // Phase A credentials, in the field names the auth routes use.
+  'code',
+  'phone_code',
+  'email_code',
+  'temp_pin',
+  'new_pin',
+  'new_password',
+  'signup_token',
+  'setup_token',
+  'selection_token',
+  'access_token',
+  'refresh_token',
+  'device_secret',
 ];
 const PHONE_FIELDS = ['phone', 'phoneNumber', 'msisdn'];
 

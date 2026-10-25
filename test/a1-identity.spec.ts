@@ -41,6 +41,10 @@ const COLUMNS: Record<string, string[]> = {
     'outcome',
   ],
   identity_ensure_person: ['person_id', 'created'],
+  // Added in A2 (tested in test/a2-signup.spec.ts).
+  identity_create_otp_challenge: ['challenge_id', 'outcome'],
+  identity_verify_otp: ['challenge_id', 'outcome'],
+  identity_complete_owner_signup: ['person_id', 'outcome'],
 };
 
 interface World {
@@ -477,7 +481,7 @@ describe('A1: non-tenant access path and business RLS', () => {
             ORDER BY 1`)
         ).rows,
       );
-      expect(fns).toHaveLength(9);
+      expect(fns).toHaveLength(Object.keys(COLUMNS).length);
       for (const f of fns) {
         expect(f, f.proname).toEqual({
           proname: f.proname,
@@ -527,7 +531,7 @@ describe('A1: non-tenant access path and business RLS', () => {
           await c.query('BEGIN');
           try {
             await c.query("SELECT set_config('app.business_id', $1, true)", [tenant]);
-            await c.query("INSERT INTO business (id, name) VALUES ($1, 'New')", [id]);
+            await c.query("INSERT INTO business (id, name, type) VALUES ($1, 'New', 'RETAIL')", [id]);
             await c.query('COMMIT');
           } catch (err) {
             await c.query('ROLLBACK');
@@ -539,10 +543,18 @@ describe('A1: non-tenant access path and business RLS', () => {
       await expect(insertAs(w.bizA, randomUUID())).rejects.toThrow(/row-level security policy for table "business"/);
     });
 
-    it('app_user cannot insert a business yet (that grant comes with signup in A2)', async () => {
+    it('app_user (since A2 signup) may insert only its own tenant id, and only id, name and type', async () => {
       const id = randomUUID();
+      const ok = await appUserQuery(id, "INSERT INTO business (id, name, type) VALUES ($1, 'New', 'RETAIL')", [id]);
+      expect(ok.rows).toEqual([]);
       await expect(
-        appUserQuery(id, "INSERT INTO business (id, name) VALUES ($1, 'New')", [id]),
+        appUserQuery(w.bizA, "INSERT INTO business (id, name, type) VALUES ($1, 'New', 'RETAIL')", [randomUUID()]),
+      ).rejects.toThrow(/row-level security policy for table "business"/);
+      await expect(
+        appUserQuery(id, "INSERT INTO business (id, name, type, created_at) VALUES ($1, 'New', 'RETAIL', now())", [id]),
+      ).rejects.toThrow(/permission denied for table business/);
+      await expect(
+        appUserQuery(w.bizA, "UPDATE business SET name = 'renamed'"),
       ).rejects.toThrow(/permission denied for table business/);
     });
   });

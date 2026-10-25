@@ -57,7 +57,7 @@ export async function asAppUser<T>(
 export async function resetTables(): Promise<void> {
   await asMigrator((c) =>
     c.query(
-      `TRUNCATE refresh_token, device_membership, device, membership, person,
+      `TRUNCATE otp_challenge, refresh_token, device_membership, device, membership, person,
                 change_log, sync_command, stock_conversion, stock_movement,
                 stock_balance, pack_type, location, product, business CASCADE`,
     ),
@@ -74,7 +74,7 @@ export async function createBusiness(name: string): Promise<string> {
   await asMigrator(async (c) => {
     await c.query('BEGIN');
     await c.query("SELECT set_config('app.business_id', $1, true)", [id]);
-    await c.query('INSERT INTO business (id, name) VALUES ($1, $2)', [id, name]);
+    await c.query("INSERT INTO business (id, name, type) VALUES ($1, $2, 'RETAIL')", [id, name]);
     await c.query('COMMIT');
   });
   return id;

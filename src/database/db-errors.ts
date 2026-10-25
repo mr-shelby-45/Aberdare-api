@@ -11,6 +11,11 @@ function postgresErrorCode(err: unknown): string | undefined {
   return typeof code === 'string' ? code : undefined;
 }
 
+/** True when an insert or update hit a unique constraint. */
+export function isUniqueViolation(err: unknown): boolean {
+  return postgresErrorCode(err) === '23505';
+}
+
 /** True when a row referenced something that does not exist for this business. */
 export function isForeignKeyViolation(err: unknown): boolean {
   return postgresErrorCode(err) === '23503';

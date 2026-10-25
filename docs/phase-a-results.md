@@ -40,3 +40,31 @@ Filled in step by step. The full summary (see `docs/phase-a-design.md` section 2
 - Strict refresh rule (A3): the loser of a concurrent refresh sees `ALREADY_USED`, and the strict rule revokes the whole family, including the winner's new token. Kept as Ian decided; the client falls back to PIN login.
 - Further person writes need their own narrow functions: signup (A2, requires consumed codes), password reset (A2/A3), marking the phone verified at staff activation (A4).
 - `membership.extra_permissions` is nullable (Prisma lists cannot be required); services treat NULL as an empty list.
+
+## A2: Codes and signup (passed)
+
+**Result:** 24 new tests pass, covering design section 19 A2 tests 1 to 9 plus an end-to-end signup and the password rule. Full suite 136 of 136, twice. The built app starts and answers `POST /v1/auth/signup/start` with `202 {"status":"CODES_SENT"}`.
+
+**Built (choices approved by Ian on 2026-10-25):**
+- `otp_challenge` (no RLS, no app_user privileges; normalised-target check), `business.type`, and `app_user` INSERT on `business (id, name, type)`.
+- Identity functions `identity_create_otp_challenge` (send limits per target across purposes, under a per-target advisory lock), `identity_verify_otp` (one atomic statement; compares the two pepper-keyed HMACs inside the database) and `identity_complete_owner_signup` (requires both verified, unconsumed, recent codes for exactly this phone and email; checks for an existing account before writing; consumes the codes; creates or completes the person). Grants written before the ownership hand-over, as learned in A1.
+- `Clock`, `PasswordHasher` (scrypt N=2^15, r=8, p=3, pepper first; **about 430 ms per hash on the dev machine**, above the design's 50 to 150 ms target, accepted by Ian as OWASP's minimum), `CodeHasher`, random codes and secrets, Kenyan phone normalisation, fake SMS and email senders.
+- `SignupService` with `ChallengeService`, `PurposeTokenService` (signup token, `aud: signup`), `TokenService` (access token, `aud: access`, 15 minutes, ids only; refresh token stored as SHA-256), and the business, staff and devices services. `@nestjs/jwt` 12.0.3 installed.
+- Routes `POST /v1/auth/signup/start`, `/signup/verify`, `/signup`, each with a per-IP limit (`AUTH_RATE_LIMIT_MAX`, default 10 per minute).
+
+**Proof the tests catch mistakes:**
+- Design mutation 3: `identity_verify_otp` replaced on the test database by a copy without the `consumed_at IS NULL` check. "A code cannot be used again after signup" failed (`expected 200 to be 400`: an already-used code verified again). The saved original was restored and confirmed identical.
+- Real bug, caught by test 7: the service checked "no person id means invalid token" before "account exists", and the signup writer returns `ACCOUNT_EXISTS` without a person id. An existing owner signing up again was told "please start again" (401) instead of `ACCOUNT_EXISTS` (409). Fixed by checking `ACCOUNT_EXISTS` first.
+- Two failures were bugs in the tests themselves, fixed in the tests: a code looked up under the raw phone instead of the normalised one, and a forged token dated by the real clock while the app runs on the test clock.
+
+**Things to know:**
+1. With `TRUNCATE`-free migrations, adding a required column to a table with rows fails; local test rows were cleared first (Ian approved). Production had none.
+2. Replacing a function needs CREATE on the schema; `identity_owner` does not keep it, so mutations and fixes grant it temporarily and revoke it in the same step.
+3. `main.ts` now loads `.env`; without it the built app refused to start once the secrets became required (found by starting the real app; the tests pass their own settings).
+4. Codes are hashed together with their channel, target and purpose, so a code for one phone or purpose is useless for another.
+5. If one of the two signup codes hits a send limit, the other may still be sent; the response is `OTP_RATE_LIMITED` either way.
+
+**Open for later steps:**
+- Signup is not in the audit log yet (A5).
+- Password reset and staff activation need their own narrow person-writing functions (A3/A4).
+- The libuv thread pool runs four scrypt hashes at a time; a burst of logins queues. Measure under load before launch (Phase H).

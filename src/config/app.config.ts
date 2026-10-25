@@ -1,8 +1,11 @@
 import {
+  IsBoolean,
   IsIn,
   IsInt,
+  IsString,
   Max,
   Min,
+  MinLength,
   ValidateBy,
   validateSync,
 } from 'class-validator';
@@ -10,6 +13,7 @@ import { isAddressOrRange } from '../common/security/address-list.js';
 
 const LOG_LEVELS = ['fatal', 'error', 'warn', 'info', 'debug', 'trace'] as const;
 const ALLOWLIST_MODES = ['log', 'enforce'] as const;
+const APP_ENVS = ['development', 'test', 'production'] as const;
 
 const IsAddressOrRangeEach = () =>
   ValidateBy(
@@ -27,10 +31,36 @@ const IsAddressOrRangeEach = () =>
 // stops the app from starting (CLAUDE.md section 3). Only DATABASE_URL style
 // variables and these; no provider-specific settings.
 export class AppConfig {
+  @IsIn(APP_ENVS)
+  appEnv!: (typeof APP_ENVS)[number];
+
   @IsInt()
   @Min(1)
   @Max(65535)
   port!: number;
+
+  // Server-side secret mixed into every password, PIN and code hash.
+  // Required, at least 32 characters (docs/phase-a-design.md section 7).
+  @IsString()
+  @MinLength(32)
+  authPepper!: string;
+
+  // Signs access, signup and other purpose tokens. Required, at least 32 characters.
+  @IsString()
+  @MinLength(32)
+  jwtSecret!: string;
+
+  // Development only: every code is 123456 for targets on the allowlist.
+  // The app refuses to start in production with this on.
+  @IsBoolean()
+  authDevFixedCodes!: boolean;
+
+  authDevCodeAllowlist!: string[];
+
+  // Per-IP limit on each public auth route, per minute.
+  @IsInt()
+  @Min(1)
+  authRateLimitMax!: number;
 
   @IsIn(LOG_LEVELS)
   logLevel!: (typeof LOG_LEVELS)[number];
@@ -61,7 +91,13 @@ export class AppConfig {
 /** Reads and validates the configuration. Throws, listing the bad settings, if invalid. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const config = Object.assign(new AppConfig(), {
+    appEnv: env.APP_ENV ?? 'development',
     port: toInt(env.PORT, 3000),
+    authPepper: env.AUTH_PEPPER,
+    jwtSecret: env.JWT_SECRET,
+    authDevFixedCodes: toBool(env.AUTH_DEV_FIXED_CODES),
+    authDevCodeAllowlist: toList(env.AUTH_DEV_CODE_ALLOWLIST).map((t) => t.toLowerCase()),
+    authRateLimitMax: toInt(env.AUTH_RATE_LIMIT_MAX, 10),
     logLevel: env.LOG_LEVEL ?? 'info',
     trustProxy: toList(env.TRUST_PROXY),
     webhookAllowlist: toList(env.WEBHOOK_IP_ALLOWLIST),
@@ -75,7 +111,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     const names = errors.map((e) => e.property).join(', ');
     throw new Error(`Invalid configuration: ${names}`);
   }
+  if (config.appEnv === 'production' && config.authDevFixedCodes) {
+    throw new Error('Invalid configuration: authDevFixedCodes must be off in production');
+  }
   return config;
+}
+
+// "true" and "false" only; anything else fails @IsBoolean.
+function toBool(value: string | undefined): boolean | string {
+  if (value === undefined || value.trim() === '') return false;
+  const v = value.trim().toLowerCase();
+  return v === 'true' ? true : v === 'false' ? false : value;
 }
 
 // "abc" or "1.5" become NaN, which fails @IsInt (no silent fallback).

@@ -1,13 +1,26 @@
 import type { NestFastifyApplication } from '@nestjs/platform-fastify';
+import { Test } from '@nestjs/testing';
 import { Writable } from 'node:stream';
+import { Clock } from '../../src/common/time/clock.js';
 import { loadConfig } from '../../src/config/app.config.js';
-import { createApp } from '../../src/create-app.js';
+import { configureApp, createAdapter, withCore } from '../../src/create-app.js';
 import { SpikeModule } from '../spike/spike.module.js';
+import { FakeClock } from './clock.js';
 
 export type LogLine = Record<string, unknown> & { msg?: string; requestId?: string };
 
+// Fixed test secrets (at least 32 characters, as the config requires).
+export const TEST_ENV: Record<string, string> = {
+  AUTH_PEPPER: 'test-pepper-0123456789abcdefghijklmnopqrstuv',
+  JWT_SECRET: 'test-jwt-secret-0123456789abcdefghijklmnopq',
+  APP_ENV: 'test',
+  RATE_LIMIT_MAX: '1000',
+  AUTH_RATE_LIMIT_MAX: '1000',
+};
+
 export interface TestApp {
   app: NestFastifyApplication;
+  clock: FakeClock;
   /** Every log line written so far, parsed. */
   logs: LogLine[];
   /** The raw text of every log line, for "this value never appears" checks. */
@@ -15,8 +28,9 @@ export interface TestApp {
 }
 
 /**
- * The real app (createApp) with the spike routes, configured from the given
- * environment values, with its log lines captured.
+ * The real app, built from the same pieces as createApp() (withCore,
+ * createAdapter, configureApp) plus the spike routes, with a fake clock and
+ * its log lines captured. env values override TEST_ENV.
  */
 export async function startTestApp(env: Record<string, string> = {}): Promise<TestApp> {
   const chunks: string[] = [];
@@ -26,10 +40,20 @@ export async function startTestApp(env: Record<string, string> = {}): Promise<Te
       done();
     },
   });
-  const config = loadConfig({ RATE_LIMIT_MAX: '1000', ...env });
-  const app = await createApp(SpikeModule, config, { logStream: sink, nestLogs: false });
+  const config = loadConfig({ ...TEST_ENV, ...env });
+  const clock = new FakeClock();
+  const moduleRef = await Test.createTestingModule({ imports: [withCore(SpikeModule, config)] })
+    .overrideProvider(Clock)
+    .useValue(clock)
+    .compile();
+  const app = moduleRef.createNestApplication<NestFastifyApplication>(
+    createAdapter(config, { logStream: sink }),
+    { rawBody: true, logger: false },
+  );
+  await configureApp(app, config);
   return {
     app,
+    clock,
     get logs() {
       return chunks
         .join('')

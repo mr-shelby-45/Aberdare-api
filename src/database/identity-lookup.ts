@@ -68,6 +68,20 @@ export interface RefreshClaim {
   outcome: RefreshClaimOutcome;
 }
 
+export type OtpChannel = 'SMS' | 'EMAIL';
+export type OtpPurpose = 'SIGNUP' | 'STAFF_ACTIVATE' | 'PASSWORD_RESET';
+export type CreateChallengeOutcome = 'CREATED' | 'TOO_SOON' | 'HOURLY_LIMIT' | 'DAILY_LIMIT';
+export type VerifyOtpOutcome = 'VERIFIED' | 'INVALID' | 'EXPIRED' | 'TOO_MANY_ATTEMPTS' | 'NO_CHALLENGE';
+export type OwnerSignupOutcome = 'CREATED' | 'UPGRADED' | 'ACCOUNT_EXISTS' | 'PROOF_INVALID';
+
+export interface ChallengeLimits {
+  now: Date;
+  ttlSeconds: number;
+  minGapSeconds: number;
+  maxPerHour: number;
+  maxPerDay: number;
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 @Injectable()
@@ -212,6 +226,59 @@ export class IdentityLookup {
           outcome: r.outcome,
         }
       : null;
+  }
+
+  /** Stores a new code (hash only) unless a send limit for the target is hit. */
+  async createOtpChallenge(
+    challenge: { channel: OtpChannel; target: string; purpose: OtpPurpose; codeHash: string },
+    limits: ChallengeLimits,
+  ): Promise<{ challengeId: string | null; outcome: CreateChallengeOutcome }> {
+    const rows = await this.client().$queryRaw<{ challenge_id: string | null; outcome: CreateChallengeOutcome }[]>`
+      SELECT * FROM identity_create_otp_challenge(
+        ${challenge.channel}::otp_channel, ${challenge.target}, ${challenge.purpose}::otp_purpose,
+        ${challenge.codeHash}, ${limits.now}::timestamptz,
+        make_interval(secs => ${limits.ttlSeconds}::int),
+        make_interval(secs => ${limits.minGapSeconds}::int),
+        ${limits.maxPerHour}::int, ${limits.maxPerDay}::int)`;
+    return { challengeId: rows[0].challenge_id, outcome: rows[0].outcome };
+  }
+
+  /** One atomic attempt on the latest unconsumed code for the target and purpose. */
+  async verifyOtp(
+    challenge: { channel: OtpChannel; target: string; purpose: OtpPurpose; codeHash: string },
+    limits: { now: Date; maxAttempts: number },
+  ): Promise<{ challengeId: string | null; outcome: VerifyOtpOutcome }> {
+    const rows = await this.client().$queryRaw<{ challenge_id: string; outcome: VerifyOtpOutcome }[]>`
+      SELECT * FROM identity_verify_otp(
+        ${challenge.channel}::otp_channel, ${challenge.target}, ${challenge.purpose}::otp_purpose,
+        ${challenge.codeHash}, ${limits.now}::timestamptz, ${limits.maxAttempts}::int)`;
+    const r = rows[0];
+    return r ? { challengeId: r.challenge_id, outcome: r.outcome } : { challengeId: null, outcome: 'NO_CHALLENGE' };
+  }
+
+  /**
+   * The signup writer. Consumes both proven codes and creates or completes the
+   * person, or writes nothing (PROOF_INVALID, ACCOUNT_EXISTS).
+   */
+  async completeOwnerSignup(
+    signup: {
+      phone: string;
+      email: string;
+      passwordHash: string;
+      phoneChallengeId: string;
+      emailChallengeId: string;
+    },
+    limits: { now: Date; proofMaxAgeSeconds: number },
+  ): Promise<{ personId: string | null; outcome: OwnerSignupOutcome }> {
+    if (!UUID.test(signup.phoneChallengeId) || !UUID.test(signup.emailChallengeId)) {
+      return { personId: null, outcome: 'PROOF_INVALID' };
+    }
+    const rows = await this.client().$queryRaw<{ person_id: string | null; outcome: OwnerSignupOutcome }[]>`
+      SELECT * FROM identity_complete_owner_signup(
+        ${signup.phone}, ${signup.email}, ${signup.passwordHash},
+        ${signup.phoneChallengeId}::uuid, ${signup.emailChallengeId}::uuid,
+        ${limits.now}::timestamptz, make_interval(secs => ${limits.proofMaxAgeSeconds}::int))`;
+    return { personId: rows[0].person_id, outcome: rows[0].outcome };
   }
 
   /** Creates the person for an E.164 phone if missing. Never changes an existing person. */

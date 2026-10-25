@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { loadConfig } from '../src/config/app.config.js';
 import { secretMatches } from '../src/common/security/path-secret.js';
-import { type TestApp, startTestApp } from './helpers/app.js';
+import { TEST_ENV, type TestApp, startTestApp } from './helpers/app.js';
 import { TEST_WEBHOOK_SECRET } from './spike/webhook-test.controller.js';
 
 // Spike step 5: Fastify specifics (docs/spike.md). Numbered tests match the
@@ -315,17 +315,23 @@ describe('step 5: Fastify specifics', () => {
 
   describe('configuration is checked at startup', () => {
     it('defaults are valid and trust no proxy', () => {
-      expect(loadConfig({})).toMatchObject({
+      // Only the two required secrets (Phase A2) are given.
+      expect(loadConfig({ AUTH_PEPPER: TEST_ENV.AUTH_PEPPER, JWT_SECRET: TEST_ENV.JWT_SECRET })).toMatchObject({
+        appEnv: 'development',
         port: 3000,
         trustProxy: [],
         webhookAllowlist: [],
         webhookAllowlistMode: 'log',
+        authDevFixedCodes: false,
+        authRateLimitMax: 10,
       });
     });
 
     it('bad values stop the app from starting, naming the settings', () => {
       expect(() =>
         loadConfig({
+          AUTH_PEPPER: TEST_ENV.AUTH_PEPPER,
+          JWT_SECRET: TEST_ENV.JWT_SECRET,
           PORT: 'abc',
           TRUST_PROXY: '10.0.0.0/8, not-an-address',
           WEBHOOK_IP_ALLOWLIST: '192.0.2.0/99',

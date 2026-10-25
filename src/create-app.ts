@@ -2,6 +2,7 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import {
   ConsoleLogger,
+  Module,
   type Type,
   ValidationPipe,
   type ValidationError,
@@ -13,6 +14,7 @@ import {
 } from '@nestjs/platform-fastify';
 import { randomBytes } from 'node:crypto';
 import type { Writable } from 'node:stream';
+import { CoreModule } from './common/core.module.js';
 import { ApiError } from './common/errors/api.error.js';
 import { AllExceptionsFilter } from './common/errors/all-exceptions.filter.js';
 import { loggerOptions } from './common/logging/logger.options.js';
@@ -26,18 +28,16 @@ export interface CreateAppOptions {
   nestLogs?: boolean;
 }
 
-/**
- * Builds the HTTP app exactly as production runs it: Fastify with proxy
- * trust, server-generated request IDs, one JSON log line per request, the
- * error shape filter, validation, helmet, rate limiting and raw bodies.
- * Used by main.ts and by the tests, so tests exercise the real setup.
- */
-export async function createApp(
-  rootModule: Type<unknown>,
-  config: AppConfig,
-  options: CreateAppOptions = {},
-): Promise<NestFastifyApplication> {
-  const adapter = new FastifyAdapter({
+/** The root module plus CoreModule (config, clock, hashers), available everywhere. */
+export function withCore(rootModule: Type<unknown>, config: AppConfig): Type<unknown> {
+  @Module({ imports: [CoreModule.forRoot(config), rootModule] })
+  class AppRoot {}
+  return AppRoot;
+}
+
+/** Fastify with proxy trust, server-generated request IDs and one JSON log line per request. */
+export function createAdapter(config: AppConfig, options: CreateAppOptions = {}): FastifyAdapter {
+  return new FastifyAdapter({
     // Empty list = trust no proxy: request.ip is the socket address.
     trustProxy: config.trustProxy.length > 0 ? config.trustProxy : false,
     // Never taken from an incoming header.
@@ -46,21 +46,16 @@ export async function createApp(
     logger: loggerOptions(config.logLevel, options.logStream),
     logController: new RequestLogController(),
   });
+}
 
-  const app = await NestFactory.create<NestFastifyApplication>(
-    rootModule,
-    adapter,
-    {
-      // Exact request bytes on req.rawBody, for webhook verification.
-      rawBody: true,
-      logger: options.nestLogs === false ? false : new ConsoleLogger({ json: true }),
-    },
-  );
-
+/** Security headers, rate limits, the error shape and validation; then starts the app. */
+export async function configureApp(app: NestFastifyApplication, config: AppConfig): Promise<void> {
   const fastify = app.getHttpAdapter().getInstance();
   fastify.addHook('onRequest', async (request, reply) => {
     void reply.header('x-request-id', request.id);
   });
+  // Read by AUTH_ROUTE_RATE_LIMIT on each public auth route.
+  fastify.decorate('authRateLimitMax', config.authRateLimitMax);
 
   await app.register(helmet);
   await app.register(rateLimit, {
@@ -87,5 +82,26 @@ export async function createApp(
 
   await app.init();
   await fastify.ready();
+}
+
+/**
+ * Builds the HTTP app exactly as production runs it. Used by main.ts; tests
+ * build the same app from the same pieces (test/helpers/app.ts).
+ */
+export async function createApp(
+  rootModule: Type<unknown>,
+  config: AppConfig,
+  options: CreateAppOptions = {},
+): Promise<NestFastifyApplication> {
+  const app = await NestFactory.create<NestFastifyApplication>(
+    withCore(rootModule, config),
+    createAdapter(config, options),
+    {
+      // Exact request bytes on req.rawBody, for webhook verification.
+      rawBody: true,
+      logger: options.nestLogs === false ? false : new ConsoleLogger({ json: true }),
+    },
+  );
+  await configureApp(app, config);
   return app;
 }

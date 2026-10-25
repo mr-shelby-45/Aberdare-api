@@ -14,6 +14,7 @@ datasource db {
 model Business {
   id                String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   name              String
+  type              BusinessType
   createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime           @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   products          Product[]
@@ -337,4 +338,49 @@ model RefreshToken {
 
   @@index([businessId, familyId])
   @@map("refresh_token")
+}
+
+enum BusinessType {
+  RETAIL
+  WHOLESALE
+  WAREHOUSE
+
+  @@map("business_type")
+}
+
+enum OtpChannel {
+  SMS
+  EMAIL
+
+  @@map("otp_channel")
+}
+
+enum OtpPurpose {
+  SIGNUP
+  STAFF_ACTIVATE
+  PASSWORD_RESET
+
+  @@map("otp_purpose")
+}
+
+// SMS and email codes (docs/phase-a-design.md section 4). Not tenant-owned and
+// holds nothing tenant-related. app_user has no privileges on it: it is reached
+// only through the identity functions, like person.
+model OtpChallenge {
+  id         String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  channel    OtpChannel
+  // E.164 phone for SMS, lowercase email for EMAIL.
+  target     String
+  purpose    OtpPurpose
+  // HMAC-SHA256 of the code with the server pepper. Never the code itself.
+  codeHash   String     @map("code_hash")
+  expiresAt  DateTime   @map("expires_at") @db.Timestamptz(6)
+  attempts   Int        @default(0)
+  verifiedAt DateTime?  @map("verified_at") @db.Timestamptz(6)
+  consumedAt DateTime?  @map("consumed_at") @db.Timestamptz(6)
+  createdAt  DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // Send limits and "latest live challenge" lookups.
+  @@index([target, purpose, createdAt])
+  @@map("otp_challenge")
 }
