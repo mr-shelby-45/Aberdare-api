@@ -347,6 +347,8 @@ As built in the spike (columns approved by Ian per step):
 
 As designed for Phase B (`docs/phase-b-design.md` section 3): `location` gains `is_default` (partial unique index, one default per business) and `archived_at`; `product` gains `archived_at` and a btree index on `(business_id, name, id)` for paging; `pack_type` gains `sell_price`, `cost_price`, `archived_at` and the uniques above; `product_barcode` is new; `change_log` triggers are extended to `pack_type`, `product_barcode` (including deletes) and `location`. Products, pack types and locations are archived, never deleted. Grants: `location` SELECT, INSERT, UPDATE; `product_barcode` SELECT, INSERT, DELETE.
 
+As built in B1 (decided with Ian): `app_user` lost DELETE on `product` too (spike step 1 had granted it), so no catalogue row except a barcode can be deleted through the API. `change_log` gained `row_key text`: the barcode trigger stores the barcode text there on insert, update and delete, because phones know their barcodes by code (`barcode.add` sends no id) and a deleted row cannot be looked up afterwards. Other tables leave it NULL. `pack_type` and `location` reuse the generic `log_product_change()` trigger function; `product_barcode` has its own (`log_product_barcode_change()`). The unique `(business_id, product_id, units_per_pack)` also blocks a second base unit, so the older partial index `pack_type_one_base_unit_per_product` is now a second guard for the same rule.
+
 ## 13. API endpoints
 
 All under `/v1`, JSON, access token required unless stated.

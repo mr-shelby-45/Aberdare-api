@@ -11,10 +11,11 @@ export class SyncRepository {
    * duplicate waits here on the unique index until the first transaction
    * commits (then false) or rolls back (then true).
    */
-  async claim(commandId: string, type: string): Promise<boolean> {
+  async claim(commandId: string, type: string, occurredAt: Date, receivedAt: Date): Promise<boolean> {
     const rows = await currentTx().$queryRaw<{ id: string }[]>`
-      INSERT INTO sync_command (business_id, command_id, type, status)
-      VALUES (${currentBusinessId()}::uuid, ${commandId}::uuid, ${type}, 'PROCESSING')
+      INSERT INTO sync_command (business_id, command_id, type, status, occurred_at, received_at)
+      VALUES (${currentBusinessId()}::uuid, ${commandId}::uuid, ${type}, 'PROCESSING',
+              ${occurredAt}::timestamptz, ${receivedAt}::timestamptz)
       ON CONFLICT (business_id, command_id) DO NOTHING
       RETURNING id`;
     return rows.length === 1;

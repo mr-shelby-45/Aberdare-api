@@ -31,6 +31,7 @@ export async function seedShop(
         productId: product.id,
         name: 'piece',
         unitsPerPack: 1,
+        sellPrice: '50.00',
       },
     });
     const carton = await tx.packType.create({
@@ -39,6 +40,7 @@ export async function seedShop(
         productId: product.id,
         name: 'carton of 24',
         unitsPerPack: 24,
+        sellPrice: '1100.00',
       },
     });
     return { biz, loc: loc.id, piece: piece.id, carton: carton.id };

@@ -80,13 +80,16 @@ describe('step 1: tenant isolation (RLS) through Prisma', () => {
     expect(b.map((p) => p.name)).toEqual(['B cooking oil', 'B rice', 'B salt']);
   });
 
-  it("3. inside A, updating or deleting B's rows affects zero rows", async () => {
+  it("3. inside A, updating B's rows affects zero rows, and deleting products is refused outright", async () => {
     const renamed = await tenants.run(bizA, () =>
       repo.rename(productB1, 'hacked'),
     );
-    const deleted = await tenants.run(bizA, () => repo.remove(productB1));
     expect(renamed).toBe(0);
-    expect(deleted).toBe(0);
+    // Since Phase B1 app_user has no DELETE on product (products are archived).
+    // The cross-business delete check moved to product_barcode (test/b1-catalogue.spec.ts).
+    await expect(
+      tenants.run(bizA, () => currentTx().product.deleteMany({ where: { id: productB1 } })),
+    ).rejects.toThrow(/permission denied for table product/);
 
     // Unscoped bulk writes also only reach A's own rows.
     const bulk = await tenants.run(bizA, () =>

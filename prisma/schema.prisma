@@ -30,6 +30,7 @@ model Business {
   deviceMemberships DeviceMembership[]
   refreshTokens     RefreshToken[]
   auditLogs         AuditLog[]
+  productBarcodes   ProductBarcode[]
 
   @@map("business")
 }
@@ -39,15 +40,22 @@ model Product {
   id         String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   businessId String     @map("business_id") @db.Uuid
   name       String
-  // Step 4 ordinary change: optional stock-keeping code.
+  // Step 4 ordinary change: optional stock-keeping code. Unique per business
+  // when present (Postgres treats NULLs as distinct).
   sku        String?
+  // Phase B: archived, never deleted. NULL means active.
+  archivedAt DateTime?  @map("archived_at") @db.Timestamptz(6)
   createdAt  DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt  DateTime   @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   business   Business   @relation(fields: [businessId], references: [id])
   packTypes  PackType[]
+  barcodes   ProductBarcode[]
 
   // Target for composite foreign keys, so references cannot cross businesses.
   @@unique([businessId, id])
+  @@unique([businessId, sku])
+  // Keyset paging on (name, id) for GET /v1/products (Phase B).
+  @@index([businessId, name, id])
   // Created by the hand-written migration *_step4_product_name_trigram. Declared
   // here only so Prisma knows it exists and does not generate a DROP for it.
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "product_name_trgm_idx")
@@ -60,6 +68,11 @@ model Location {
   id         String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   businessId String         @map("business_id") @db.Uuid
   name       String
+  // Phase B: one default per business ("Main shop", created at signup),
+  // enforced by the hand-written partial unique index
+  // location_one_default_per_business.
+  isDefault  Boolean        @default(false) @map("is_default")
+  archivedAt DateTime?      @map("archived_at") @db.Timestamptz(6)
   createdAt  DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt  DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   business   Business       @relation(fields: [businessId], references: [id])
@@ -79,14 +92,25 @@ model PackType {
   name         String
   // Pieces in one of this pack. 1 for a piece, 24 for a carton of 24.
   unitsPerPack Int             @map("units_per_pack")
+  // Phase B: KES, NUMERIC(14,2), never negative (checks in *_b1_catalogue_checks).
+  sellPrice    Decimal         @map("sell_price") @db.Decimal(14, 2)
+  // Read and written only with costs.view.
+  costPrice    Decimal?        @map("cost_price") @db.Decimal(14, 2)
+  archivedAt   DateTime?       @map("archived_at") @db.Timestamptz(6)
   createdAt    DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime        @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   business     Business        @relation(fields: [businessId], references: [id])
   product      Product         @relation(fields: [businessId, productId], references: [businessId, id])
   balances     StockBalance[]
   movements    StockMovement[]
+  barcodes     ProductBarcode[]
 
   @@unique([businessId, id])
+  // Target of product_barcode's key, so a barcode cannot point at another
+  // product's pack type.
+  @@unique([businessId, productId, id])
+  @@unique([businessId, productId, unitsPerPack])
+  @@unique([businessId, productId, name])
   @@index([businessId, productId])
   @@map("pack_type")
 }
@@ -169,6 +193,10 @@ model SyncCommand {
   status     SyncCommandStatus
   // What every caller gets back for this command. NULL only while PROCESSING.
   result     Json?
+  // Phase B: when the phone says it happened, and when the server got it
+  // (from the Clock). Cannot be backfilled, so stored from the start.
+  occurredAt DateTime          @map("occurred_at") @db.Timestamptz(6)
+  receivedAt DateTime          @map("received_at") @db.Timestamptz(6)
   createdAt  DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
   business   Business          @relation(fields: [businessId], references: [id])
 
@@ -186,11 +214,39 @@ model ChangeLog {
   rowId      String   @map("row_id") @db.Uuid
   // INSERT, UPDATE or DELETE (the trigger's TG_OP).
   operation  String
+  // Phase B: the row's natural key where phones identify rows by it rather
+  // than by id. Only product_barcode sets it (the barcode text), so a phone
+  // can remove a barcode it only knows by its code. NULL for other tables.
+  rowKey     String?  @map("row_key")
   changedAt  DateTime @default(now()) @map("changed_at") @db.Timestamptz(6)
   business   Business @relation(fields: [businessId], references: [id])
 
   @@index([businessId, id])
   @@map("change_log")
+}
+
+// Phase B: barcode (text, never a number) to one product and pack type,
+// unique per business (docs/phase-b-design.md section 3). The only catalogue
+// table where rows are deleted (barcode.remove); the change_log trigger
+// records the delete. Inserted and deleted, never updated, so no updated_at.
+model ProductBarcode {
+  id                    String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId            String     @map("business_id") @db.Uuid
+  // Normalised before storing; format checked by product_barcode_format.
+  barcode               String
+  productId             String     @map("product_id") @db.Uuid
+  packTypeId            String     @map("pack_type_id") @db.Uuid
+  createdByMembershipId String     @map("created_by_membership_id") @db.Uuid
+  createdAt             DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  business              Business   @relation(fields: [businessId], references: [id])
+  product               Product    @relation(fields: [businessId, productId], references: [businessId, id])
+  // Includes product_id, so the pack type must belong to this very product.
+  packType              PackType   @relation(fields: [businessId, productId, packTypeId], references: [businessId, productId, id])
+  createdBy             Membership @relation(fields: [businessId, createdByMembershipId], references: [businessId, id])
+
+  @@unique([businessId, id])
+  @@unique([businessId, barcode])
+  @@map("product_barcode")
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +329,7 @@ model Membership {
   deviceLinks           DeviceMembership[]
   refreshTokens         RefreshToken[]
   auditEntries          AuditLog[]
+  barcodesCreated       ProductBarcode[]
 
   @@unique([businessId, id])
   @@unique([businessId, personId])

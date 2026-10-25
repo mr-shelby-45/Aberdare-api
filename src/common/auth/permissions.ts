@@ -20,6 +20,8 @@ export const PERMISSIONS = [
   'devices.manage',
   'subscription.manage',
   'shopkey.manage',
+  // Phase B: add, rename, archive and restore locations.
+  'locations.manage',
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -44,6 +46,7 @@ const OWNER: Permission[] = [
   'devices.manage',
   'subscription.manage',
   'shopkey.manage',
+  'locations.manage',
 ];
 
 export const PRESET_PERMISSIONS: Record<RolePreset, ReadonlySet<Permission>> = {

@@ -7,6 +7,7 @@ export const HAND_WRITTEN_INDEXES = [
   'product_name_trgm_idx',
   'pack_type_one_base_unit_per_product',
   'membership_one_owner_per_business',
+  'location_one_default_per_business',
 ];
 
 // SQL that removes or weakens objects Prisma does not manage.

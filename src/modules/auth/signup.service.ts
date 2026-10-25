@@ -12,6 +12,7 @@ import { SmsSender } from '../../integrations/sms/sms.sender.js';
 import { AuditService } from '../audit/audit.service.js';
 import { BusinessService } from '../business/business.service.js';
 import { DevicesService } from '../devices/devices.service.js';
+import { LocationsService } from '../locations/locations.service.js';
 import { StaffService } from '../staff/staff.service.js';
 import { ChallengeService } from './challenge.service.js';
 import type { SignupStartDto } from './dto/signup-start.dto.js';
@@ -53,6 +54,7 @@ export class SignupService {
     private readonly sms: SmsSender,
     private readonly email: EmailSender,
     private readonly audit: AuditService,
+    private readonly locations: LocationsService,
   ) {}
 
   /** Creates both codes, then sends them. Answers the same for every phone and email. */
@@ -101,8 +103,8 @@ export class SignupService {
 
   /**
    * One transaction: consume both proven codes and create or complete the
-   * person, then the business, the owner membership, the device and the
-   * tokens. Any failure undoes all of it, including the consumed codes.
+   * person, then the business, the owner membership, the default location,
+   * the device and the tokens. Any failure undoes all of it, including the consumed codes.
    */
   async signup(dto: SignupDto): Promise<SignupResult> {
     const claims = await this.purposeTokens.verifySignup(dto.signup_token);
@@ -146,6 +148,8 @@ export class SignupService {
           metadata: { business_type: dto.business_type, new_person: person.outcome === 'CREATED' },
           actorMembershipId: membership.id,
         });
+        // Phase B: every business starts with its default location, in this same transaction.
+        await this.locations.createDefault(membership.id);
         const device = await this.devices.register({
           name: dto.device.name,
           platform: dto.device.platform,

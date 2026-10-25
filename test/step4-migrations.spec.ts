@@ -1,7 +1,7 @@
 import { PrismaService } from '../src/database/prisma.service.js';
 import { TenantRunner, currentTx } from '../src/database/tenant.js';
 import { ProductsRepository } from '../src/modules/products/products.repository.js';
-import { asAppUser, resetTables } from './helpers/db.js';
+import { asAdmin, asAppUser, resetTables } from './helpers/db.js';
 import {
   HAND_WRITTEN_INDEXES,
   findDestructiveStatements,
@@ -85,6 +85,7 @@ describe('step 4: migrations keep hand-written SQL', () => {
         'membership',
         'pack_type',
         'product',
+        'product_barcode',
         'refresh_token',
         'stock_balance',
         'stock_conversion',
@@ -96,10 +97,10 @@ describe('step 4: migrations keep hand-written SQL', () => {
       }
     });
 
-    it('the trigger, its function, the extension and both hand-written indexes exist', async () => {
+    it('the triggers, their functions, the extension and the hand-written indexes exist', async () => {
       const found = await asAppUser(async (c) => ({
-        triggers: (await c.query(`SELECT tgname, tgrelid::regclass::text AS tbl FROM pg_trigger WHERE NOT tgisinternal`)).rows,
-        functions: (await c.query(`SELECT proname FROM pg_proc WHERE proname = 'log_product_change'`)).rows,
+        triggers: (await c.query(`SELECT tgname, tgrelid::regclass::text AS tbl FROM pg_trigger WHERE NOT tgisinternal ORDER BY 1`)).rows,
+        functions: (await c.query(`SELECT proname FROM pg_proc WHERE proname LIKE 'log\\_%\\_change' ORDER BY 1`)).rows,
         extensions: (await c.query(`SELECT extname FROM pg_extension WHERE extname = 'pg_trgm'`)).rows,
         indexes: (
           await c.query<{ indexname: string; indexdef: string }>(
@@ -108,11 +109,19 @@ describe('step 4: migrations keep hand-written SQL', () => {
           )
         ).rows,
       }));
-      expect(found.triggers).toEqual([{ tgname: 'product_change_log', tbl: 'product' }]);
-      expect(found.functions).toEqual([{ proname: 'log_product_change' }]);
+      // The exact inventory: a new trigger or function must be added here on purpose (Phase B1 added three).
+      expect(found.triggers).toEqual([
+        { tgname: 'location_change_log', tbl: 'location' },
+        { tgname: 'pack_type_change_log', tbl: 'pack_type' },
+        { tgname: 'product_barcode_change_log', tbl: 'product_barcode' },
+        { tgname: 'product_change_log', tbl: 'product' },
+      ]);
+      expect(found.functions).toEqual([{ proname: 'log_product_barcode_change' }, { proname: 'log_product_change' }]);
       expect(found.extensions).toEqual([{ extname: 'pg_trgm' }]);
       const byName = new Map(found.indexes.map((i) => [i.indexname, i.indexdef]));
+      expect(byName.get('location_one_default_per_business')).toMatch(/CREATE UNIQUE INDEX .* WHERE is_default/);
       expect([...byName.keys()]).toEqual([
+        'location_one_default_per_business',
         'membership_one_owner_per_business',
         'pack_type_one_base_unit_per_product',
         'product_name_trgm_idx',
@@ -172,28 +181,54 @@ describe('step 4: migrations keep hand-written SQL', () => {
       shop = await seedShop(tenants);
     });
 
+    // change_log rows seedShop writes: location, product, piece, carton.
+    const SEED_SHOP_LOG_ROWS = 4;
+
     const changes = (biz: string) =>
       tenants.run(biz, () =>
         currentTx().changeLog.findMany({
           orderBy: { id: 'asc' },
-          select: { tableName: true, operation: true, rowId: true, businessId: true },
+          select: { tableName: true, operation: true, rowId: true, rowKey: true, businessId: true },
         }),
       );
 
-    it('the trigger writes one change_log row per product insert, update and delete', async () => {
-      const before = await changes(shop.biz); // seedShop created one product
-      expect(before.map((c) => c.operation)).toEqual(['INSERT']);
+    it('the triggers write one change_log row per product insert and update, and per barcode insert and delete', async () => {
+      const rowsOf = async (table: string) => (await changes(shop.biz)).filter((c) => c.tableName === table);
+      // seedShop created one product (its location and pack types are logged too, since B1).
+      expect((await rowsOf('product')).map((c) => c.operation)).toEqual(['INSERT']);
 
       const p = await tenants.run(shop.biz, () => products.create('Maize flour 2kg'));
       await tenants.run(shop.biz, () => products.rename(p.id, 'Maize flour 2 kg'));
-      // pack types are not needed for this product, so it can be deleted
-      await tenants.run(shop.biz, () => products.remove(p.id));
+      expect((await rowsOf('product')).slice(1)).toEqual([
+        { tableName: 'product', operation: 'INSERT', rowId: p.id, rowKey: null, businessId: shop.biz },
+        { tableName: 'product', operation: 'UPDATE', rowId: p.id, rowKey: null, businessId: shop.biz },
+      ]);
 
-      const after = (await changes(shop.biz)).slice(1);
-      expect(after).toEqual([
-        { tableName: 'product', operation: 'INSERT', rowId: p.id, businessId: shop.biz },
-        { tableName: 'product', operation: 'UPDATE', rowId: p.id, businessId: shop.biz },
-        { tableName: 'product', operation: 'DELETE', rowId: p.id, businessId: shop.biz },
+      // Products are archived, never deleted: app_user has no DELETE since B1.
+      await expect(
+        tenants.run(shop.biz, () => currentTx().$executeRaw`DELETE FROM product WHERE id = ${p.id}::uuid`),
+      ).rejects.toThrow(/permission denied for table product/);
+
+      // Deletes are logged on product_barcode, with the code in row_key.
+      const personId = await asAdmin(
+        async (c) => (await c.query<{ id: string }>("INSERT INTO person (phone) VALUES ('+254700000001') RETURNING id")).rows[0].id,
+      );
+      const barcode = await tenants.run(shop.biz, async () => {
+        const tx = currentTx();
+        const m = await tx.membership.create({
+          data: { businessId: shop.biz, personId, displayName: 'Owner', rolePreset: 'OWNER', status: 'ACTIVE' },
+          select: { id: true },
+        });
+        const piece = await tx.packType.findUniqueOrThrow({ where: { id: shop.piece } });
+        return tx.productBarcode.create({
+          data: { businessId: shop.biz, barcode: '06161101560029', productId: piece.productId, packTypeId: piece.id, createdByMembershipId: m.id },
+          select: { id: true },
+        });
+      });
+      await tenants.run(shop.biz, () => currentTx().productBarcode.delete({ where: { id: barcode.id } }));
+      expect(await rowsOf('product_barcode')).toEqual([
+        { tableName: 'product_barcode', operation: 'INSERT', rowId: barcode.id, rowKey: '06161101560029', businessId: shop.biz },
+        { tableName: 'product_barcode', operation: 'DELETE', rowId: barcode.id, rowKey: '06161101560029', businessId: shop.biz },
       ]);
     });
 
@@ -204,13 +239,14 @@ describe('step 4: migrations keep hand-written SQL', () => {
           throw new Error('handler failed');
         }),
       ).rejects.toThrow('handler failed');
-      expect(await changes(shop.biz)).toHaveLength(1);
+      // Only seedShop's 4 rows (location, product, 2 pack types; logged since B1).
+      expect(await changes(shop.biz)).toHaveLength(SEED_SHOP_LOG_ROWS);
     });
 
     it("change_log rows are tenant-scoped and append-only for app_user", async () => {
       const other = await seedShop(tenants, 'Shop B');
       expect((await changes(other.biz)).every((c) => c.businessId === other.biz)).toBe(true);
-      expect(await changes(other.biz)).toHaveLength(1);
+      expect(await changes(other.biz)).toHaveLength(SEED_SHOP_LOG_ROWS);
 
       for (const sql of ['UPDATE change_log SET operation = $1', 'DELETE FROM change_log']) {
         await expect(
@@ -231,14 +267,14 @@ describe('step 4: migrations keep hand-written SQL', () => {
       await expect(
         tenants.run(shop.biz, () =>
           currentTx().packType.create({
-            data: { businessId: shop.biz, productId, name: 'single', unitsPerPack: 1 },
+            data: { businessId: shop.biz, productId, name: 'single', unitsPerPack: 1, sellPrice: '50.00' },
           }),
         ),
       ).rejects.toThrow(/Unique constraint|pack_type_one_base_unit_per_product/);
 
       await tenants.run(shop.biz, () =>
         currentTx().packType.create({
-          data: { businessId: shop.biz, productId, name: 'carton of 12', unitsPerPack: 12 },
+          data: { businessId: shop.biz, productId, name: 'carton of 12', unitsPerPack: 12, sellPrice: '600.00' },
         }),
       );
       const packs = await tenants.run(shop.biz, () => currentTx().packType.count());

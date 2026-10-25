@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Clock } from '../../common/time/clock.js';
 import { validateDto } from '../../common/validation/validate-dto.js';
 import { isForeignKeyViolation } from '../../database/db-errors.js';
 import { TenantRunner, withSavepoint } from '../../database/tenant.js';
@@ -31,6 +32,7 @@ export class SyncService {
   constructor(
     private readonly tenants: TenantRunner,
     private readonly repo: SyncRepository,
+    private readonly clock: Clock,
     receiveStock: ReceiveStockHandler,
     adjustStock: AdjustStockHandler,
   ) {
@@ -69,7 +71,7 @@ export class SyncService {
 
     try {
       return await this.tenants.run(actor.businessId, async () => {
-        const claimed = await this.repo.claim(commandId, envelope.type);
+        const claimed = await this.repo.claim(commandId, envelope.type, new Date(envelope.occurredAt), this.clock.now());
         if (!claimed) {
           return { commandId, ...(await this.repo.storedOutcome(commandId)) };
         }

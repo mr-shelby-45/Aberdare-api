@@ -11,6 +11,7 @@ const OWNER_ONLY: ReadonlySet<Permission> = new Set([
   'devices.manage',
   'subscription.manage',
   'shopkey.manage',
+  'locations.manage',
 ]);
 const KNOWN: ReadonlySet<string> = new Set(PERMISSIONS);
 

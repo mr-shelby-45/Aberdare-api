@@ -27,10 +27,4 @@ export class ProductsRepository {
     });
     return count;
   }
-
-  /** Returns the number of rows deleted (0 if the row is not visible to this tenant). */
-  async remove(id: string): Promise<number> {
-    const { count } = await currentTx().product.deleteMany({ where: { id } });
-    return count;
-  }
 }

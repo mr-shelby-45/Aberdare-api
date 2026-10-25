@@ -6,6 +6,7 @@ import { MessagingModule } from '../../integrations/messaging.module.js';
 import { AuditModule } from '../audit/audit.module.js';
 import { BusinessModule } from '../business/business.module.js';
 import { DevicesModule } from '../devices/devices.module.js';
+import { LocationsModule } from '../locations/locations.module.js';
 import { SessionsModule } from '../sessions/sessions.module.js';
 import { StaffModule } from '../staff/staff.module.js';
 import { AccessTokenService } from './access-token.service.js';
@@ -28,7 +29,7 @@ import { TokenService } from './token.service.js';
 
 @Module({
   // The JWT secret is passed on every sign and verify call, from AppConfig.
-  imports: [DatabaseModule, MessagingModule, AuditModule, BusinessModule, StaffModule, DevicesModule, SessionsModule, JwtModule.register({})],
+  imports: [DatabaseModule, MessagingModule, AuditModule, BusinessModule, StaffModule, DevicesModule, SessionsModule, LocationsModule, JwtModule.register({})],
   controllers: [SignupController, LoginController, FirstLoginController, PasswordController, MeController],
   providers: [
     SignupService,

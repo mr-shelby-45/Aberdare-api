@@ -203,7 +203,14 @@ describe('A5: audit log and hardening', { timeout: 120_000 }, () => {
     it('signup records business.signed_up and device.registered, by the owner, with the caller IP', async () => {
       const o = await signupOwner();
       const rows = await auditRows(o.businessId);
-      expect(rows.map((r) => r.action).sort()).toEqual(['business.signed_up', 'device.registered']);
+      // location.created: the default location, added to signup in Phase B1.
+      expect(rows.map((r) => r.action).sort()).toEqual(['business.signed_up', 'device.registered', 'location.created']);
+      expect(rows.find((r) => r.action === 'location.created')).toMatchObject({
+        actor_membership_id: o.membershipId,
+        target_type: 'location',
+        metadata: { is_default: true },
+        ip: IP,
+      });
       const signedUp = rows.find((r) => r.action === 'business.signed_up')!;
       expect(signedUp).toMatchObject({
         actor_membership_id: o.membershipId,

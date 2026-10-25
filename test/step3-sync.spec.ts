@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { Clock } from '../src/common/time/clock.js';
 import { PrismaService } from '../src/database/prisma.service.js';
 import { TenantRunner, currentTx } from '../src/database/tenant.js';
 import { AdjustStockHandler } from '../src/modules/stock/commands/adjust-stock.handler.js';
@@ -30,14 +31,19 @@ describe('step 3: idempotent commands', () => {
     permissions: new Set(['stock.receive', 'stock.adjust']),
   });
 
+  // Any valid ISO time; the spike tests do not depend on it.
+  const OCCURRED = '2026-10-24T08:00:00.000Z';
+
   const receive = (s: Shop, quantity: number, commandId = randomUUID()) => ({
     commandId,
+    occurredAt: OCCURRED,
     type: 'stock.receive',
     payload: { locationId: s.loc, packTypeId: s.piece, quantity },
   });
 
   const adjust = (s: Shop, quantity: number, commandId = randomUUID()) => ({
     commandId,
+    occurredAt: OCCURRED,
     type: 'stock.adjust',
     payload: { locationId: s.loc, packTypeId: s.piece, quantity },
   });
@@ -59,6 +65,7 @@ describe('step 3: idempotent commands', () => {
     sync = new SyncService(
       tenants,
       new SyncRepository(),
+      new Clock(),
       new ReceiveStockHandler(stock),
       new AdjustStockHandler(stock),
     );
@@ -241,7 +248,7 @@ describe('step 3: idempotent commands', () => {
     it("a command pointing at another business's location is rejected as INVALID_REFERENCE, not retried forever", async () => {
       const shopB = await seedShop(tenants, 'Shop B');
       const [r] = await sync.processCommands(manager(shop), [
-        { commandId: randomUUID(), type: 'stock.receive', payload: { locationId: shopB.loc, packTypeId: shop.piece, quantity: 5 } },
+        { commandId: randomUUID(), occurredAt: OCCURRED, type: 'stock.receive', payload: { locationId: shopB.loc, packTypeId: shop.piece, quantity: 5 } },
       ]);
       expect(r).toMatchObject({ status: 'REJECTED', code: 'INVALID_REFERENCE' });
       expect(await state(shop)).toEqual({ balance: 0, sum: 0, movements: 0, commands: 1 });
@@ -253,12 +260,12 @@ describe('step 3: idempotent commands', () => {
       const results = await sync.processCommands(manager(shop), [
         null,
         'not an object',
-        { commandId: 'not-a-uuid', type: 'stock.receive', payload: {} },
-        { commandId: randomUUID(), type: 'stock.receive', payload: {}, extra: 1 },
-        { commandId: randomUUID(), type: 'stock.teleport', payload: {} },
-        { commandId: valid, type: 'stock.receive', payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: '5' } },
-        { commandId: randomUUID(), type: 'stock.receive', payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: 2.5 } },
-        { commandId: randomUUID(), type: 'stock.receive', payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: 1, businessId: randomUUID() } },
+        { commandId: 'not-a-uuid', occurredAt: OCCURRED, type: 'stock.receive', payload: {} },
+        { commandId: randomUUID(), occurredAt: OCCURRED, type: 'stock.receive', payload: {}, extra: 1 },
+        { commandId: randomUUID(), occurredAt: OCCURRED, type: 'stock.teleport', payload: {} },
+        { commandId: valid, occurredAt: OCCURRED, type: 'stock.receive', payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: '5' } },
+        { commandId: randomUUID(), occurredAt: OCCURRED, type: 'stock.receive', payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: 2.5 } },
+        { commandId: randomUUID(), occurredAt: OCCURRED, type: 'stock.receive', payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: 1, businessId: randomUUID() } },
       ]);
       expect(results.map((r) => [r.status, r.code])).toEqual([
         ['REJECTED', 'VALIDATION_FAILED'],
@@ -298,8 +305,8 @@ describe('step 3: idempotent commands', () => {
       await expect(
         tenants.run(shop.biz, () =>
           currentTx().$executeRaw`
-            INSERT INTO sync_command (business_id, command_id, type, status)
-            VALUES (${shop.biz}::uuid, ${randomUUID()}::uuid, 'stock.receive', 'ACCEPTED')`,
+            INSERT INTO sync_command (business_id, command_id, type, status, occurred_at, received_at)
+            VALUES (${shop.biz}::uuid, ${randomUUID()}::uuid, 'stock.receive', 'ACCEPTED', now(), now())`,
         ),
       ).rejects.toThrow(/sync_command_result_when_done/);
     });
