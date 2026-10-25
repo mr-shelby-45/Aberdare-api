@@ -285,12 +285,12 @@ describe('B1: schema, triggers and locations', { timeout: 120_000 }, () => {
     const shop = await shopWithMember();
     const clock = new FakeClock(new Date('2026-10-25T12:00:00.000Z'));
     const stock = new StockService(new StockRepository());
-    const sync = new SyncService(tenants(), new SyncRepository(), clock, new ReceiveStockHandler(stock), new AdjustStockHandler(stock));
+    const sync = new SyncService(tenants(), new SyncRepository(), clock, { all: [new ReceiveStockHandler(stock), new AdjustStockHandler(stock)] });
     const commandId = randomUUID();
-    const [result] = await sync.processCommands({ businessId: shop.biz, permissions: new Set(['stock.receive']) }, [
+    const [result] = await sync.processCommands({ businessId: shop.biz, membershipId: shop.membershipId, permissions: new Set(['stock.receive']) }, [
       {
-        commandId,
-        occurredAt: '2026-10-22T07:30:00.000Z',
+        command_id: commandId,
+        occurred_at: '2026-10-22T07:30:00.000Z',
         type: 'stock.receive',
         payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: 3 },
       },
@@ -305,9 +305,9 @@ describe('B1: schema, triggers and locations', { timeout: 120_000 }, () => {
     expect(row.occurredAt.toISOString()).toBe('2026-10-22T07:30:00.000Z');
     expect(row.receivedAt.toISOString()).toBe('2026-10-25T12:00:00.000Z');
 
-    // A command without occurredAt is rejected and stores nothing.
-    const [bad] = await sync.processCommands({ businessId: shop.biz, permissions: new Set(['stock.receive']) }, [
-      { commandId: randomUUID(), type: 'stock.receive', payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: 3 } },
+    // A command without occurred_at is rejected and stores nothing.
+    const [bad] = await sync.processCommands({ businessId: shop.biz, membershipId: shop.membershipId, permissions: new Set(['stock.receive']) }, [
+      { command_id: randomUUID(), type: 'stock.receive', payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: 3 } },
     ]);
     expect(bad).toMatchObject({ status: 'REJECTED', code: 'VALIDATION_FAILED' });
     expect(await tenants().run(shop.biz, () => currentTx().syncCommand.count())).toBe(1);

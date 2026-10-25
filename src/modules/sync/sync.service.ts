@@ -3,8 +3,7 @@ import { Clock } from '../../common/time/clock.js';
 import { validateDto } from '../../common/validation/validate-dto.js';
 import { isForeignKeyViolation } from '../../database/db-errors.js';
 import { TenantRunner, withSavepoint } from '../../database/tenant.js';
-import { AdjustStockHandler } from '../stock/commands/adjust-stock.handler.js';
-import { ReceiveStockHandler } from '../stock/commands/receive-stock.handler.js';
+import { CatalogueHandlers } from './catalogue-handlers.js';
 import type { CommandHandler } from './command-handler.js';
 import type {
   CommandOutcome,
@@ -15,12 +14,17 @@ import { CommandRejectedError } from './command-rejected.error.js';
 import { SyncCommandDto } from './dto/sync-command.dto.js';
 import { SyncRepository } from './sync.repository.js';
 
+// A phone clock may be a little ahead; more than this is a wrong clock or a
+// forged time (docs/phase-b-design.md section 5). Any time in the past is fine.
+const MAX_FUTURE_MS = 24 * 60 * 60 * 1000;
+
 // Processes phone commands exactly once each (docs/architecture.md section 5).
 // Each command gets its own tenant transaction, so one bad command never
 // undoes the others. Inside it:
 //   1. claim the command row (INSERT ... ON CONFLICT DO NOTHING) first;
 //      if it already exists, return the stored outcome;
-//   2. decide: permission, payload validation, handler (in a savepoint);
+//   2. decide: type, permission, occurred_at, payload validation, the
+//      payload's extra permissions, handler (in a savepoint);
 //   3. store the outcome on the row, then commit.
 // An expected rejection is stored. An unexpected error rolls back the whole
 // transaction, command row included, so the phone's retry runs it again
@@ -33,12 +37,9 @@ export class SyncService {
     private readonly tenants: TenantRunner,
     private readonly repo: SyncRepository,
     private readonly clock: Clock,
-    receiveStock: ReceiveStockHandler,
-    adjustStock: AdjustStockHandler,
+    handlers: CatalogueHandlers,
   ) {
-    this.handlers = new Map<string, CommandHandler<object>>(
-      [receiveStock, adjustStock].map((h) => [h.type, h]),
-    );
+    this.handlers = new Map(handlers.all.map((h) => [h.type, h]));
   }
 
   /** Commands are processed one at a time, in the order the phone sent them. */
@@ -59,7 +60,7 @@ export class SyncService {
   ): Promise<CommandResult> {
     const envelope = await validateDto(SyncCommandDto, raw);
     if (!envelope) {
-      // No valid command id means nothing to store it under.
+      // No valid envelope means nothing to store it under.
       return {
         commandId: null,
         status: 'REJECTED',
@@ -67,26 +68,29 @@ export class SyncService {
         message: 'The command is not valid',
       };
     }
-    const { commandId } = envelope;
+    const commandId = envelope.command_id;
+    const occurredAt = new Date(envelope.occurred_at);
+    const receivedAt = this.clock.now();
 
     try {
       return await this.tenants.run(actor.businessId, async () => {
-        const claimed = await this.repo.claim(commandId, envelope.type, new Date(envelope.occurredAt), this.clock.now());
+        const claimed = await this.repo.claim(commandId, envelope.type, occurredAt, receivedAt);
         if (!claimed) {
           return { commandId, ...(await this.repo.storedOutcome(commandId)) };
         }
-        const outcome = await this.decide(actor, envelope);
+        const outcome = await this.decide(actor, envelope, occurredAt, receivedAt);
         await this.repo.complete(commandId, outcome);
         return { commandId, ...outcome };
       });
-    } catch {
-      // Everything for this command was rolled back, including its row.
-      // TODO(step 5): log this through the project logger with the request ID.
+    } catch (err) {
+      // Everything for this command was rolled back, including its row. The
+      // controller logs the type and error name; never the payload.
       return {
         commandId,
         status: 'FAILED',
         code: 'INTERNAL_ERROR',
         message: 'The command could not be processed. It will be retried.',
+        failure: { type: envelope.type, errorName: err instanceof Error ? err.name : 'UnknownError' },
       };
     }
   }
@@ -94,6 +98,8 @@ export class SyncService {
   private async decide(
     actor: SyncActor,
     envelope: SyncCommandDto,
+    occurredAt: Date,
+    receivedAt: Date,
   ): Promise<CommandOutcome> {
     const handler = this.handlers.get(envelope.type);
     if (!handler) {
@@ -102,12 +108,20 @@ export class SyncService {
     if (!actor.permissions.has(handler.permission)) {
       return rejected('PERMISSION_DENIED', 'You are not allowed to do this');
     }
+    if (occurredAt.getTime() > receivedAt.getTime() + MAX_FUTURE_MS) {
+      return rejected('OCCURRED_AT_INVALID', 'The time on this command is in the future. Check the phone clock.');
+    }
     const payload = await validateDto(handler.payloadDto, envelope.payload);
     if (!payload) {
       return rejected('VALIDATION_FAILED', 'The command is not valid');
     }
+    for (const permission of handler.extraPermissions?.(payload) ?? []) {
+      if (!actor.permissions.has(permission)) {
+        return rejected('PERMISSION_DENIED', 'You are not allowed to do this');
+      }
+    }
     try {
-      return await withSavepoint(() => handler.handle(payload));
+      return await withSavepoint(() => handler.handle(payload, { actor, occurredAt }));
     } catch (err) {
       // The savepoint has already undone whatever the handler wrote.
       if (err instanceof CommandRejectedError) {

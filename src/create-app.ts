@@ -38,6 +38,10 @@ export function withCore(rootModule: Type<unknown>, config: AppConfig): Type<unk
 /** Fastify with proxy trust, server-generated request IDs and one JSON log line per request. */
 export function createAdapter(config: AppConfig, options: CreateAppOptions = {}): FastifyAdapter {
   return new FastifyAdapter({
+    // 1 MiB, Fastify's own default, stated so an upgrade cannot change it
+    // silently. POST /v1/sync/commands relies on it (docs/phase-b-design.md
+    // section 5); a bigger body gets 413 PAYLOAD_TOO_LARGE.
+    bodyLimit: 1_048_576,
     // Empty list = trust no proxy: request.ip is the socket address.
     trustProxy: config.trustProxy.length > 0 ? config.trustProxy : false,
     // Never taken from an incoming header.

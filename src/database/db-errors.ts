@@ -16,6 +16,19 @@ export function isUniqueViolation(err: unknown): boolean {
   return postgresErrorCode(err) === '23505';
 }
 
+/**
+ * The name of the unique constraint (or unique index) a write violated, or
+ * undefined for any other error. Prisma 7 with the pg adapter puts it at
+ * meta.driverAdapterError.cause.constraint.index, for model calls (P2002) and
+ * raw queries (P2010) alike (checked by a probe in Phase B2).
+ */
+export function uniqueViolationConstraint(err: unknown): string | undefined {
+  if (!isUniqueViolation(err)) return undefined;
+  const meta = (err as { meta?: { driverAdapterError?: { cause?: { constraint?: { index?: unknown } } } } }).meta;
+  const index = meta?.driverAdapterError?.cause?.constraint?.index;
+  return typeof index === 'string' ? index : undefined;
+}
+
 /** True when a row referenced something that does not exist for this business. */
 export function isForeignKeyViolation(err: unknown): boolean {
   return postgresErrorCode(err) === '23503';

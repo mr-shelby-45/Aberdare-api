@@ -28,22 +28,26 @@ describe('step 3: idempotent commands', () => {
   /** A manager: may receive and adjust stock. */
   const manager = (s: Shop): SyncActor => ({
     businessId: s.biz,
+    membershipId: MEMBER,
     permissions: new Set(['stock.receive', 'stock.adjust']),
   });
+
+  // The acting membership; the stock handlers do not use it.
+  const MEMBER = randomUUID();
 
   // Any valid ISO time; the spike tests do not depend on it.
   const OCCURRED = '2026-10-24T08:00:00.000Z';
 
   const receive = (s: Shop, quantity: number, commandId = randomUUID()) => ({
-    commandId,
-    occurredAt: OCCURRED,
+    command_id: commandId,
+    occurred_at: OCCURRED,
     type: 'stock.receive',
     payload: { locationId: s.loc, packTypeId: s.piece, quantity },
   });
 
   const adjust = (s: Shop, quantity: number, commandId = randomUUID()) => ({
-    commandId,
-    occurredAt: OCCURRED,
+    command_id: commandId,
+    occurred_at: OCCURRED,
     type: 'stock.adjust',
     payload: { locationId: s.loc, packTypeId: s.piece, quantity },
   });
@@ -66,8 +70,8 @@ describe('step 3: idempotent commands', () => {
       tenants,
       new SyncRepository(),
       new Clock(),
-      new ReceiveStockHandler(stock),
-      new AdjustStockHandler(stock),
+      // The endpoint's own list is the catalogue handlers; the spike tests the stock ones.
+      { all: [new ReceiveStockHandler(stock), new AdjustStockHandler(stock)] },
     );
   });
 
@@ -90,7 +94,7 @@ describe('step 3: idempotent commands', () => {
     const [second] = await sync.processCommands(manager(shop), [cmd]);
 
     expect(first).toEqual({
-      commandId: cmd.commandId,
+      commandId: cmd.command_id,
       status: 'ACCEPTED',
       data: { quantity: 5 },
     });
@@ -110,7 +114,7 @@ describe('step 3: idempotent commands', () => {
     expect(flat).toHaveLength(20);
     for (const r of flat) {
       expect(r).toEqual({
-        commandId: cmd.commandId,
+        commandId: cmd.command_id,
         status: 'ACCEPTED',
         data: { quantity: 5 },
       });
@@ -129,11 +133,11 @@ describe('step 3: idempotent commands', () => {
     const results = await sync.processCommands(manager(shop), batch);
 
     expect(results.map((r) => [r.commandId, r.status, r.code])).toEqual([
-      [batch[0].commandId, 'ACCEPTED', undefined],
-      [batch[1].commandId, 'ACCEPTED', undefined],
-      [batch[2].commandId, 'REJECTED', 'VALIDATION_FAILED'],
-      [batch[3].commandId, 'ACCEPTED', undefined],
-      [batch[4].commandId, 'ACCEPTED', undefined],
+      [batch[0].command_id, 'ACCEPTED', undefined],
+      [batch[1].command_id, 'ACCEPTED', undefined],
+      [batch[2].command_id, 'REJECTED', 'VALIDATION_FAILED'],
+      [batch[3].command_id, 'ACCEPTED', undefined],
+      [batch[4].command_id, 'ACCEPTED', undefined],
     ]);
     // 1 + 2 + 4 + 5; the rejection is stored too.
     expect(await state(shop)).toEqual({ balance: 12, sum: 12, movements: 4, commands: 5 });
@@ -144,6 +148,7 @@ describe('step 3: idempotent commands', () => {
     // An actor who may receive stock but not adjust it.
     const receiver: SyncActor = {
       businessId: shop.biz,
+      membershipId: MEMBER,
       permissions: new Set(['stock.receive']),
     };
     const batch = [receive(shop, 1), adjust(shop, 3), receive(shop, 2)];
@@ -161,6 +166,7 @@ describe('step 3: idempotent commands', () => {
     await sync.processCommands(manager(shop), [receive(shop, 10)]);
     const noAdjust: SyncActor = {
       businessId: shop.biz,
+      membershipId: MEMBER,
       permissions: new Set(['stock.receive']),
     };
     const cmd = adjust(shop, 3);
@@ -206,17 +212,19 @@ describe('step 3: idempotent commands', () => {
 
     const [crashed] = await sync.processCommands(manager(shop), [cmd]);
     expect(crashed).toEqual({
-      commandId: cmd.commandId,
+      commandId: cmd.command_id,
       status: 'FAILED',
       code: 'INTERNAL_ERROR',
       message: 'The command could not be processed. It will be retried.',
+      // For the server log only (Phase B2); the controller never sends it.
+      failure: { type: 'stock.receive', errorName: expect.any(String) },
     });
     // No command row saying "done", no stock change.
     expect(await state(shop)).toEqual({ balance: 0, sum: 0, movements: 0, commands: 0 });
 
     const [retried] = await sync.processCommands(manager(shop), [cmd]);
     expect(retried).toEqual({
-      commandId: cmd.commandId,
+      commandId: cmd.command_id,
       status: 'ACCEPTED',
       data: { quantity: 5 },
     });
@@ -248,7 +256,7 @@ describe('step 3: idempotent commands', () => {
     it("a command pointing at another business's location is rejected as INVALID_REFERENCE, not retried forever", async () => {
       const shopB = await seedShop(tenants, 'Shop B');
       const [r] = await sync.processCommands(manager(shop), [
-        { commandId: randomUUID(), occurredAt: OCCURRED, type: 'stock.receive', payload: { locationId: shopB.loc, packTypeId: shop.piece, quantity: 5 } },
+        { command_id: randomUUID(), occurred_at: OCCURRED, type: 'stock.receive', payload: { locationId: shopB.loc, packTypeId: shop.piece, quantity: 5 } },
       ]);
       expect(r).toMatchObject({ status: 'REJECTED', code: 'INVALID_REFERENCE' });
       expect(await state(shop)).toEqual({ balance: 0, sum: 0, movements: 0, commands: 1 });
@@ -260,12 +268,12 @@ describe('step 3: idempotent commands', () => {
       const results = await sync.processCommands(manager(shop), [
         null,
         'not an object',
-        { commandId: 'not-a-uuid', occurredAt: OCCURRED, type: 'stock.receive', payload: {} },
-        { commandId: randomUUID(), occurredAt: OCCURRED, type: 'stock.receive', payload: {}, extra: 1 },
-        { commandId: randomUUID(), occurredAt: OCCURRED, type: 'stock.teleport', payload: {} },
-        { commandId: valid, occurredAt: OCCURRED, type: 'stock.receive', payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: '5' } },
-        { commandId: randomUUID(), occurredAt: OCCURRED, type: 'stock.receive', payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: 2.5 } },
-        { commandId: randomUUID(), occurredAt: OCCURRED, type: 'stock.receive', payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: 1, businessId: randomUUID() } },
+        { command_id: 'not-a-uuid', occurred_at: OCCURRED, type: 'stock.receive', payload: {} },
+        { command_id: randomUUID(), occurred_at: OCCURRED, type: 'stock.receive', payload: {}, extra: 1 },
+        { command_id: randomUUID(), occurred_at: OCCURRED, type: 'stock.teleport', payload: {} },
+        { command_id: valid, occurred_at: OCCURRED, type: 'stock.receive', payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: '5' } },
+        { command_id: randomUUID(), occurred_at: OCCURRED, type: 'stock.receive', payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: 2.5 } },
+        { command_id: randomUUID(), occurred_at: OCCURRED, type: 'stock.receive', payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: 1, businessId: randomUUID() } },
       ]);
       expect(results.map((r) => [r.status, r.code])).toEqual([
         ['REJECTED', 'VALIDATION_FAILED'],
@@ -289,7 +297,7 @@ describe('step 3: idempotent commands', () => {
         currentTx().$executeRaw`
           UPDATE sync_command
           SET status = 'ACCEPTED', result = '{"status":"ACCEPTED"}'::jsonb
-          WHERE command_id = ${cmd.commandId}::uuid`,
+          WHERE command_id = ${cmd.command_id}::uuid`,
       );
       expect(changed).toBe(0); // outcome_is_final hides it from UPDATE
       await expect(

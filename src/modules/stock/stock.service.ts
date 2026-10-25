@@ -26,6 +26,15 @@ export interface ConversionResult {
 export class StockService {
   constructor(private readonly repo: StockRepository) {}
 
+  /**
+   * Whether stock has ever moved for this pack type. Once it has, its
+   * units_per_pack is locked (docs/phase-b-design.md section 4). The caller
+   * holds a lock on the pack type row, so no movement can be added meanwhile.
+   */
+  async hasMovements(packTypeId: string): Promise<boolean> {
+    return this.repo.hasMovements(packTypeId);
+  }
+
   async receive(
     locationId: string,
     packTypeId: string,

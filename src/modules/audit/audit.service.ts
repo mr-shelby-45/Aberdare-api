@@ -11,6 +11,10 @@ export type AuditMetadata = Record<string, AuditValue>;
 // instead of quietly storing it. Values cannot be checked the same way, so
 // callers only ever pass ids, enums, counts and flags.
 const FORBIDDEN_KEY = /pin|otp|code|token|secret|password|hash|phone|email|key/i;
+// Exact keys allowed despite matching above (approved by Ian in Phase B2): a
+// product barcode is catalogue data, not a secret. "code" or "otp_code" are
+// still refused.
+const ALLOWED_KEYS: ReadonlySet<string> = new Set(['barcode', 'barcodes']);
 
 export interface AuditEntry {
   // For example "staff.suspended".
@@ -35,7 +39,7 @@ export class AuditService {
   async record(entry: AuditEntry): Promise<void> {
     const metadata = entry.metadata ?? {};
     for (const key of Object.keys(metadata)) {
-      if (FORBIDDEN_KEY.test(key)) {
+      if (FORBIDDEN_KEY.test(key) && !ALLOWED_KEYS.has(key)) {
         throw new Error(`AuditService: metadata key "${key}" looks like a secret or contact detail`);
       }
     }

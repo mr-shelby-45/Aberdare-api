@@ -10,6 +10,7 @@ import { type Permission, type RolePreset, effectivePermissions } from '../../co
 import { IS_PUBLIC } from '../../common/auth/public.decorator.js';
 import type { AuthedRequest, RequestAuth, RequestSession } from '../../common/auth/request-auth.js';
 import { REQUIRED_PERMISSIONS } from '../../common/auth/require-permission.decorator.js';
+import { OWN_TRANSACTIONS } from '../../common/auth/own-transactions.decorator.js';
 import { type RequestContext, runWithRequestContext } from '../../common/context/request-context.js';
 import { ApiError } from '../../common/errors/api.error.js';
 import { TenantRunner } from '../../database/tenant.js';
@@ -47,6 +48,25 @@ export class TenantInterceptor implements NestInterceptor {
     const auth = request.auth;
     if (!auth) throw new ApiError(401, 'TOKEN_INVALID', 'Please log in again.');
     const required = this.reflector.getAllAndOverride<Permission[]>(REQUIRED_PERMISSIONS, targets) ?? [];
+
+    if (this.reflector.getAllAndOverride<boolean>(OWN_TRANSACTIONS, targets)) {
+      // Same checks in a short transaction of their own, then the handler runs
+      // outside any transaction and opens one per unit of work (one per sync
+      // command). A suspended member is refused here, before anything runs.
+      return from(
+        runWithRequestContext(requestContext, async () => {
+          const session = await this.tenants.run(auth.businessId, () => this.loadSession(auth));
+          requestContext.actorMembershipId = session.membership.id;
+          for (const permission of required) {
+            if (!session.permissions.has(permission)) {
+              throw new ApiError(403, 'PERMISSION_DENIED', 'You are not allowed to do this.');
+            }
+          }
+          request.session = session;
+          return lastValueFrom(next.handle(), { defaultValue: undefined });
+        }),
+      );
+    }
 
     return from(
       runWithRequestContext(requestContext, () => this.tenants.run(auth.businessId, async () => {

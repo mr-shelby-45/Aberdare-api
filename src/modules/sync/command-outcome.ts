@@ -3,9 +3,11 @@
 export interface CommandOutcome {
   status: 'ACCEPTED' | 'FLAGGED' | 'REJECTED';
   // Stable reason code for REJECTED (and FLAGGED), e.g. PERMISSION_DENIED.
+  // Sent to the phone as `reason`.
   code?: string;
   // Safe to show to a user.
   message?: string;
+  // Sent to the phone as `result`.
   data?: Record<string, string | number | boolean>;
 }
 
@@ -14,11 +16,14 @@ export interface CommandOutcome {
 export interface CommandResult extends Omit<CommandOutcome, 'status'> {
   commandId: string | null;
   status: CommandOutcome['status'] | 'FAILED';
+  // FAILED only, for the server log; never sent to the phone.
+  failure?: { type: string; errorName: string };
 }
 
-// The identity the commands are processed for. Both fields will come from the
-// signed access token (CLAUDE.md rule 2); the spike passes them in directly.
+// The identity the commands are processed for. All of it comes from the
+// signed access token and the live session (CLAUDE.md rule 2), never from the body.
 export interface SyncActor {
   businessId: string;
+  membershipId: string;
   permissions: ReadonlySet<string>;
 }

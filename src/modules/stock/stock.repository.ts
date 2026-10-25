@@ -106,4 +106,10 @@ export class StockRepository {
     });
     return agg._sum.quantityChange ?? 0;
   }
+
+  /** Whether any ledger row exists for this pack type, at any location. */
+  async hasMovements(packTypeId: string): Promise<boolean> {
+    const row = await currentTx().stockMovement.findFirst({ where: { packTypeId }, select: { id: true } });
+    return row !== null;
+  }
 }
