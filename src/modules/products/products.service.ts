@@ -10,10 +10,12 @@ import { BarcodesRepository } from './barcodes.repository.js';
 import { CatalogueError } from './catalogue.error.js';
 import type { AddBarcodeDto } from './dto/add-barcode.dto.js';
 import type { CreateProductDto } from './dto/create-product.dto.js';
+import type { ListProductsQueryDto } from './dto/list-products-query.dto.js';
 import type { RemoveBarcodeDto } from './dto/remove-barcode.dto.js';
 import type { UpdateProductDto } from './dto/update-product.dto.js';
 import type { UpsertPackTypeDto } from './dto/upsert-pack-type.dto.js';
 import { type PackTypeRow, PackTypesRepository } from './pack-types.repository.js';
+import { ProductCursor } from './product-cursor.js';
 import type { ProductView } from './product-view.js';
 import { ProductsRepository } from './products.repository.js';
 
@@ -22,6 +24,16 @@ const MAX_PACK_TYPES = 6; // active pack types per product (decided in B2)
 const PRODUCT_NAME_MAX = 120;
 const PACK_NAME_MAX = 40;
 const SKU_MAX = 64;
+// Reads (docs/phase-b-design.md section 6).
+const DEFAULT_LIMIT = 20;
+const MAX_LIMIT = 50;
+const SEARCH_MIN = 2;
+const SEARCH_MAX = 100;
+// Control characters, NUL included: Postgres text cannot hold a NUL, so it
+// would otherwise become a 500.
+// oxlint-disable-next-line no-control-regex -- matching control characters is the point
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // The catalogue commands' rules. Every method runs inside the command's
 // tenant transaction (a savepoint of it); a CatalogueError or a database
@@ -37,6 +49,7 @@ export class ProductsService {
     private readonly stock: StockService,
     private readonly audit: AuditService,
     private readonly clock: Clock,
+    private readonly cursor: ProductCursor,
   ) {}
 
   /** product.create: the product, its pack types and its barcodes, or nothing. */
@@ -275,33 +288,90 @@ export class ProductsService {
   async findByBarcode(raw: string): Promise<{ packTypeId: string; product: ProductView }> {
     const code = normalizeBarcode(raw);
     const found = code ? await this.barcodes.findByCode(code) : null;
-    const product = found ? await this.view(found.productId) : null;
+    const [product] = found ? await this.views([found.productId]) : [];
     if (!found || !product) throw new ApiError(404, 'BARCODE_NOT_FOUND', 'No product has this barcode.');
     return { packTypeId: found.packTypeId, product };
   }
 
-  /** The full product for reads (B3 and B4), or null when not visible. */
-  private async view(productId: string): Promise<ProductView | null> {
-    // One query at a time: queries on one transaction cannot run in parallel.
-    const product = await this.products.findById(productId);
-    if (!product) return null;
-    const packTypes = await this.packTypes.listForProduct(productId);
-    const barcodes = await this.barcodes.listForProduct(productId);
+  /** GET /products/:id. Another business's id, a missing one and a non-UUID: the same 404. */
+  async findById(id: string): Promise<ProductView> {
+    const [product] = UUID.test(id) ? await this.views([id]) : [];
+    if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found.');
+    return product;
+  }
+
+  /**
+   * GET /products: a search when q is given (no paging, at most 50), otherwise
+   * a keyset-paged listing in name order with a signed cursor.
+   */
+  async listOrSearch(query: ListProductsQueryDto): Promise<{ products: ProductView[]; nextCursor?: string | null }> {
+    const includeArchived = query.include_archived === 'true';
+    const limit = pageLimit(query.limit);
+
+    if (query.q !== undefined) {
+      if (query.cursor !== undefined) throw readInvalid('A search has no pages; leave out cursor.');
+      const text = query.q.trim();
+      if (text.length < SEARCH_MIN || text.length > SEARCH_MAX || CONTROL_CHARS.test(text)) {
+        throw readInvalid(`Search for ${SEARCH_MIN} to ${SEARCH_MAX} characters.`);
+      }
+      const escaped = escapeLike(text);
+      const ids = await this.products.search({
+        text,
+        barcode: normalizeBarcode(text),
+        contains: `%${escaped}%`,
+        prefix: `${escaped}%`,
+        includeArchived,
+        limit,
+      });
+      return { products: await this.views(ids) };
+    }
+
+    const after = query.cursor === undefined ? null : this.cursor.read(query.cursor, includeArchived);
+    if (query.cursor !== undefined && !after) throw readInvalid('The cursor is not valid.');
+    // One row more than asked tells whether there is a next page.
+    const rows = await this.products.page({ includeArchived, after, limit: limit + 1 });
+    const page = rows.slice(0, limit);
+    const last = page[page.length - 1];
     return {
-      id: product.id,
-      name: product.name,
-      sku: product.sku,
-      archived: product.archivedAt !== null,
-      packTypes: packTypes.map((t) => ({
-        id: t.id,
-        name: t.name,
-        unitsPerPack: t.unitsPerPack,
-        sellPrice: t.sellPrice,
-        costPrice: t.costPrice,
-        archived: t.archivedAt !== null,
-      })),
-      barcodes: barcodes.map((b) => ({ barcode: b.barcode, packTypeId: b.packTypeId })),
+      products: await this.views(page.map((r) => r.id)),
+      nextCursor: rows.length > limit && last ? this.cursor.sign({ name: last.name, id: last.id }, includeArchived) : null,
     };
+  }
+
+  /**
+   * Full products for reads, in the order of ids; ids not visible to this
+   * tenant are left out. Three queries for any number of products, one at a
+   * time (queries on one transaction cannot run in parallel).
+   */
+  private async views(ids: string[]): Promise<ProductView[]> {
+    const products = await this.products.findManyByIds(ids);
+    const visible = products.map((p) => p.id);
+    const packTypes = await this.packTypes.listForProducts(visible);
+    const barcodes = await this.barcodes.listForProducts(visible);
+    const byId = new Map(products.map((p) => [p.id, p]));
+    return ids.flatMap((id) => {
+      const product = byId.get(id);
+      if (!product) return [];
+      return [
+        {
+          id: product.id,
+          name: product.name,
+          sku: product.sku,
+          archived: product.archivedAt !== null,
+          packTypes: packTypes
+            .filter((t) => t.productId === id)
+            .map((t) => ({
+              id: t.id,
+              name: t.name,
+              unitsPerPack: t.unitsPerPack,
+              sellPrice: t.sellPrice,
+              costPrice: t.costPrice,
+              archived: t.archivedAt !== null,
+            })),
+          barcodes: barcodes.filter((b) => b.productId === id).map((b) => ({ barcode: b.barcode, packTypeId: b.packTypeId })),
+        },
+      ];
+    });
   }
 
   private async changePackType(
@@ -360,6 +430,26 @@ export class ProductsService {
       actorMembershipId,
     });
   }
+}
+
+/**
+ * Makes the user's text match literally inside a LIKE pattern: %, _ and the
+ * escape character itself (backslash, declared with ESCAPE '\' in the SQL).
+ */
+function escapeLike(text: string): string {
+  return text.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+/** limit: default 20; above 50 is quietly capped at 50; 0 is refused. */
+function pageLimit(raw: string | undefined): number {
+  if (raw === undefined) return DEFAULT_LIMIT;
+  const n = Number.parseInt(raw, 10);
+  if (n < 1) throw readInvalid('limit must be at least 1.');
+  return Math.min(n, MAX_LIMIT);
+}
+
+function readInvalid(message: string): ApiError {
+  return new ApiError(422, 'VALIDATION_FAILED', message);
 }
 
 /** Trimmed text of 1 to max characters, or VALIDATION_FAILED. */

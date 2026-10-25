@@ -70,8 +70,9 @@ export class PackTypesRepository {
     });
   }
 
-  /** Every pack type of a product, archived ones too, smallest first. */
-  async listForProduct(productId: string): Promise<PackTypeRow[]> {
+  /** Every pack type of these products, archived ones too, smallest first per product. */
+  async listForProducts(productIds: string[]): Promise<PackTypeRow[]> {
+    if (productIds.length === 0) return [];
     const rows = await currentTx().$queryRaw<
       {
         id: string;
@@ -86,8 +87,8 @@ export class PackTypesRepository {
       SELECT id, product_id, name, units_per_pack, sell_price::text AS sell_price,
              cost_price::text AS cost_price, archived_at
         FROM pack_type
-       WHERE product_id = ${productId}::uuid AND business_id = ${currentBusinessId()}::uuid
-       ORDER BY units_per_pack, id`;
+       WHERE product_id = ANY(${productIds}::uuid[]) AND business_id = ${currentBusinessId()}::uuid
+       ORDER BY product_id, units_per_pack, id`;
     return rows.map((r) => ({
       id: r.id,
       productId: r.product_id,

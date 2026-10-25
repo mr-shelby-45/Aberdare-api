@@ -8,6 +8,7 @@ import { RemoveBarcodeHandler } from './commands/remove-barcode.handler.js';
 import { UpdateProductHandler } from './commands/update-product.handler.js';
 import { UpsertPackTypeHandler } from './commands/upsert-pack-type.handler.js';
 import { PackTypesRepository } from './pack-types.repository.js';
+import { ProductCursor } from './product-cursor.js';
 import { ProductsController } from './products.controller.js';
 import { ProductsRepository } from './products.repository.js';
 import { ProductsService } from './products.service.js';
@@ -20,6 +21,7 @@ import { ProductsService } from './products.service.js';
   controllers: [ProductsController],
   providers: [
     ProductsService,
+    ProductCursor,
     ProductsRepository,
     PackTypesRepository,
     BarcodesRepository,

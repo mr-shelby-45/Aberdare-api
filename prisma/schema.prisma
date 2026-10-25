@@ -45,6 +45,15 @@ model Product {
   sku        String?
   // Phase B: archived, never deleted. NULL means active.
   archivedAt DateTime?  @map("archived_at") @db.Timestamptz(6)
+  // Phase B4: lower(name), kept by Postgres itself (GENERATED ALWAYS ... STORED,
+  // created in *_b4_product_name_lower; Prisma cannot express it). Declared
+  // only so Prisma knows it exists and never generates a DROP for it; @ignore
+  // keeps it out of the client, so no code can try to write it. Search matches
+  // on it with LIKE, about 6 times faster than name ILIKE under RLS.
+  // dbgenerated(...) matches how Prisma reads the generation expression (as a
+  // default); without it Prisma generates a DROP DEFAULT, which fails on a
+  // generated column.
+  nameLower  String?    @default(dbgenerated("lower(name)")) @map("name_lower") @ignore
   createdAt  DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt  DateTime   @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   business   Business   @relation(fields: [businessId], references: [id])

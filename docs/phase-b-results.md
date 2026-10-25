@@ -113,3 +113,47 @@ The scrypt benchmark: 372.9 ms per hash at the production cost, 3.9 ms at the te
 **Things to know:**
 1. The lookup normalises the code the same way as writes, so a 12-digit scan finds a code stored as 13 digits. Case is not changed: `ABC-123` and `abc-123` are different codes.
 2. Codes never reach a log line: the request log records the route pattern, not the URL (checked in B3 test 6).
+
+## B4: Search and listing (passed)
+
+**Result:** new 9, Phase B cumulative 49 (B1 11, B2 21, B3 8, B4 9), all passing in one gate run. The speed test (test 8) passed 5 runs in a row in its final form. Lint, build and the drift check were clean. The first full-suite run **failed one test** (260 of 261): A1's "text keys: phone and email lookups" timed out (7.1 s against its usual 1.2 s). The whole A1 file was slow in that run (56 s, usually 10.5 s), and was just as slow run alone right afterwards (76.5 s, the same timeout), every test about 8 to 12 times slower, so it was not test order and not B4 code. Connections (about 17 ms), the table wipe (about 80 ms), open sessions and free memory were all normal when checked. A few minutes later A1 alone passed 32 of 32 in 12.2 s with no code change. The cause was not identified; it looks like a temporary slowdown of the machine. A second full run then passed: 17 files, 261 of 261 (181.8 s).
+
+**Built (approved by Ian on 2026-10-25, with the four recommended answers and option B):**
+- `GET /v1/products`: a keyset-paged listing in `(name, id)` order with `next_cursor`, or, with `q`, a search (exact barcode, exact SKU, names starting with `q`, other names containing `q`; by name within each group; at most 50; no paging). `limit` defaults to 20 and is capped at 50; `q` is 2 to 100 characters with no control characters (a NUL would otherwise be a 500).
+- `GET /v1/products/:id`: the same 404 `PRODUCT_NOT_FOUND` for another business's id, a missing one and a non-UUID.
+- Signed cursor (`ProductCursor`): base64url JSON of the last name and id plus `include_archived`, with an HMAC-SHA256 keyed from `AUTH_PEPPER`. Tampered, truncated or forged cursors, a cursor reused with another `include_archived`, and a cursor with `q` are all `422`.
+- Product views are built in a batch: 3 queries for a whole page (products, pack types, barcodes), shared with by-barcode.
+- `business_id` as a query parameter is `422`; as a header it is ignored (the response is identical).
+- Migration `*_b4_product_name_lower` (option B): `product.name_lower`, `GENERATED ALWAYS AS (lower(name)) STORED`, declared in `schema.prisma` with `@default(dbgenerated("lower(name)"))` and `@ignore` (without them Prisma would generate a `DROP COLUMN` or a failing `DROP DEFAULT`). The name match is `name_lower LIKE lower(pattern) ESCAPE '\'`.
+
+**The trigram index and the search speed (design section 12, B4 test 8):**
+1. Before building, a shadow-database probe (20,000 products, as `app_user`) showed the trigram index `product_name_trgm_idx` is **not used** under RLS: `ILIKE` and `LIKE` are not leakproof, so Postgres applies them as a filter after the RLS condition, through `product_business_id_idx`. That probe measured 23 ms for `name ILIKE`. The design and architecture wording were corrected (approved).
+2. With `name ILIKE`, the speed test was **flaky**. One run passed (median 154.4 ms), then a series of 5 gave: run 1 **failed** (median 200.53 ms against the bound of 200), runs 2 to 5 passed with medians 183.5, 165.4, 180.9, 191.0 ms. The database part alone varied from 74 to 200 ms between runs. The bound was not raised.
+3. A shadow-database comparison of 5 ways to match, 20,000 products, median of 5: `name ILIKE` 108.5 ms; `name COLLATE "C" ILIKE` 36.6 ms (wrong for non-ASCII letters); `lower(name) LIKE` 58.9 ms; a stored lowercase copy with `LIKE` 18.0 ms (the same 100 rows as `ILIKE`). Ian chose the stored copy (option B).
+4. With `name_lower`, the first series of 5 gave: run 1 **failed** (median 390.1 ms; that run recorded nothing else, because the report was written after the assertion), runs 2 to 5 passed with medians 34.3, 36.0, 34.0, 32.5 ms. The test was then changed to write its measurements **before** asserting (the 200 ms check itself is unchanged), and a second series of 5 **all passed**: medians 34.2, 37.6, 32.9, 33.1, 32.7 ms; slowest single call 82.9 ms; database execution 7.2 to 8.5 ms.
+5. The 390 ms run is not explained by the query, which runs in about 8 ms. In the second series some single calls right after the warm-up took 76 to 83 ms, which points at the machine (a 2-core laptop also running Docker, Node and Vitest), not at Postgres.
+
+The plan recorded by test 8 (as `app_user`, 20,000 products, second series run 1):
+
+```
+Limit (actual time=7.154..7.162 rows=50.00 loops=1)
+  ->  Sort (actual time=7.153..7.156 rows=50.00 loops=1)
+        Sort Key: name, id
+        ->  Index Scan using product_business_id_idx on product (actual time=0.106..6.980 rows=100.00 loops=1)
+              Index Cond: (business_id = (NULLIF(current_setting('app.business_id'::text, true), ''::text))::uuid)
+              Filter: ((archived_at IS NULL) AND (name_lower ~~ '%maize%'::text))
+              Rows Removed by Filter: 19900
+Execution Time: 7.235 ms
+```
+
+The trigram index was not used; the test asserts that, so a future plan change is noticed.
+
+**Proof the tests catch mistakes** (each restored from a backup and checked identical, no markers left):
+- Design mutation 1, `cost_price` returned regardless of permission: B4 test 4 failed (an attendant saw the `cost_price` key).
+- Design mutation 3, `%` and `_` not escaped: B4 test 2 failed (`0%` also matched "500 grams rice").
+- Design mutation 7, `archived_at IS NULL` dropped from search: B4 test 3 failed (the archived product appeared).
+
+**Things to know:**
+1. Search cost grows with one business's product count (about 8 ms of database time at 20,000 here). No index can help under RLS; revisit if a single shop goes well past 100,000 products.
+2. `name_lower` is maintained by Postgres; nothing can write it (checked by a test, which also checks a rename is searchable at once). Non-ASCII letters fold the same way on both sides ("ÉLAN" finds "Café Élan").
+3. Seeding 20,000 rows through the change_log trigger takes about 20 s, longer than Prisma's 5-second transaction limit; test 8 seeds over a plain `app_user` connection instead (still RLS and the trigger).

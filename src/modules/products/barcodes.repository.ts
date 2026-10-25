@@ -51,9 +51,10 @@ export class BarcodesRepository {
     return r ? { barcode: r.barcode, productId: r.product_id, packTypeId: r.pack_type_id } : null;
   }
 
-  async listForProduct(productId: string): Promise<BarcodeRow[]> {
+  async listForProducts(productIds: string[]): Promise<BarcodeRow[]> {
+    if (productIds.length === 0) return [];
     return currentTx().productBarcode.findMany({
-      where: { productId },
+      where: { productId: { in: productIds } },
       orderBy: { barcode: 'asc' },
       select: { barcode: true, productId: true, packTypeId: true },
     });

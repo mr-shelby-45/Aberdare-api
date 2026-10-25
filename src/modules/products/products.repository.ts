@@ -58,12 +58,80 @@ export class ProductsRepository {
     return r ? { id: r.id, name: r.name, sku: r.sku, archivedAt: r.archived_at } : null;
   }
 
-  /** For reads: no lock. */
-  async findById(id: string): Promise<ProductRow | null> {
-    return currentTx().product.findUnique({
-      where: { id },
+  /** For reads: no lock. Rows not visible to this tenant are simply missing. */
+  async findManyByIds(ids: string[]): Promise<ProductRow[]> {
+    if (ids.length === 0) return [];
+    return currentTx().product.findMany({
+      where: { id: { in: ids } },
       select: { id: true, name: true, sku: true, archivedAt: true },
     });
+  }
+
+  /**
+   * One listing page in (name, id) order, after the given position. Two
+   * statements rather than one with "cursor IS NULL OR ...", so the row
+   * comparison stays an index condition on (business_id, name, id).
+   */
+  async page(options: { includeArchived: boolean; after: { name: string; id: string } | null; limit: number }) {
+    const { includeArchived, after, limit } = options;
+    const tx = currentTx();
+    const rows = after
+      ? await tx.$queryRaw<{ id: string; name: string }[]>`
+          SELECT id, name FROM product
+           WHERE business_id = ${currentBusinessId()}::uuid
+             AND (${includeArchived}::boolean OR archived_at IS NULL)
+             AND (name, id) > (${after.name}::text, ${after.id}::uuid)
+           ORDER BY name, id
+           LIMIT ${limit}::int`
+      : await tx.$queryRaw<{ id: string; name: string }[]>`
+          SELECT id, name FROM product
+           WHERE business_id = ${currentBusinessId()}::uuid
+             AND (${includeArchived}::boolean OR archived_at IS NULL)
+           ORDER BY name, id
+           LIMIT ${limit}::int`;
+    return rows;
+  }
+
+  /**
+   * Search (docs/phase-b-design.md section 6): exact barcode, then exact SKU,
+   * then names starting with the text, then names containing it; by name
+   * within each group. Every value is a parameter; the LIKE patterns arrive
+   * already escaped. RLS applies to both tables. Under RLS no index helps the
+   * name match (LIKE and ILIKE are not leakproof), so it filters this
+   * business's rows; it uses the stored name_lower column (B4, option B)
+   * rather than name ILIKE, which lowercased every name on every search
+   * (shadow database, 20,000 products: 18 ms instead of 108 ms median). The
+   * text is lowercased by the same lower() as the column, so both sides fold
+   * alike; lower() leaves the escapes (\ % _) untouched.
+   */
+  async search(options: {
+    text: string;
+    barcode: string | null;
+    contains: string;
+    prefix: string;
+    includeArchived: boolean;
+    limit: number;
+  }): Promise<string[]> {
+    const { text, barcode, contains, prefix, includeArchived, limit } = options;
+    const rows = await currentTx().$queryRaw<{ id: string }[]>`
+      WITH matches AS (
+        SELECT b.product_id AS id, 0 AS rank
+          FROM product_barcode b
+         WHERE b.barcode = ${barcode}::text
+        UNION ALL
+        SELECT p.id, 1 FROM product p WHERE p.sku = ${text}::text
+        UNION ALL
+        SELECT p.id, CASE WHEN p.name_lower LIKE lower(${prefix}::text) ESCAPE '\\' THEN 2 ELSE 3 END
+          FROM product p
+         WHERE p.name_lower LIKE lower(${contains}::text) ESCAPE '\\'
+      )
+      SELECT p.id
+        FROM (SELECT id, min(rank) AS rank FROM matches GROUP BY id) m
+        JOIN product p ON p.id = m.id
+       WHERE (${includeArchived}::boolean OR p.archived_at IS NULL)
+       ORDER BY m.rank, p.name, p.id
+       LIMIT ${limit}::int`;
+    return rows.map((r) => r.id);
   }
 
   async update(id: string, fields: { name?: string; sku?: string | null; archivedAt?: Date | null }): Promise<void> {
