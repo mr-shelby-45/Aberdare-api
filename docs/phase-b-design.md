@@ -176,7 +176,14 @@ Each step ends with passing tests shown in the session and a commit. Present the
 
 ## 12. Test plan
 
-All automated, real Docker database. Never weaken a test to make it pass. Use the injectable `Clock`. Concurrency tests are genuinely concurrent. Repetition: each new test file runs ten times in a row; the full suite runs twice in a row at the end (the full suite is too slow for ten runs).
+All automated, real Docker database. Never weaken a test to make it pass. Use the injectable `Clock`. Concurrency tests are genuinely concurrent.
+
+**Testing method (from B3 on, set by Ian; B1 and B2 used ten runs per new file and two full-suite runs).** Baseline before B3: the full suite is 240 of 240.
+- During a step: run only that step's new test files until they pass. Do not run the full suite after every small change.
+- Repeat only the tests that involve concurrency or timing (parallel requests, races, locks), 5 runs in a row. Every other new test runs once: repeating a deterministic test proves nothing new.
+- Step gate: run the step's new tests plus every earlier Phase B test file once, and report it as "new N, Phase B cumulative M" (B1 alone; B2 plus B1; B3 plus B1 and B2; and so on). Then run the full suite once, in the background, to catch a break in Phase A or the spike, while Ian reviews.
+- End of phase (after B5): run the full suite 3 times in a row, and write in `docs/phase-b-results.md` exactly how many runs were done and how many tests passed in each. Never write a number that was not observed.
+- Unchanged: no test runs while a migration waits for review; the mutation checks are still required; a failing test is never weakened.
 
 **B1: schema, triggers, locations**
 1. The RLS coverage test passes with `product_barcode` included (forced RLS, `shop_only` policy).
@@ -228,7 +235,7 @@ All automated, real Docker database. Never weaken a test to make it pass. Use th
 2. Every audit action in section 8 is written once, in the same transaction.
 3. No log line for a sync request, a failed command, or a 500 contains payload prices, barcodes, names or tokens (log lines carry command types and ids only).
 4. The manual walkthrough (section 13) runs end to end.
-5. The new test files pass ten runs in a row, and the full suite passes twice in a row.
+5. The step gate passes ("new N, Phase B cumulative M"), the concurrency and timing tests pass 5 runs in a row, and the full suite passes 3 runs in a row at the end of the phase, with each run's count written down as observed.
 
 **Proof the tests catch mistakes.** Apply each temporarily, show the named test failing, then revert and confirm the revert:
 1. Return `cost_price` regardless of permission: B4 test 4 must fail.
