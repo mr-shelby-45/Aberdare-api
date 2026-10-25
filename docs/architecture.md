@@ -47,6 +47,7 @@ API process (NestJS + Fastify)  ----->  PostgreSQL  <-----  Worker process (pg-b
 Database roles:
 - `migrator`: owns the tables, runs migrations. Used only by migration commands.
 - `app_user`: used by the API and worker. Not the owner. `NOBYPASSRLS`. Has only the table privileges it needs.
+- `identity_owner` (Phase A): NOLOGIN, not BYPASSRLS. Owns only the identity lookup functions of the non-tenant access path below.
 
 Policy pattern, applied to every tenant table:
 
@@ -70,9 +71,20 @@ Per-request flow:
 
 As built in the spike (step 1): `TenantRunner.run(businessId, fn)` in `src/database/tenant.ts` does steps 2 to 5 with Prisma 7 and the pg driver adapter. Repositories call `currentTx()`, which throws `TENANT_CONTEXT_MISSING` outside a tenant transaction; nested `run()` calls are refused. The interceptor in step 2 is not built yet: it needs the guard and token from section 4 and will call `TenantRunner.run()`. `withSavepoint()` in the same file is used when a failure must be recorded inside the transaction (section 5). Schema-level privileges for app_user live in a migration, not only in the Docker init script, because a fresh database or `prisma migrate reset` only gets what migrations contain (step 4).
 
-**OPEN (decision for Ian):** the database role is called `app_user`, and so is the person table in section 12. Postgres keeps roles and tables apart, so it works, but it is easy to misread. Rename one of them before the auth tables are created.
+**DECIDED (Phase A):** the people table is called `person`. `app_user` means only the database login role.
 
-Tables that are not tenant-owned (no RLS): `app_user` lookups during login, and the lookup of a shop key. Those code paths use a separate, narrowly scoped access path (a small set of SQL functions or a limited repository) and are reviewed carefully. Keep this list as short as possible.
+**Non-tenant access path (DECIDED, Phase A; details in `docs/phase-a-design.md` section 5).** Login must find a person, device or refresh token before any business is known, but RLS shows nothing without a tenant.
+- A third role, `identity_owner` (NOLOGIN, not BYPASSRLS), owns a small set of `SECURITY DEFINER` functions. Each takes one exact key, returns only the columns it needs for at most a handful of rows, and cannot list or search. They use `SET search_path = pg_catalog, public`, no dynamic SQL, `REVOKE EXECUTE ... FROM PUBLIC` and `GRANT EXECUTE ... TO app_user`.
+- On each table the functions touch (`person`, `membership`, `device`, `refresh_token`, `business`), an extra policy `TO identity_owner` lets the functions through. FORCE RLS applies to owners too, so this policy is what makes them work. `identity_owner` gets the minimum privileges, by column where possible.
+- `app_user` itself gets no cross-tenant SELECT on anything.
+- `identity_owner` is created in the Docker init script and by hand on the real host, like the other roles. A migration that needs it fails with a clear message if it is missing.
+
+Non-tenant tables:
+- `person` (one human across all businesses: phone, email, password). RLS enabled: `app_user` may SELECT a person only when that person has a membership in the current business, and has no INSERT, UPDATE or DELETE; writes go through the identity functions.
+- `otp_challenge` (login and signup codes). No RLS; it holds nothing tenant-related.
+- The shop key lookup (Phase G) will use the same kind of function.
+
+**Business RLS (DECIDED, Phase A):** `business` gets RLS with the policy `id = NULLIF(current_setting('app.business_id', true), '')::uuid` for USING and WITH CHECK. Signup generates the new business id on the server, sets it as the tenant, then inserts.
 
 Constraints:
 - Transactions must stay short (Prisma's default interactive transaction timeout is about 5 seconds). No network calls inside them.
@@ -81,21 +93,22 @@ Constraints:
 
 ## 4. Authentication
 
-**DECIDED.**
+**DECIDED (revised for Phase A; full detail in `docs/phase-a-design.md` sections 6 to 10).** Phone numbers are normalised to E.164 and unique on `person.phone`. One person may have memberships in several businesses; each business has exactly one owner.
 
-**Owner**: signs up and logs in with phone number plus SMS one-time code (OTP). Phone numbers are normalised to E.164 and unique on `app_user.phone`.
+**Owner**: signs up with phone and email, both proven by a code (SMS and email), then sets a password and a 4-digit PIN. Logs in on a new phone or after reinstall with **email and password**. Password reset by email code revokes all of that person's refresh tokens.
 
-**Staff (attendants and managers)**: identified by phone number, which is unique on `app_user`. The owner adds a staff member in the app:
-1. The server creates the `app_user` (if the phone is new) and a `membership` row for this business with status `invited`, the chosen role preset and permissions.
-2. The app generates a temporary PIN and shows it to the owner once. Only its hash is stored. It expires in a few days and works once.
-3. First login on the staff phone: phone number plus temporary PIN. The staff member sets their own PIN and confirms an SMS code. A `device` row is created and the membership becomes `active`.
-4. Later logins: the app sends device ID plus PIN. The server finds the device, then its membership, then compares one hash. No phone number needed.
+**Staff (attendants and managers)**: identified by phone. The owner adds a staff member in the app:
+1. The server upserts the `person` (if the phone is new) and creates a `membership` for this business with status `INVITED`, the chosen role preset and extra permissions.
+2. The server generates a 6-digit temporary PIN, shown to the owner once. Only its hash is stored. It works once, expires in 3 days, and 5 wrong tries kill it.
+3. First login on the staff phone: `POST /auth/first-login` with phone and temporary PIN returns a short-lived setup token and sends an SMS code. `POST /auth/staff/activate` with the code, a new 4-digit PIN and the device details sets the PIN, marks the phone verified, makes the membership `ACTIVE` and registers the device. (This replaces the earlier `set-pin` and `verify-device` endpoints.)
 
-PIN hashing: argon2id with a server-side pepper (bcrypt acceptable if argon2 gives trouble). Failed attempts are counted per membership; after 5 wrong tries the membership is locked until the owner resets the PIN or a timed lockout passes. Rate limit by IP and by device.
+**Devices and daily login**: registering a device issues a random **device secret** (32 bytes), shown to the app once and stored only as a SHA-256 hash. Daily login is `device_id` + `device_secret` + PIN. The server checks the secret in constant time, then the membership's PIN, status and locks.
 
-Tokens: a short-lived access token carrying `membershipId`, `businessId`, `userId`, `deviceId`, plus a refresh token stored hashed and tied to the device. Logging out or suspending a membership revokes its refresh tokens.
+**Hashing**: Node's built-in `crypto.scrypt` with a server-side pepper for passwords and PINs; HMAC-SHA256 with the pepper for codes; SHA-256 for high-entropy secrets (refresh tokens, device secrets). No argon2 or bcrypt. Lockouts: 5 wrong PINs lock the membership for 15 minutes, 10 in a row need a reset; 5 wrong passwords lock the person for 15 minutes. Rate limit by IP on every public auth route.
 
-**Shared tablet**: the owner can mark a device as a "shared shop device" (Settings, Devices). A `device_membership` row links the device to each staff member allowed on it. The app shows a "Who is selling?" lock screen with first names and a PIN pad. The PIN is checked for the chosen membership on that device.
+**Tokens**: a 15-minute JWT access token (`@nestjs/jwt`) carrying only `sub` (person id), `mid` (membership id), `bid` (business id) and `did` (device id). No permissions or names. A 30-day refresh token (32 random bytes, stored as a SHA-256 hash, tied to a membership and device) rotates on every use; reusing a used token revokes its whole family. Logging out, suspending a membership or revoking a device revokes its refresh tokens.
+
+**Shared tablet**: the owner can mark a device as a "shared shop device" (Settings, Devices). A `device_membership` row links the device to each staff member allowed on it. The app shows a "Who is selling?" lock screen with display names (from `GET /auth/device-members`, authenticated by the device secret) and a PIN pad. The PIN is checked for the chosen membership on that device.
 
 Reinstall is treated as a new device: log in again, then a full snapshot sync rebuilds the local data.
 
@@ -278,12 +291,14 @@ Table list (exact columns are designed during the build and reviewed by Ian befo
 
 | Table | Purpose |
 |---|---|
-| business | the tenant: name, type, till number, subscription state, settings |
+| business | the tenant: name, type (`RETAIL`, `WHOLESALE`, `WAREHOUSE`), till number, subscription state, settings. RLS on its own `id` from Phase A |
 | location | a shop or warehouse of a business |
-| app_user | a person: phone (unique, E.164), name. Not tenant-owned. |
-| membership | a person's role in one business: status, permissions, PIN hash, lockout counters |
-| device | a registered phone: push token, last sync, shared flag |
+| person | one human across all businesses: phone (unique, E.164), verified flags, email (unique, nullable), password hash (owners only), login lockout. Not tenant-owned; read through the identity functions (section 3) |
+| membership | a person's role in one business: display name, role preset, extra permissions, status (`INVITED`, `ACTIVE`, `SUSPENDED`, `REMOVED`), PIN hash, temporary PIN hash and expiry, lockout counters. Exactly one `OWNER` per business |
+| device | a registered phone: name, platform, device secret hash, shared flag, status (`ACTIVE`, `REVOKED`), push token (Phase F), last seen and last sync |
 | device_membership | which memberships may sell on a shared device |
+| refresh_token | rotating refresh tokens: membership, device, family, token hash, expiry, used and revoked times |
+| otp_challenge | SMS and email codes: channel, target, purpose, code hash, expiry, attempts, verified and consumed times. Not tenant-owned, no RLS |
 | product | name, category, cost price, sell prices |
 | pack_type | piece, carton of N, and so on, with its own price |
 | product_barcode | barcode to product and pack type, unique per business |
@@ -298,7 +313,7 @@ Table list (exact columns are designed during the build and reviewed by Ian befo
 | change_log | what changed, for `sync/changes` |
 | subscription | plan, state, trial end, grace end, payments |
 | notification | see section 10 |
-| audit_log | see section 11 |
+| audit_log | see section 11. Built in Phase A: actor membership, action, target type and id, metadata (never secrets), ip, occurred_at. Append-only |
 | error_event | see section 11 |
 
 Standard columns on tenant tables: `id uuid`, `business_id uuid`, `created_at timestamptz`, `updated_at timestamptz`. Primary keys are UUIDs. Records created offline use phone-generated UUIDs.
@@ -316,10 +331,18 @@ As built in the spike (columns approved by Ian per step):
 
 All under `/v1`, JSON, access token required unless stated.
 
-- **auth** (no token): `POST /auth/otp/request`, `/auth/otp/verify`, `/auth/first-login`, `/auth/set-pin`, `/auth/verify-device`, `/auth/pin`, `/auth/refresh`, `/auth/logout`
+- **auth** (no token unless stated; Phase A, see `docs/phase-a-design.md` section 6):
+  - owner signup: `POST /auth/signup/start`, `POST /auth/signup/verify`, `POST /auth/signup`
+  - owner login: `POST /auth/login` (email and password; may answer `requires_selection` with a selection token)
+  - password reset: `POST /auth/password/forgot`, `POST /auth/password/reset`
+  - staff first login: `POST /auth/first-login`, `POST /auth/staff/activate`
+  - daily login: `POST /auth/pin` (device id, device secret, PIN)
+  - shared tablet: `GET /auth/device-members` (device id and secret in headers)
+  - tokens: `POST /auth/refresh`, `POST /auth/logout` (token required)
+- **me** (token): `GET /me`
 - **business**: `GET/PATCH /business`, `/locations`
-- **staff**: `POST /staff` (returns the temporary PIN once), `PATCH /staff/:id`, `POST /staff/:id/reset-pin`, `POST /staff/:id/suspend`, `DELETE /staff/:id`
-- **devices**: `GET /devices`, `PATCH /devices/:id` (shared flag), `DELETE /devices/:id`
+- **staff** (`staff.manage`): `POST /staff` (returns the temporary PIN once), `GET /staff`, `PATCH /staff/:id`, `POST /staff/:id/reset-pin`, `POST /staff/:id/suspend`, `POST /staff/:id/reactivate`, `DELETE /staff/:id` (status `REMOVED`, never a hard delete)
+- **devices** (`devices.manage`): `GET /devices`, `PATCH /devices/:id` (name, shared flag), `DELETE /devices/:id` (revoke), `POST /devices/:id/members`, `DELETE /devices/:id/members/:membershipId`
 - **reads**: `GET /products?q=`, `/products/by-barcode/:code`, `/stock`, `/stock/movements`, `/sales`, `/payments/pending`, `/orders`, `/reports/*`, `/audit-log`, `/notifications`, `/subscription`
 - **sync**: `POST /sync/commands`, `GET /sync/snapshot`, `GET /sync/changes?cursor=`
 - **manager actions**: `POST /sales/:id/void`, `POST /payments/:id/approve`
@@ -340,7 +363,7 @@ All under `/v1`, JSON, access token required unless stated.
 | sales.void, payments.approve, reports.view | no | yes | yes |
 | costs.view, staff.manage, devices.manage, subscription.manage, shopkey.manage | no | no | yes |
 
-Every protected endpoint and sync command checks its permission in the controller or command dispatcher, using the permissions in the token and, for sensitive actions, the live membership row (so suspending someone takes effect immediately).
+Permissions are **read live from the database on every request**, never stored in the token (Phase A decision). Inside the tenant transaction, the `TenantInterceptor` loads the membership and device, refuses unless both are `ACTIVE`, computes effective permissions (role preset plus `extra_permissions`) and checks the route's `@RequirePermission(...)`. Sync commands check the same effective permissions in the command dispatcher. Suspending someone or changing a permission therefore takes effect on the very next request. The check never lives in a Nest guard, because guards run before the tenant transaction exists. `stock.convert` can never be an extra permission on an attendant (rejected on write, ignored on read). The owner cannot be suspended, removed or demoted.
 
 ## 15. Hosting
 
@@ -367,10 +390,19 @@ On a hosted database the two roles and the databases must be created once by an 
 
 Added at the end of the spike (details in `docs/spike-results.md`, "Open risks"):
 
-8. Rename the `app_user` table or the `app_user` role (section 3).
+8. ~~Rename the `app_user` table or the `app_user` role.~~ Decided in Phase A: the table is `person` (section 3).
 9. A database home for pg-boss: its schema created by a migration or its own role, since app_user cannot create anything.
 10. Production pool size and connection wait (`DATABASE_POOL_MAX`, `DATABASE_TX_MAX_WAIT_MS`), after a load test on the chosen host. Also whether a connection pooler sits in front of Postgres.
 11. A shared rate-limit store for several API instances (Postgres-backed; Redis is ruled out).
 12. Sentry: approve its SDK.
 13. Sync commands: an attempt limit for commands that always crash, and a payload hash to catch a reused command UUID.
 14. A fixed lock order for any operation that changes several stock balance rows.
+
+Added with the Phase A design (`docs/phase-a-design.md` section 18):
+
+15. Email provider and sending domain (needed before launch).
+16. Real SMS provider setup (Africa's Talking account) and a test with a real phone.
+17. A common-password list for the password rule.
+18. Notify the owner's other devices (and by email) when a new device registers (Phase F). Reduces the impact of a stolen password.
+19. How long to keep audit log IP addresses, and the data protection position on storing them.
+20. Lost access to the owner's email is a support process for now. Design it before launch.

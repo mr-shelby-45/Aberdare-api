@@ -16,6 +16,8 @@ The owner of the project is Ian, a developer who knows Next.js and TypeScript we
 
 **PHASE A: IDENTITY. Design first, then build.**
 
+The Phase A design is `docs/phase-a-design.md`. It is the source of truth for this phase and wins over `docs/architecture.md` where they disagree.
+
 The spike proved the risky foundations. Real features are now built in the order below, one phase at a time. Do not start a phase until Ian writes "Phase X approved" in the status line at the end of this section. Do not build features from a later phase, even if it seems convenient.
 
 | Phase | Contents |
@@ -49,6 +51,7 @@ These are decided. Do not substitute, add alternatives, or "improve" them. If yo
 - Tests: Vitest (the NestJS 12 default; changed from Jest with Ian's approval) plus real Postgres in Docker. Do not mock the database in spike tests. A mocked database proves nothing about RLS or concurrency.
 - Package manager: pnpm. Node: current LTS.
 - Validation: `class-validator` and `class-transformer` DTOs, plus a config schema checked at startup.
+- Access tokens: `@nestjs/jwt` (approved for Phase A). Password, PIN and code hashing use Node's built-in `crypto` (`scrypt`, HMAC-SHA256). No Passport, bcrypt, argon2 or session library.
 - Hosting is not chosen yet (South Africa region is the plan). The code must only depend on `DATABASE_URL` style environment variables. No cloud-provider SDKs.
 
 Before adding ANY library not listed here, ask. Say what it is for and why Nest, Fastify, Prisma or the standard library cannot do it.
@@ -122,7 +125,7 @@ These protect real shopkeepers' money and data. Treat a violation as a bug even 
 
 **Secrets and logs**
 12. Never log or return PINs, OTPs, tokens, shop keys, full phone numbers (mask all but the last 3 digits), full request bodies, or M-Pesa secrets.
-13. Store PINs and shop keys only as hashes (argon2id plus a server-side pepper). Show a temporary PIN or shop key to the user once at creation.
+13. Store PINs and shop keys only as hashes (Node's `crypto.scrypt` plus a server-side pepper; see `docs/phase-a-design.md` section 7). Show a temporary PIN or shop key to the user once at creation.
 14. No `console.log`. Use the project logger (structured JSON). Every log line has a UTC timestamp and a request ID.
 15. No secrets in the repo. `.env` is git-ignored. Provide `.env.example` with fake values.
 
