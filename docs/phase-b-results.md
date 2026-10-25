@@ -1,6 +1,92 @@
 # Phase B results
 
-Filled in step by step. The full summary (see `docs/phase-b-design.md` section 15) is written when B5 is finished. Only Ian marks the phase done, in `CLAUDE.md` section 2.
+**Status: all five steps (B1 to B5) passed. Waiting for Ian's review.** Only Ian marks Phase B done, in CLAUDE.md section 2. The manual walkthrough for Ian is `docs/phase-b-walkthrough.md`.
+
+**Final suite (end of phase, 3 runs in a row):** 3 runs done, all passed, on the commit that adds this summary. Run 1: 19 files, 269 of 269 (201.4 s). Run 2: 19 files, 269 of 269 (175.4 s). Run 3: 19 files, 269 of 269 (175.6 s). Lint, type-check, build and the drift check were clean before the runs. Earlier failed runs during Phase B are recorded in their step sections below, as observed.
+
+## Summary
+
+| Step | What it built | New tests | Phase B cumulative | Workarounds and notable changes |
+|---|---|---|---|---|
+| B1 | Catalogue schema, triggers, default location, location endpoints, `locations.manage` | 11 | 11 | Default-then-drop for new NOT NULL columns; `REVOKE DELETE ON product` (approved); `change_log.row_key` for barcodes |
+| B2 | `@OwnTransactions()`, `POST /v1/sync/commands`, `product.create`, `product.update`, `pack_type.upsert` | 21 | 32 | Constraint name read from Prisma 7's error (probe); three barcode tests fixed for a wrong 13-digit example |
+| B3 | `barcode.add`, `barcode.remove`, `GET /products/by-barcode/:code` | 8 | 40 | Test speed-ups (scrypt cost and `synchronous_commit`, test only); A4's race test made deterministic |
+| B4 | Listing, search, by-id, signed cursor | 9 | 49 | Trigram index unusable under RLS (wording corrected); `name_lower` generated column (option B) after a flaky speed test |
+| B5 | Hardening tests, grants inventory, log checks, walkthrough | 8 | 57 | Test app pool wait 10 s (approved) after a pool timeout under heavy CPU load |
+
+Phase B also added 4 tests outside the Phase B files (`test/password-hasher.spec.ts`, the production-cost guard for the test speed-up). The full suite went from 240 (before B3) to the count shown above.
+
+## Final patterns
+
+| Concern | Pattern | Where |
+|---|---|---|
+| Per-command transactions | `@OwnTransactions()` on `POST /v1/sync/commands` only (a test enforces it): the session is checked in a short tenant transaction, then each command gets its own tenant transaction with the spike's claim, savepoint and store core | `src/common/auth/own-transactions.decorator.ts`, `src/modules/auth/tenant.interceptor.ts`, `src/modules/sync/sync.service.ts` |
+| Dispatcher order | Envelope, unknown type, type permission, `occurred_at` (not more than 24 h ahead), payload, payload-dependent permissions (`costs.view` for any `cost_price`), handler in a savepoint. `FAILED` logged by id, type and error name only | `src/modules/sync/sync.service.ts`, `sync.controller.ts` |
+| Conflicts | Rules checked in code first for clear reasons; unique violations mapped by constraint name (`uniqueViolationConstraint()`, Prisma 7: `meta.driverAdapterError.cause.constraint.index`) | `src/database/db-errors.ts`, `src/modules/products/products.service.ts` |
+| Ordering of changes | Every product or pack type change locks the product row; a units change also locks the pack type row, so no stock movement can appear between the `UNITS_LOCKED` check and the update | `products.repository.ts`, `pack-types.repository.ts` |
+| Idempotent barcode add | `INSERT ... ON CONFLICT (business_id, barcode) DO NOTHING RETURNING id`, then a fresh read: same pack type is a no-op, otherwise `BARCODE_TAKEN` | `barcodes.repository.ts` |
+| Barcode normalisation | Trim; a 12-digit numeric code gets a leading 0; `^[A-Za-z0-9._-]{4,48}$`; no check digits; case kept. Applied on every write and lookup | `src/modules/products/barcode.ts` |
+| Money | Strings matching `^\d{1,12}(\.\d{1,2})?$`, normalised by string work (`normalizeMoney`), `NUMERIC(14,2)` in the database, read back as `numeric::text`; never a JavaScript number | `src/common/validation/money.ts`, `pack-types.repository.ts` |
+| Search | One parameterised SQL: barcode (rank 0), SKU (1), name prefix (2), name contains (3), on `name_lower LIKE lower(pattern) ESCAPE '\'` with `%`, `_`, `\` escaped; RLS on every table | `products.repository.ts` (`search`) |
+| Listing | Keyset on `(name, id)` through `product_business_id_name_id_idx`; two statements so the row comparison stays an index condition; cursor signed with HMAC-SHA256 (key from `AUTH_PEPPER`) and bound to `include_archived` | `products.repository.ts` (`page`), `product-cursor.ts` |
+| Cost price | The `cost_price` key is absent (not null) without `costs.view`, on every read | `src/modules/products/product-view.ts` |
+| Generated column | Hand-written `GENERATED ALWAYS ... STORED`, declared in Prisma as `@default(dbgenerated(...)) @ignore` so Prisma neither drops it nor exposes it | `*_b4_product_name_lower`, `schema.prisma` |
+
+## Proof the tests catch mistakes
+
+Each was applied temporarily, the named test failed, and the change was reverted and checked (backups compared byte for byte, or the database function's md5 compared).
+
+| Design mutation | Test that failed | What it caught |
+|---|---|---|
+| 1. `cost_price` returned regardless of permission | B4 test 4 | an attendant saw the `cost_price` key |
+| 2. Check-then-insert for barcodes | B3 test 3 | only 10 of 19 concurrent losers got `BARCODE_TAKEN`; the rest crashed into the unique index |
+| 3. `%` and `_` not escaped | B4 test 2 | `0%` also matched "500 grams rice" |
+| 4. `UNITS_LOCKED` check removed | B2 test 11 | a units change was `ACCEPTED` after a stock movement |
+| 5. Barcode delete not logged by the trigger | B3 test 4 and B5 test 1 | the `DELETE` row was missing from `change_log` |
+| 6. Plain key on `pack_type_id` instead of the composite key | B1 test 2 | a barcode was accepted on another product's pack type |
+| 7. `archived_at IS NULL` dropped from search | B4 test 3 | the archived product appeared |
+
+## Versions
+
+Unchanged since Phase A (`docs/phase-a-results.md`). No library was added in Phase B.
+
+## Things to know
+
+1. **Exact inventories must be updated on purpose:** the RLS table list, the trigger and function list and `HAND_WRITTEN_INDEXES` (`test/step4-migrations.spec.ts`), and now the grants inventory (`test/b5-hardening.spec.ts`). Forgetting one fails the build; updating it is expected, never a weakening.
+2. **Under RLS, `LIKE`/`ILIKE` cannot use an index** (they are not leakproof): a search filters the caller's own business rows. Keep that filter cheap (`name_lower`), and measure as `app_user`, never as the superuser.
+3. **Faster test hashing changed race timing.** A race test that relied on slow hashing to keep two requests overlapping stopped testing the race; it now forces the overlap. Never widen such an assertion to "either answer".
+4. **This machine is noisy under load** (2 cores; the same query varied 3 times between runs; one gate took six times its normal time). Leave clear margins under time bounds, and make timing tests write their measurements before asserting.
+5. **Barcode examples: count the digits.** Only a 12-digit code gets a leading zero.
+6. **Reverting a mutation on a file that is not in git yet:** `git checkout` fails quietly; restore from a copy and compare.
+7. **A generated column needs both `dbgenerated(...)` and `@ignore`** in `schema.prisma`, or Prisma generates a `DROP COLUMN` or a failing `DROP DEFAULT`.
+8. **Run real-API checks against the test database**, so the dev database stays clean for Ian's walkthroughs.
+
+## Open risks
+
+Roughly in order of how soon they matter.
+
+1. **Carton barcodes** (design open item 1): if a real carton shows the same number as its pieces, one barcode must map to several pack types of one product, and the app must ask "piece or carton?". Ian checks a real carton.
+2. **Overload answers 500** (architecture open item 30): a burst bigger than the pool fails the whole request with `500 INTERNAL_ERROR` when no connection frees up within `DATABASE_TX_MAX_WAIT_MS` (2 s in production). It should be `503` with `Retry-After`. Decide with the production pool size and a load test (spike risk 4).
+3. **Error codes hidden in logs** (architecture open item 31): redacting the field name `code` also hides Prisma error codes. Log them as `errorCode`.
+4. **Search cost grows with one shop's product count** (about 8 ms of database time at 20,000 products here). No index helps under RLS; revisit well past 100,000 products in one shop.
+5. **Accepted `ALREADY_EXISTS` leak:** a command with a product or pack type id that exists in another business reveals that the random id exists somewhere (decided in B2).
+6. **Commands that always crash are retried forever** (spike risk 7): still open; `FAILED` is not stored.
+7. **An `occurred_at` more than 24 hours ahead is a stored rejection:** a phone with a badly wrong clock must resend under a new command id after fixing it.
+8. **Cost prices sit in audit metadata:** any future audit read endpoint must hide them from anyone without `costs.view` (design section 8).
+9. **The production pool size and wait** are still unmeasured (spike risk 4); the test app's 10 s wait says nothing about production.
+10. **Docker Desktop crashed once during B2** (and once in the spike); a full run lost to it was repeated, and recorded.
+
+## The search plan and timings
+
+See "B4: Search and listing" below: the probe that found the trigram index unusable under RLS, the flaky `ILIKE` runs, the comparison of five ways to match, the two series of five runs with `name_lower`, and the recorded `EXPLAIN` plan.
+
+## Changes to the other documents
+
+- `docs/phase-b-design.md`: section 12 holds Ian's new testing method (from B3); section 6 item 2 corrected about the trigram index and records `name_lower` (approved in B4).
+- `docs/architecture.md`: sections 5 (commands, the endpoint, the route marker, as built in B2), 7 (barcodes and search, as built in B3 and B4), 12 (catalogue tables and columns, `row_key`, no product deletes), 13 (location and catalogue endpoints), 14 (`locations.manage`), 16 (open items 21 to 31).
+- `CLAUDE.md`: section 2 phase table (B gains `POST /sync/commands`, D keeps snapshot and changes); section 8 notes on the sync endpoint and handlers, constraint names, inventories, NOT NULL columns, generated columns, RLS and `LIKE`, the test speed-ups, the race-test lesson, the testing method, timing tests, mutation reverts, barcode test data, the test pool wait, the grants inventory and real-API runs.
+
+# Step details
 
 ## B1: Schema, triggers, locations (passed)
 
@@ -157,3 +243,22 @@ The trigram index was not used; the test asserts that, so a future plan change i
 1. Search cost grows with one business's product count (about 8 ms of database time at 20,000 here). No index can help under RLS; revisit if a single shop goes well past 100,000 products.
 2. `name_lower` is maintained by Postgres; nothing can write it (checked by a test, which also checks a rename is searchable at once). Non-ASCII letters fold the same way on both sides ("ÉLAN" finds "Café Élan").
 3. Seeding 20,000 rows through the change_log trigger takes about 20 s, longer than Prisma's 5-second transaction limit; test 8 seeds over a plain `app_user` connection instead (still RLS and the trigger).
+
+## B5: Hardening and handover (passed)
+
+**Result:** new 8 (`test/b5-hardening.spec.ts` 7, `test/b5-walkthrough.spec.ts` 1), Phase B cumulative 57 (B1 11, B2 21, B3 8, B4 9, B5 8), all passing in one gate run after the pool-wait change below. The end-of-phase full runs are at the top of this file.
+
+**Built (approved by Ian on 2026-10-26, with the four recommended answers):**
+- B5 test 1, `change_log` coverage: inserts and updates through the real paths for `product`, `pack_type`, `location` and `product_barcode`, asserted row by row; the barcode delete row carries the code in `row_key`; `app_user` is refused DELETE on `product`, `pack_type` and `location`, and the trigger's delete branch is proven by a rolled-back delete as `migrator`; a crash after each kind of write leaves no `change_log` row.
+- B5 test 2, audit: one scenario writes all 12 actions of design section 8 exactly once, each by the acting member; a crash right after the audit insert leaves no audit row and no data change, for all five command types and both location writes.
+- B5 test 3, logs: an accepted, a rejected and a `FAILED` command, a 500 on the sync route whose error message quotes the data, a search, a scan and a token refresh. The raw log of the whole file contains no product name, SKU, price, cost price, barcode, search text, access token or refresh token; the one `sync command failed` line carries only the command id, type and error name.
+- Grants inventory (approved addition): `app_user`'s exact privileges on all 18 tables (including none on `otp_challenge`, `person` beyond six columns and `_prisma_migrations`), the column grants on `business` and `person`, and nothing granted to PUBLIC.
+- B5 test 4, the walkthrough: `docs/phase-b-walkthrough.md` (curl, design section 13's ten steps) and `test/b5-walkthrough.spec.ts`, which runs the same steps with the same values and the dev fixed codes switched on, so the document is checked on every test run. No Bruno collection (decided).
+- One real curl run of the walkthrough against the built API (`node dist/main`, port 3100) pointed at the test database, so the dev database stays clean for Ian. All ten steps answered as documented (for example step 7: `piece=150.00, carton of 24=null` for the owner, `PERMISSION_DENIED` for the manager; step 10: each business scans the same code to its own carton). The server's own log (98 lines) contained none of the names, prices, barcodes, tokens, phones, emails or codes (one match for "150" was inside a timestamp of a startup line).
+
+**Proof the tests catch mistakes:**
+- Design mutation 5 again, now against B5 test 1 (as the design requires): the barcode trigger without its delete made B5 test 1 fail (the `DELETE` row was missing). The function was restored from its migration and its definition checked identical (md5 before and after).
+
+**The first gate run failed (recorded as observed):** 56 of 57 passed; B3's "20 concurrent adds" got a whole-request `500` (412 s for the gate, about six times the normal time). A temporary probe (a pool of 2 and a 100 ms wait, deleted afterwards) reproduced it: 19 of 20 requests answered `500`, each logged as a Prisma error thrown while starting a transaction. That is spike open risk 4: the test app waited Prisma's default 2 s for one of 10 pooled connections, and other programs kept the CPU about 77 to 80% busy. After Ian closed other programs the test passed 5 of 5 unchanged; the CPU still read 69 to 77% busy with only Claude and Docker open. With Ian's approval the test app now waits up to 10 s for a connection (production keeps 2 s), as spike step 1 test 5 already did; no assertion changed. The gate then passed 57 of 57.
+
+**Two findings recorded as open risks** (architecture open items 30 and 31): overload answers `500` instead of `503`; and the log redaction of the field name `code` also hides harmless error codes (the probe's Prisma code was logged as `[REDACTED]`).

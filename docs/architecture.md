@@ -448,3 +448,8 @@ Added with the Phase B design (`docs/phase-b-design.md` section 17):
 27. Label generation and printing for items without barcodes (in-store EAN-13 range 20 to 29).
 28. A future audit read endpoint must hide cost values from anyone without `costs.view`.
 29. A location restriction per staff member, if a real client needs it.
+
+Found in Phase B5 (`docs/phase-b-results.md`, "Open risks"):
+
+30. A burst bigger than the connection pool answers `500 INTERNAL_ERROR` for the whole request when Prisma cannot start a transaction within `DATABASE_TX_MAX_WAIT_MS`. It should be `503` with `Retry-After`, so phones and operators can tell overload from a bug. Decide with the production pool size (open item 10).
+31. Log redaction hides harmless error codes: the redaction list includes the field name `code` (for SMS codes), so a logged Prisma error code such as `P2028` shows as `[REDACTED]`. Log error codes under another field name (for example `errorCode`), keeping `code` redacted.

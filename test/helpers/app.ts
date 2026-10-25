@@ -44,14 +44,27 @@ export async function startTestApp(env: Record<string, string> = {}): Promise<Te
   });
   const config = loadConfig({ ...TEST_ENV, ...env });
   const clock = new FakeClock();
-  const moduleRef = await Test.createTestingModule({ imports: [withCore(SpikeModule, config)] })
-    .overrideProvider(Clock)
-    .useValue(clock)
-    // Test-only scrypt cost (see fast-password-hasher.ts); the production
-    // cost is checked in test/password-hasher.spec.ts.
-    .overrideProvider(PasswordHasher)
-    .useValue(new FastPasswordHasher(config))
-    .compile();
+  // Test app only (approved by Ian in B5, as in spike step 1 test 5): wait up
+  // to 10 s for a pooled connection instead of Prisma's 2 s. Concurrency tests
+  // fire 20 requests at a pool of 10, and on this busy dev machine the 2 s wait
+  // ran out once (spike open risk 4). Production keeps 2000. PrismaService
+  // reads the setting when it is built, so it is set only around compile().
+  const previousWait = process.env.DATABASE_TX_MAX_WAIT_MS;
+  process.env.DATABASE_TX_MAX_WAIT_MS = env.DATABASE_TX_MAX_WAIT_MS ?? '10000';
+  let moduleRef;
+  try {
+    moduleRef = await Test.createTestingModule({ imports: [withCore(SpikeModule, config)] })
+      .overrideProvider(Clock)
+      .useValue(clock)
+      // Test-only scrypt cost (see fast-password-hasher.ts); the production
+      // cost is checked in test/password-hasher.spec.ts.
+      .overrideProvider(PasswordHasher)
+      .useValue(new FastPasswordHasher(config))
+      .compile();
+  } finally {
+    if (previousWait === undefined) delete process.env.DATABASE_TX_MAX_WAIT_MS;
+    else process.env.DATABASE_TX_MAX_WAIT_MS = previousWait;
+  }
   const app = moduleRef.createNestApplication<NestFastifyApplication>(
     createAdapter(config, { logStream: sink }),
     { rawBody: true, logger: false },
