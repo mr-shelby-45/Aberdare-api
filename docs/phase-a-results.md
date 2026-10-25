@@ -2,7 +2,7 @@
 
 **Status: all five steps (A1 to A5) passed. Waiting for Ian's review.** Only Ian marks Phase A done, in CLAUDE.md section 2. The manual walkthrough for Ian is `docs/phase-a-walkthrough.md`.
 
-**Final suite:** FINAL_SUITE_PLACEHOLDER
+**Final suite:** 12 test files, **208 of 208 tests passed in ten consecutive full runs** (about 218 s each), with lint, type-check, build and the drift check clean, on the commit that adds this summary. An earlier series of ten failed one test each time (the RLS coverage list, see A5) and was repeated from the start after the fix.
 
 ## Summary
 
@@ -60,7 +60,8 @@ Unchanged from `docs/spike-results.md`, plus `@nestjs/jwt` 12.0.3 (approved for 
 6. **Hash before the transaction.** scrypt at ~430 ms inside a transaction would hold a connection and approach Prisma's 5-second limit under load. (A2)
 7. **Queries on one transaction run one after another.** No `Promise.all` on the request's transaction. (A4)
 8. **The request's one transaction includes the audit row,** so an action and its record can never disagree. (A5)
-9. **Tests here are slow:** a full run is over 10 minutes on this machine, and the first after a restart spends ~5 minutes importing. Run long suites in the background. (A5)
+9. **Tests here are slow:** a warm full run takes about 4 minutes on this machine, and the first after a restart can take 10 (about 5 minutes of module import). Run long suites in the background. (A5)
+10. **A new tenant table must also be added to the RLS coverage test's list** (`test/step4-migrations.spec.ts`). That list is a deliberate inventory, so updating it is expected, never a weakening. (A5)
 
 ## Open risks
 
@@ -224,6 +225,7 @@ Roughly in order of how soon they matter. Spike risks still open are in `docs/sp
 - Design mutation 5, `device_secret` removed from log redaction: test 3 failed ("a credential of length 43 appears in the logs", the device secret).
 - Design mutation 4 on the new route, `forgot` answering `404 NOT_FOUND` for an unknown email: test 4 failed (`expected { status: 404 ... } to deeply equal { status: 202 ... }`).
 - The rollback test also forces a crash right after the audit insert: the request answers 500, no audit row exists and the staff member is still `ACTIVE`.
+- My own test slip, caught by the spike's RLS coverage test: the first ten full runs each failed one test, because the coverage test pins the list of tables with a `business_id` and I had not added `audit_log` to it. The new table itself was correct (the list showed it); adding it to the list also makes the per-table RLS check cover it, which it had not reached. The ten runs were then repeated from the start.
 - Process slip, caught: the script that reverted mutation 4 used `git checkout` on a file that is not in git yet, so the revert silently failed. Noticed in the output, reverted by hand, and a search for leftover mutation markers runs before the final suite.
 
 **Things to know:**

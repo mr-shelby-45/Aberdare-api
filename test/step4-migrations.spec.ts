@@ -77,6 +77,7 @@ describe('step 4: migrations keep hand-written SQL', () => {
       );
       const nullif = "(business_id = (NULLIF(current_setting('app.business_id'::text, true), ''::text))::uuid)";
       expect(rows.map((r) => r.tbl)).toEqual([
+        'audit_log',
         'change_log',
         'device',
         'device_membership',
