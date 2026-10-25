@@ -78,9 +78,13 @@ describe('step 4: migrations keep hand-written SQL', () => {
       const nullif = "(business_id = (NULLIF(current_setting('app.business_id'::text, true), ''::text))::uuid)";
       expect(rows.map((r) => r.tbl)).toEqual([
         'change_log',
+        'device',
+        'device_membership',
         'location',
+        'membership',
         'pack_type',
         'product',
+        'refresh_token',
         'stock_balance',
         'stock_conversion',
         'stock_movement',
@@ -106,12 +110,19 @@ describe('step 4: migrations keep hand-written SQL', () => {
       expect(found.triggers).toEqual([{ tgname: 'product_change_log', tbl: 'product' }]);
       expect(found.functions).toEqual([{ proname: 'log_product_change' }]);
       expect(found.extensions).toEqual([{ extname: 'pg_trgm' }]);
-      expect(found.indexes.map((i) => i.indexname)).toEqual([
+      const byName = new Map(found.indexes.map((i) => [i.indexname, i.indexdef]));
+      expect([...byName.keys()]).toEqual([
+        'membership_one_owner_per_business',
         'pack_type_one_base_unit_per_product',
         'product_name_trgm_idx',
       ]);
-      expect(found.indexes[0].indexdef).toMatch(/CREATE UNIQUE INDEX .* WHERE \(units_per_pack = 1\)/);
-      expect(found.indexes[1].indexdef).toMatch(/USING gin \(name gin_trgm_ops\)/);
+      expect(byName.get('pack_type_one_base_unit_per_product')).toMatch(
+        /CREATE UNIQUE INDEX .* WHERE \(units_per_pack = 1\)/,
+      );
+      expect(byName.get('product_name_trgm_idx')).toMatch(/USING gin \(name gin_trgm_ops\)/);
+      expect(byName.get('membership_one_owner_per_business')).toMatch(
+        /CREATE UNIQUE INDEX .*\(business_id\) WHERE \(role_preset = 'OWNER'::role_preset\)/,
+      );
     });
 
     it('migrations alone give app_user access to the public schema, and nobody else can create in it', async () => {

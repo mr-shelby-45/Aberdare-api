@@ -4,6 +4,11 @@
 -- app_user: used by the API, the worker and the tests. Not an owner, cannot
 --           bypass RLS, cannot create anything. It has no table privileges
 --           here; each migration grants exactly what the app needs per table.
+-- identity_owner: no login. Owns only the identity lookup functions of the
+--           non-tenant access path (docs/phase-a-design.md section 5).
+--
+-- On a hosted database an administrator runs the CREATE ROLE and GRANT
+-- statements below once, by hand (this script does not run there).
 
 \getenv migrator_password MIGRATOR_PASSWORD
 \getenv app_user_password APP_USER_PASSWORD
@@ -13,6 +18,14 @@ CREATE ROLE migrator LOGIN PASSWORD :'migrator_password'
 
 CREATE ROLE app_user LOGIN PASSWORD :'app_user_password'
   NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT;
+
+CREATE ROLE identity_owner NOLOGIN
+  NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT;
+
+-- migrator must be able to hand functions to identity_owner
+-- (ALTER FUNCTION ... OWNER TO needs SET), but must not inherit its
+-- privileges or its RLS policies.
+GRANT identity_owner TO migrator WITH INHERIT FALSE, SET TRUE;
 
 -- aberdare: local development. aberdare_test: automated tests.
 -- aberdare_shadow: scratch database Prisma uses to diff migrations.

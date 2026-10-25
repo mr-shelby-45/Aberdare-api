@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 
 // Test-only helpers. They connect as migrator (the table owner) to set up and
@@ -8,6 +9,23 @@ export async function asMigrator<T>(
 ): Promise<T> {
   const url = process.env.TEST_MIGRATION_DATABASE_URL;
   if (!url) throw new Error('TEST_MIGRATION_DATABASE_URL is not set');
+  const client = new pg.Client({ connectionString: url });
+  await client.connect();
+  try {
+    return await fn(client);
+  } finally {
+    await client.end();
+  }
+}
+
+/**
+ * The postgres superuser, for seeding rows that no app role may write yet
+ * (for example a person's email and password before the A2 signup function).
+ * Never use it for anything under test.
+ */
+export async function asAdmin<T>(fn: (client: pg.Client) => Promise<T>): Promise<T> {
+  const url = process.env.TEST_ADMIN_DATABASE_URL;
+  if (!url) throw new Error('TEST_ADMIN_DATABASE_URL is not set (see .env.example)');
   const client = new pg.Client({ connectionString: url });
   await client.connect();
   try {
@@ -39,19 +57,25 @@ export async function asAppUser<T>(
 export async function resetTables(): Promise<void> {
   await asMigrator((c) =>
     c.query(
-      `TRUNCATE change_log, sync_command, stock_conversion, stock_movement,
+      `TRUNCATE refresh_token, device_membership, device, membership, person,
+                change_log, sync_command, stock_conversion, stock_movement,
                 stock_balance, pack_type, location, product, business CASCADE`,
     ),
   );
 }
 
-/** Creates a business (no RLS on business) and returns its id. */
+/**
+ * Creates a business and returns its id. business has forced RLS on its own
+ * id (Phase A1), so the id is generated first and set as the tenant before the
+ * insert, the same way signup will do it.
+ */
 export async function createBusiness(name: string): Promise<string> {
-  return asMigrator(async (c) => {
-    const res = await c.query<{ id: string }>(
-      'INSERT INTO business (name) VALUES ($1) RETURNING id',
-      [name],
-    );
-    return res.rows[0].id;
+  const id = randomUUID();
+  await asMigrator(async (c) => {
+    await c.query('BEGIN');
+    await c.query("SELECT set_config('app.business_id', $1, true)", [id]);
+    await c.query('INSERT INTO business (id, name) VALUES ($1, $2)', [id, name]);
+    await c.query('COMMIT');
   });
+  return id;
 }

@@ -1,12 +1,14 @@
 import { Module } from '@nestjs/common';
+import { IdentityLookup } from './identity-lookup.js';
 import { PrismaService } from './prisma.service.js';
 import { TenantRunner } from './tenant.js';
 
 // PrismaService is provided here but NOT exported. A class in any other module
 // that asks for PrismaService makes Nest fail at startup with
-// "can't resolve dependencies". Other modules only get TenantRunner.
+// "can't resolve dependencies". Other modules only get TenantRunner and
+// IdentityLookup (the non-tenant access path for login lookups).
 @Module({
-  providers: [PrismaService, TenantRunner],
-  exports: [TenantRunner],
+  providers: [PrismaService, TenantRunner, IdentityLookup],
+  exports: [TenantRunner, IdentityLookup],
 })
 export class DatabaseModule {}

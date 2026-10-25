@@ -46,6 +46,14 @@ export async function withSavepoint<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * The current tenant transaction, or undefined outside one. For the database
+ * layer only (IdentityLookup); repositories use currentTx(), which throws.
+ */
+export function currentTxIfAny(): TenantTx | undefined {
+  return storage.getStore()?.tx;
+}
+
 /** The business of the current tenant transaction. Throws if there is none. */
 export function currentBusinessId(): string {
   const ctx = storage.getStore();

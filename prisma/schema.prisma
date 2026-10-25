@@ -10,20 +10,24 @@ datasource db {
   provider = "postgresql"
 }
 
-// The tenant itself. No RLS in the spike (docs/spike.md step 1).
+// The tenant itself. RLS on its own id from Phase A1 (docs/phase-a-design.md section 4).
 model Business {
-  id               String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  name             String
-  createdAt        DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  products         Product[]
-  locations        Location[]
-  packTypes        PackType[]
-  stockBalances    StockBalance[]
-  stockMovements   StockMovement[]
-  stockConversions StockConversion[]
-  syncCommands     SyncCommand[]
-  changes          ChangeLog[]
+  id                String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name              String
+  createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime           @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  products          Product[]
+  locations         Location[]
+  packTypes         PackType[]
+  stockBalances     StockBalance[]
+  stockMovements    StockMovement[]
+  stockConversions  StockConversion[]
+  syncCommands      SyncCommand[]
+  changes           ChangeLog[]
+  memberships       Membership[]
+  devices           Device[]
+  deviceMemberships DeviceMembership[]
+  refreshTokens     RefreshToken[]
 
   @@map("business")
 }
@@ -185,4 +189,152 @@ model ChangeLog {
 
   @@index([businessId, id])
   @@map("change_log")
+}
+
+// ---------------------------------------------------------------------------
+// Phase A: identity (docs/phase-a-design.md section 4). Columns exactly as
+// designed. Hand-written SQL adds RLS, grants, checks, the one-owner index and
+// the identity functions (section 5).
+// ---------------------------------------------------------------------------
+
+enum RolePreset {
+  OWNER
+  MANAGER
+  ATTENDANT
+
+  @@map("role_preset")
+}
+
+enum MembershipStatus {
+  INVITED
+  ACTIVE
+  SUSPENDED
+  REMOVED
+
+  @@map("membership_status")
+}
+
+enum DeviceStatus {
+  ACTIVE
+  REVOKED
+
+  @@map("device_status")
+}
+
+// One human across the whole system. Not tenant-owned: app_user reads it only
+// for people with a membership in the current business, never the password or
+// lock columns, and never writes it. Writes go through the identity functions.
+model Person {
+  id                String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // E.164, for example +254712345678.
+  phone             String       @unique
+  phoneVerifiedAt   DateTime?    @map("phone_verified_at") @db.Timestamptz(6)
+  // Stored lowercase. Owners only.
+  email             String?      @unique
+  emailVerifiedAt   DateTime?    @map("email_verified_at") @db.Timestamptz(6)
+  // scrypt, self-describing format. Owners only.
+  passwordHash      String?      @map("password_hash")
+  passwordChangedAt DateTime?    @map("password_changed_at") @db.Timestamptz(6)
+  failedLoginCount  Int          @default(0) @map("failed_login_count")
+  loginLockedUntil  DateTime?    @map("login_locked_until") @db.Timestamptz(6)
+  createdAt         DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  memberships       Membership[]
+
+  @@map("person")
+}
+
+// A person's role inside one business. Tenant table.
+model Membership {
+  id                    String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId            String            @map("business_id") @db.Uuid
+  personId              String            @map("person_id") @db.Uuid
+  // Shown on the "Who is selling?" screen.
+  displayName           String            @map("display_name")
+  rolePreset            RolePreset        @map("role_preset")
+  extraPermissions      String[]          @default([]) @map("extra_permissions")
+  status                MembershipStatus
+  pinHash               String?           @map("pin_hash")
+  pinSetAt              DateTime?         @map("pin_set_at") @db.Timestamptz(6)
+  pinFailedCount        Int               @default(0) @map("pin_failed_count")
+  pinLockedUntil        DateTime?         @map("pin_locked_until") @db.Timestamptz(6)
+  tempPinHash           String?           @map("temp_pin_hash")
+  tempPinExpiresAt      DateTime?         @map("temp_pin_expires_at") @db.Timestamptz(6)
+  tempPinFailedCount    Int               @default(0) @map("temp_pin_failed_count")
+  // NULL for the owner membership created at signup.
+  createdByMembershipId String?           @map("created_by_membership_id") @db.Uuid
+  createdAt             DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  business              Business          @relation(fields: [businessId], references: [id])
+  person                Person            @relation(fields: [personId], references: [id])
+  createdBy             Membership?       @relation("MembershipCreatedBy", fields: [businessId, createdByMembershipId], references: [businessId, id])
+  created               Membership[]      @relation("MembershipCreatedBy")
+  devicesRegistered     Device[]
+  deviceLinks           DeviceMembership[]
+  refreshTokens         RefreshToken[]
+
+  @@unique([businessId, id])
+  @@unique([businessId, personId])
+  @@index([personId])
+  @@map("membership")
+}
+
+// A registered phone or tablet. Tenant table.
+model Device {
+  id                       String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId               String             @map("business_id") @db.Uuid
+  name                     String
+  // As reported by the app, for example "android" or "ios".
+  platform                 String
+  // SHA-256 of the 32-byte device secret (shown to the app once).
+  secretHash               String             @map("secret_hash")
+  isShared                 Boolean            @default(false) @map("is_shared")
+  status                   DeviceStatus
+  registeredByMembershipId String             @map("registered_by_membership_id") @db.Uuid
+  // Unused until Phase F.
+  pushToken                String?            @map("push_token")
+  lastSeenAt               DateTime?          @map("last_seen_at") @db.Timestamptz(6)
+  lastSyncAt               DateTime?          @map("last_sync_at") @db.Timestamptz(6)
+  createdAt                DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  business                 Business           @relation(fields: [businessId], references: [id])
+  registeredBy             Membership         @relation(fields: [businessId, registeredByMembershipId], references: [businessId, id])
+  memberLinks              DeviceMembership[]
+  refreshTokens            RefreshToken[]
+
+  @@unique([businessId, id])
+  @@map("device")
+}
+
+// Which memberships may sell on a shared device. Tenant table.
+model DeviceMembership {
+  id           String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId   String     @map("business_id") @db.Uuid
+  deviceId     String     @map("device_id") @db.Uuid
+  membershipId String     @map("membership_id") @db.Uuid
+  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  business     Business   @relation(fields: [businessId], references: [id])
+  device       Device     @relation(fields: [businessId, deviceId], references: [businessId, id])
+  membership   Membership @relation(fields: [businessId, membershipId], references: [businessId, id])
+
+  @@unique([businessId, deviceId, membershipId])
+  @@map("device_membership")
+}
+
+// Rotating refresh tokens. Only the SHA-256 hash is stored. Tenant table.
+model RefreshToken {
+  id           String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId   String     @map("business_id") @db.Uuid
+  membershipId String     @map("membership_id") @db.Uuid
+  deviceId     String     @map("device_id") @db.Uuid
+  // All tokens from one login share a family; reuse revokes the family.
+  familyId     String     @map("family_id") @db.Uuid
+  tokenHash    String     @unique @map("token_hash")
+  expiresAt    DateTime   @map("expires_at") @db.Timestamptz(6)
+  usedAt       DateTime?  @map("used_at") @db.Timestamptz(6)
+  revokedAt    DateTime?  @map("revoked_at") @db.Timestamptz(6)
+  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  business     Business   @relation(fields: [businessId], references: [id])
+  membership   Membership @relation(fields: [businessId, membershipId], references: [businessId, id])
+  device       Device     @relation(fields: [businessId, deviceId], references: [businessId, id])
+
+  @@index([businessId, familyId])
+  @@map("refresh_token")
 }
