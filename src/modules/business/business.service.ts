@@ -13,4 +13,8 @@ export class BusinessService {
   async createForSignup(name: string, type: BusinessType): Promise<void> {
     await this.repo.create(name, type);
   }
+
+  async findCurrent(): Promise<{ id: string; name: string; type: BusinessType } | null> {
+    return this.repo.findCurrent();
+  }
 }

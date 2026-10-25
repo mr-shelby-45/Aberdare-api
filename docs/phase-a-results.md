@@ -68,3 +68,32 @@ Filled in step by step. The full summary (see `docs/phase-a-design.md` section 2
 - Signup is not in the audit log yet (A5).
 - Password reset and staff activation need their own narrow person-writing functions (A3/A4).
 - The libuv thread pool runs four scrypt hashes at a time; a burst of logins queues. Measure under load before launch (Phase H).
+
+## A3: Login, tokens and the request pipeline (passed)
+
+**Result:** 31 new tests pass, covering design section 19 A3 tests 1 to 9. Full suite 167 of 167, twice. The built app answers `GET /v1/me` without a token with `401 TOKEN_INVALID` in the standard shape. No migrations were needed.
+
+**Built (approved by Ian on 2026-10-25):**
+- `AuthGuard` (global, token only) and `TenantInterceptor` (global: one tenant transaction per protected request, live membership and device checks, `@RequirePermission`, handler in the same transaction). `@Public()`, `@RequirePermission()`, `common/auth/permissions.ts` (presets; `stock.convert` never effective for an attendant).
+- `POST /v1/auth/login` (email and password, with `requires_selection` and a 5-minute selection token), `POST /v1/auth/pin`, `POST /v1/auth/refresh` (rotation; reuse revokes the family), `POST /v1/auth/logout`, `GET /v1/me`. scrypt always outside a transaction; counters are single atomic statements.
+
+**Decisions changed during the build (with Ian):**
+- My first lockout recommendation (only the correct password reveals the lock) was a guessing oracle; caught before coding. Ian chose: during a password lockout every answer is `INVALID_CREDENTIALS` (same as an unknown email). PIN locks answer `ACCOUNT_LOCKED` without checking the PIN.
+
+**Proof the tests catch mistakes** (each applied temporarily, then reverted and confirmed gone):
+- Mutation 1, no membership status check in the interceptor: test 4 failed (suspended and removed staff got `200`).
+- Mutation 2, read-then-write refresh claim: test 7 failed (two racing refreshes both succeeded; 11 of 20 concurrent refreshes succeeded with one token).
+- Mutation 4, a different error for an unknown email: tests 1 and 2 failed.
+- Mutation 7, the permission check in a guard: test 6 failed (the guard has no session yet, so even the owner was refused).
+- Real bug, caught by the 10-failure PIN tests: "locked for good" was stored as `pin_locked_until = 'infinity'`, which Prisma reads as an Invalid Date, so the lock never applied (probe confirmed). Now `pin_failed_count >= 10`.
+- One test of mine was too loose ("20 parallel wrong PINs" accepted any count from 5 to 20); tightened before running to the exact invariant: failed count plus lock refusals equals 20.
+
+**Things to know:**
+1. Every route is protected unless marked `@Public()`; forgetting the marker fails closed (401), never open.
+2. The interceptor subscribes to the handler inside `TenantRunner.run`, so all handler work, including writes, is in the request's one transaction.
+3. A session's device must belong to its membership (registered by it, or linked on a shared device); removing someone from a shared device ends their session on the next request.
+4. After a timed password lock passes, one more wrong password locks again at once (the counter is reset only by a correct password). Stricter than "5 more tries"; noted, not changed.
+
+**Open for later steps:**
+- Selection tokens can be replayed within their 5 minutes (needs the password first). Recorded risk, as decided.
+- Audit events for login, PIN lockout and refresh-token reuse come in A5 (`TODO(A5)` in `session.service.ts`).

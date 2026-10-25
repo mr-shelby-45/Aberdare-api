@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import type { FastifyRequest } from 'fastify';
+import { Public } from '../../src/common/auth/public.decorator.js';
 import { IpAllowlistGuard } from '../../src/common/security/ip-allowlist.guard.js';
 import { SpikeItemDto } from './spike-item.dto.js';
 import { SpikeLoginDto } from './spike-login.dto.js';
@@ -17,6 +18,7 @@ import { SpikeLoginDto } from './spike-login.dto.js';
 export const TEST_ALLOWLIST = ['192.0.2.0/24'];
 
 // Spike step 5 only. Lives under test/ so none of it ships.
+@Public()
 @Controller('spike')
 export class SpikeController {
   @Get('ip')

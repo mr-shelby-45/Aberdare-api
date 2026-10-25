@@ -36,6 +36,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       // TODO(verify with Ian): report to Sentry once its SDK is approved.
       request.log.error({ error: safeSummary(exception) }, 'unhandled error');
     }
+    if (exception instanceof ApiError) void reply.headers(exception.headers);
     void reply.status(status).send({
       error: {
         code,

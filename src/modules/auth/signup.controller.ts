@@ -1,5 +1,6 @@
 import { Body, Controller, HttpCode, Post } from '@nestjs/common';
 import { RouteConfig } from '@nestjs/platform-fastify';
+import { Public } from '../../common/auth/public.decorator.js';
 import { AUTH_ROUTE_RATE_LIMIT } from '../../common/http/auth-rate-limit.js';
 import { SignupStartDto } from './dto/signup-start.dto.js';
 import { SignupVerifyDto } from './dto/signup-verify.dto.js';
@@ -7,6 +8,7 @@ import { SignupDto } from './dto/signup.dto.js';
 import { SignupService } from './signup.service.js';
 
 // Public routes: no access token. Each has its own per-IP limit.
+@Public()
 @Controller('v1/auth')
 export class SignupController {
   constructor(private readonly signup: SignupService) {}

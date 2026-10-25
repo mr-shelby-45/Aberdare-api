@@ -1,4 +1,5 @@
 import { Controller, HttpCode, Param, Post } from '@nestjs/common';
+import { Public } from '../../src/common/auth/public.decorator.js';
 import { ApiError } from '../../src/common/errors/api.error.js';
 import { secretMatches } from '../../src/common/security/path-secret.js';
 
@@ -6,6 +7,7 @@ import { secretMatches } from '../../src/common/security/path-secret.js';
 export const TEST_WEBHOOK_SECRET = 'whsec_test_9f2c41d7a8b3e6f0c5d1';
 
 // Spike step 5 only: POST /webhooks/test/:secret
+@Public()
 @Controller('webhooks/test')
 export class WebhookTestController {
   @Post(':secret')
