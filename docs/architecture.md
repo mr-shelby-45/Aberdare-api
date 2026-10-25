@@ -145,8 +145,14 @@ Command types and required permission:
 | stock.adjust | stock.adjust |
 | stock.convert | stock.convert (manager or owner only) |
 | stock.count | stock.count |
-| product.create, product.update | products.edit |
+| product.create, product.update, pack_type.upsert, barcode.add, barcode.remove | products.edit (plus costs.view for any command that sets or changes `cost_price`) |
 | order.update | orders.manage |
+
+As designed for Phase B (`docs/phase-b-design.md` section 5; `POST /v1/sync/commands` is built in Phase B, Phase D adds only snapshot and changes):
+- Body `{ commands: [ { command_id, type, occurred_at, payload } ] }`, at most 100 commands, body limit 1 MB. Processed in order; the response lists one result per command in the same order: `{ command_id, status (ACCEPTED, FLAGGED, REJECTED, FAILED), reason?, result? }`. `FAILED` is an unexpected error, safe to retry.
+- `occurred_at` more than 24 hours in the future is rejected (`OCCURRED_AT_INVALID`); any past time is accepted. `sync_command` stores both `occurred_at` (phone) and `received_at` (server).
+- IDs of new things are phone-generated UUIDs. Omitted fields mean "unchanged"; `null` clears an optional field.
+- **Per-command transactions.** `TenantInterceptor` normally runs the whole request in one tenant transaction, and nested `TenantRunner.run()` is refused. The sync route is marked (for example `@OwnTransactions()`): the interceptor still loads the membership and device in a short tenant transaction, applies the same status checks and builds the effective permissions, then lets the handler run outside any transaction so each command gets its own. The dispatcher checks the permission per command and passes the actor explicitly to `AuditService.record`. This marker is for this route only.
 
 **Reads**:
 - `GET /v1/sync/snapshot`: full data for the business (products, barcodes, pack types, stock, recent sales), paged. Used on first login and after reinstall.
@@ -200,6 +206,12 @@ Level of tracking: counts only. Lot numbers and individual box serials are out o
 - Search runs on the phone (SQLite full-text search), limited to the shop's own data. Scanning a barcode is an exact-match search. If nothing is found, offer "Add as new product".
 - Cost prices are hidden from search results and screens unless the user has `costs.view`.
 - Server search `GET /v1/products?q=` is allowed, with a trigram index as an optional addition later.
+
+As designed for Phase B (`docs/phase-b-design.md` sections 2, 4 and 6):
+- One barcode maps to exactly one pack type per business (assumes cartons carry their own code; open item 21). Barcodes are added and removed by command, and a removal is logged. The barcode of an archived product stays reserved.
+- A barcode is text, never a number (leading zeros matter). It matches `^[A-Za-z0-9._-]{4,48}$`. Normalisation on every write and lookup: trim; a 12-digit numeric code gets a leading `0` (UPC-A equals EAN-13 with a leading zero). Check digits are not validated and case is not changed. 14-digit carton codes (ITF-14) are accepted as they are.
+- Server search: exact barcode match (normalised), then exact SKU, then names starting with `q`, then other names containing `q`. Name matching is `name ILIKE '%...%'` (uses the trigram index `product_name_trgm_idx`), with `%`, `_` and `\` escaped, parameters only. `q` is at least 2 characters, at most 50 results, no paging. Archived products are hidden unless `include_archived=true`. Every read is limited to the caller's business by RLS; no endpoint takes a business id.
+- `cost_price` is omitted from responses (the key is absent, not null) unless the caller has `costs.view`.
 
 ## 8. M-Pesa payments
 
@@ -298,16 +310,16 @@ Table list (exact columns are designed during the build and reviewed by Ian befo
 | Table | Purpose |
 |---|---|
 | business | the tenant: name, type (`RETAIL`, `WHOLESALE`, `WAREHOUSE`), till number, subscription state, settings. RLS on its own `id` from Phase A |
-| location | a shop or warehouse of a business |
+| location | a shop or warehouse of a business: name, default flag (one per business, created at signup), archived time |
 | person | one human across all businesses: phone (unique, E.164), verified flags, email (unique, nullable), password hash (owners only), login lockout. Not tenant-owned; read through the identity functions (section 3) |
 | membership | a person's role in one business: display name, role preset, extra permissions, status (`INVITED`, `ACTIVE`, `SUSPENDED`, `REMOVED`), PIN hash, temporary PIN hash and expiry, lockout counters. Exactly one `OWNER` per business |
 | device | a registered phone: name, platform, device secret hash, shared flag, status (`ACTIVE`, `REVOKED`), push token (Phase F), last seen and last sync |
 | device_membership | which memberships may sell on a shared device |
 | refresh_token | rotating refresh tokens: membership, device, family, token hash, expiry, used and revoked times |
 | otp_challenge | SMS and email codes: channel, target, purpose, code hash, expiry, attempts, verified and consumed times. Not tenant-owned, no RLS |
-| product | name, category, cost price, sell prices |
-| pack_type | piece, carton of N, and so on, with its own price |
-| product_barcode | barcode to product and pack type, unique per business |
+| product | name (1 to 120 characters, not unique), SKU (unique per business when present), archived time. No categories and no stock columns (Phase B) |
+| pack_type | piece, carton of N, and so on: name and units per pack (both unique per product, 1 to 10000 units, at most one base unit), sell price and optional cost price (`NUMERIC(14,2)`, never negative), archived time. 1 to 6 per product |
+| product_barcode | barcode (text) to product and pack type, unique per business; composite key to `pack_type (business_id, product_id, id)` so it cannot point at another product's pack type. The only Phase B table where rows are deleted |
 | stock_movement | append-only ledger |
 | stock_balance | cached balance per business, location, pack type |
 | stock_conversion | links the two ledger rows of a break-bulk |
@@ -315,7 +327,7 @@ Table list (exact columns are designed during the build and reviewed by Ian befo
 | payment | payment attached to a sale, verified flag, method |
 | mpesa_transaction | raw M-Pesa notifications, unique on trans_id |
 | order_inbox, order_inbox_item | orders from a website |
-| sync_command | every received command: UUID unique, result, status |
+| sync_command | every received command: UUID unique, result, status, `occurred_at` (phone) and `received_at` (server) |
 | change_log | what changed, for `sync/changes` |
 | subscription | plan, state, trial end, grace end, payments |
 | notification | see section 10 |
@@ -333,6 +345,8 @@ As built in the spike (columns approved by Ian per step):
 - Special indexes: GIN trigram `product_name_trgm_idx` (declared in `schema.prisma` too, so Prisma does not drop it) and the partial unique `pack_type_one_base_unit_per_product` (one pack type with `units_per_pack = 1` per product).
 - Every reference between tenant tables is a composite foreign key (section 3).
 
+As designed for Phase B (`docs/phase-b-design.md` section 3): `location` gains `is_default` (partial unique index, one default per business) and `archived_at`; `product` gains `archived_at` and a btree index on `(business_id, name, id)` for paging; `pack_type` gains `sell_price`, `cost_price`, `archived_at` and the uniques above; `product_barcode` is new; `change_log` triggers are extended to `pack_type`, `product_barcode` (including deletes) and `location`. Products, pack types and locations are archived, never deleted. Grants: `location` SELECT, INSERT, UPDATE; `product_barcode` SELECT, INSERT, DELETE.
+
 ## 13. API endpoints
 
 All under `/v1`, JSON, access token required unless stated.
@@ -346,11 +360,13 @@ All under `/v1`, JSON, access token required unless stated.
   - shared tablet: `GET /auth/device-members` (device id and secret in headers)
   - tokens: `POST /auth/refresh`, `POST /auth/logout` (token required)
 - **me** (token): `GET /me`
-- **business**: `GET/PATCH /business`, `/locations`
+- **business**: `GET/PATCH /business`
+- **locations** (Phase B): `GET /locations` (any active member; active only, `include_archived=true` for the owner list), `POST /locations` and `PATCH /locations/:id` (rename, archive, restore; `locations.manage`). The only REST writes for catalogue-like data; the default location and the last active location cannot be archived
+- **catalogue reads** (Phase B, any active member): `GET /products?q=&limit=&cursor=&include_archived=`, `GET /products/:id`, `GET /products/by-barcode/:code`. Catalogue writes are sync commands only, never REST
 - **staff** (`staff.manage`): `POST /staff` (returns the temporary PIN once), `GET /staff`, `PATCH /staff/:id`, `POST /staff/:id/reset-pin`, `POST /staff/:id/suspend`, `POST /staff/:id/reactivate`, `DELETE /staff/:id` (status `REMOVED`, never a hard delete)
 - **devices** (`devices.manage`): `GET /devices`, `PATCH /devices/:id` (name, shared flag), `DELETE /devices/:id` (revoke), `POST /devices/:id/members`, `DELETE /devices/:id/members/:membershipId`
-- **reads**: `GET /products?q=`, `/products/by-barcode/:code`, `/stock`, `/stock/movements`, `/sales`, `/payments/pending`, `/orders`, `/reports/*`, `/audit-log`, `/notifications`, `/subscription`
-- **sync**: `POST /sync/commands`, `GET /sync/snapshot`, `GET /sync/changes?cursor=`
+- **reads**: `/stock`, `/stock/movements`, `/sales`, `/payments/pending`, `/orders`, `/reports/*`, `/audit-log`, `/notifications`, `/subscription`
+- **sync**: `POST /sync/commands` (Phase B), `GET /sync/snapshot`, `GET /sync/changes?cursor=` (Phase D)
 - **manager actions**: `POST /sales/:id/void`, `POST /payments/:id/approve`
 - **orders**: `PATCH /orders/:id`; `POST /orders-inbox/key` (create or regenerate the shop key)
 - **subscription**: `POST /subscription/pay`
@@ -367,7 +383,9 @@ All under `/v1`, JSON, access token required unless stated.
 | sales.create, payments.confirm, stock.view, orders.manage | yes | yes | yes |
 | products.edit, stock.receive, stock.adjust, stock.convert, stock.count | no | yes | yes |
 | sales.void, payments.approve, reports.view | no | yes | yes |
-| costs.view, staff.manage, devices.manage, subscription.manage, shopkey.manage | no | no | yes |
+| costs.view, staff.manage, devices.manage, subscription.manage, shopkey.manage, locations.manage | no | no | yes |
+
+Reading locations and the catalogue needs no permission beyond an active membership. `costs.view` covers reading and writing cost prices. `locations.manage` is new in Phase B (owner preset only, grantable like the others).
 
 Permissions are **read live from the database on every request**, never stored in the token (Phase A decision). Inside the tenant transaction, the `TenantInterceptor` loads the membership and device, refuses unless both are `ACTIVE`, computes effective permissions (role preset plus `extra_permissions`) and checks the route's `@RequirePermission(...)`. Sync commands check the same effective permissions in the command dispatcher. Suspending someone or changing a permission therefore takes effect on the very next request. The check never lives in a Nest guard, because guards run before the tenant transaction exists. `stock.convert` can never be an extra permission on an attendant (rejected on write, ignored on read). The owner cannot be suspended, removed or demoted.
 
@@ -412,3 +430,15 @@ Added with the Phase A design (`docs/phase-a-design.md` section 18):
 18. Notify the owner's other devices (and by email) when a new device registers (Phase F). Reduces the impact of a stolen password.
 19. How long to keep audit log IP addresses, and the data protection position on storing them.
 20. Lost access to the owner's email is a support process for now. Design it before launch.
+
+Added with the Phase B design (`docs/phase-b-design.md` section 17):
+
+21. Carton barcodes: Ian checks a real carton at the client. If it shows the same number as the pieces, one barcode must map to several pack types of one product and the app asks "piece or carton?" on scan.
+22. Bulk import (CSV or Excel) of existing products, likely needed to onboard real shops.
+23. Categories and filters.
+24. Reorder levels (needed by the Phase F low-stock digest).
+25. Kenya's eTIMS e-invoicing may need a tax class on products. Not verified; confirm with an accountant before launch.
+26. Wholesale price tiers or quantity discounts.
+27. Label generation and printing for items without barcodes (in-store EAN-13 range 20 to 29).
+28. A future audit read endpoint must hide cost values from anyone without `costs.view`.
+29. A location restriction per staff member, if a real client needs it.
