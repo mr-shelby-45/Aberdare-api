@@ -50,6 +50,72 @@ export class DevicesRepository {
     return link !== null;
   }
 
+  async list() {
+    return currentTx().device.findMany({
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true,
+        name: true,
+        platform: true,
+        isShared: true,
+        status: true,
+        lastSeenAt: true,
+        registeredByMembershipId: true,
+      },
+    });
+  }
+
+  async update(deviceId: string, fields: { name?: string; isShared?: boolean }): Promise<void> {
+    await currentTx().device.updateMany({ where: { id: deviceId }, data: fields });
+  }
+
+  /** Returns false if it was already revoked (or not found). */
+  async revoke(deviceId: string): Promise<boolean> {
+    const { count } = await currentTx().device.updateMany({
+      where: { id: deviceId, status: 'ACTIVE' },
+      data: { status: 'REVOKED' },
+    });
+    return count === 1;
+  }
+
+  /** Revokes every active device the membership registered. Returns their ids. */
+  async revokeRegisteredBy(membershipId: string): Promise<string[]> {
+    const devices = await currentTx().device.findMany({
+      where: { registeredByMembershipId: membershipId, status: 'ACTIVE' },
+      select: { id: true },
+    });
+    await currentTx().device.updateMany({
+      where: { id: { in: devices.map((d) => d.id) } },
+      data: { status: 'REVOKED' },
+    });
+    return devices.map((d) => d.id);
+  }
+
+  /** Idempotent: linking twice changes nothing. */
+  async addLink(deviceId: string, membershipId: string): Promise<void> {
+    await currentTx().$executeRaw`
+      INSERT INTO device_membership (business_id, device_id, membership_id)
+      VALUES (${currentBusinessId()}::uuid, ${deviceId}::uuid, ${membershipId}::uuid)
+      ON CONFLICT (business_id, device_id, membership_id) DO NOTHING`;
+  }
+
+  async removeLink(deviceId: string, membershipId: string): Promise<number> {
+    const { count } = await currentTx().deviceMembership.deleteMany({ where: { deviceId, membershipId } });
+    return count;
+  }
+
+  /** Removes the membership from every shared device. */
+  async removeLinksForMembership(membershipId: string): Promise<void> {
+    await currentTx().deviceMembership.deleteMany({ where: { membershipId } });
+  }
+
+  /** Removes every link of the device. Returns the membership ids that were linked. */
+  async removeLinksForDevice(deviceId: string): Promise<string[]> {
+    const links = await currentTx().deviceMembership.findMany({ where: { deviceId }, select: { membershipId: true } });
+    await currentTx().deviceMembership.deleteMany({ where: { deviceId } });
+    return links.map((l) => l.membershipId);
+  }
+
   async touchLastSeen(deviceId: string, now: Date): Promise<void> {
     await currentTx().device.updateMany({ where: { id: deviceId }, data: { lastSeenAt: now } });
   }

@@ -205,6 +205,8 @@ All require a token and the stated permission.
 
 `INVALID_CREDENTIALS`, `ACCOUNT_LOCKED` (with retry time), `OTP_INVALID`, `OTP_EXPIRED`, `OTP_RATE_LIMITED`, `ACCOUNT_EXISTS`, `AMBIGUOUS_INVITE`, `TOKEN_EXPIRED`, `TOKEN_INVALID`, `MEMBERSHIP_INACTIVE`, `DEVICE_REVOKED`, `PERMISSION_DENIED`, `SELECTION_REQUIRED`, `VALIDATION_FAILED`. All use the shared error shape. Messages are safe for users and never say which of phone, email or PIN was wrong.
 
+Added in A4 (approved by Ian on 2026-10-25): `MEMBER_EXISTS` (409, inviting someone who is already a member), `OWNER_PROTECTED` (403, suspending, removing, demoting or resetting the owner). `NOT_FOUND` (404) is the shared code for an id that does not exist in this business. Since A3, password login never returns `ACCOUNT_LOCKED` (a lockout answers `INVALID_CREDENTIALS`); PIN login does.
+
 ## 13. Integrations
 
 - `integrations/sms/SmsSender` and `integrations/email/EmailSender`: one method each (`send(target, message)`), nothing else. Sending happens after the database commit, never inside a transaction.

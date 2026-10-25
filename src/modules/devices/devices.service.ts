@@ -37,4 +37,37 @@ export class DevicesService {
   async touchLastSeen(deviceId: string, now: Date): Promise<void> {
     await this.repo.touchLastSeen(deviceId, now);
   }
+
+  // Data operations for the team module (device endpoints, staff lifecycle).
+  list() {
+    return this.repo.list();
+  }
+
+  update(deviceId: string, fields: { name?: string; isShared?: boolean }) {
+    return this.repo.update(deviceId, fields);
+  }
+
+  revoke(deviceId: string) {
+    return this.repo.revoke(deviceId);
+  }
+
+  revokeRegisteredBy(membershipId: string) {
+    return this.repo.revokeRegisteredBy(membershipId);
+  }
+
+  addLink(deviceId: string, membershipId: string) {
+    return this.repo.addLink(deviceId, membershipId);
+  }
+
+  removeLink(deviceId: string, membershipId: string) {
+    return this.repo.removeLink(deviceId, membershipId);
+  }
+
+  removeLinksForMembership(membershipId: string) {
+    return this.repo.removeLinksForMembership(membershipId);
+  }
+
+  removeLinksForDevice(deviceId: string) {
+    return this.repo.removeLinksForDevice(deviceId);
+  }
 }

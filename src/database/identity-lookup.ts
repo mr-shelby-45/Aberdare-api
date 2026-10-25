@@ -281,6 +281,19 @@ export class IdentityLookup {
     return { personId: rows[0].person_id, outcome: rows[0].outcome };
   }
 
+  /**
+   * Staff activation: consumes the verified STAFF_ACTIVATE code for this
+   * person's phone and marks the phone verified. False without that proof.
+   */
+  async activatePhone(personId: string, challengeId: string, limits: { now: Date; proofMaxAgeSeconds: number }): Promise<boolean> {
+    if (!UUID.test(personId) || !UUID.test(challengeId)) return false;
+    const rows = await this.client().$queryRaw<{ ok: boolean }[]>`
+      SELECT identity_activate_phone(
+        ${personId}::uuid, ${challengeId}::uuid, ${limits.now}::timestamptz,
+        make_interval(secs => ${limits.proofMaxAgeSeconds}::int)) AS ok`;
+    return rows[0]?.ok === true;
+  }
+
   /** Creates the person for an E.164 phone if missing. Never changes an existing person. */
   async ensurePerson(phone: string, now: Date): Promise<{ personId: string; created: boolean }> {
     const rows = await this.client().$queryRaw<{ person_id: string; created: boolean }[]>`

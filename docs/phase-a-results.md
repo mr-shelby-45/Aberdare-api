@@ -97,3 +97,28 @@ Filled in step by step. The full summary (see `docs/phase-a-design.md` section 2
 **Open for later steps:**
 - Selection tokens can be replayed within their 5 minutes (needs the password first). Recorded risk, as decided.
 - Audit events for login, PIN lockout and refresh-token reuse come in A5 (`TODO(A5)` in `session.service.ts`).
+
+## A4: Staff and devices (passed)
+
+**Result:** 24 new tests pass, covering design section 19 A4 tests 1 to 9 plus concurrent double activation, self-promotion, wrong guesses across businesses, re-invites and the device endpoints' side effects. Full suite 191 of 191, twice.
+
+**Built (approved by Ian on 2026-10-25):**
+- Migration `*_a4_identity_activate_phone`: `identity_activate_phone` consumes a verified `STAFF_ACTIVATE` code for that person's phone and marks the phone verified. Grants before the ownership hand-over; no new column grants. 13 identity functions in all, each executable only by `identity_owner` and `app_user`.
+- `POST/GET /v1/staff`, `PATCH /v1/staff/:id`, `reset-pin`, `suspend`, `reactivate`, `DELETE` (status `REMOVED`); `GET/PATCH/DELETE /v1/devices/:id`, device members add and remove; `POST /v1/auth/first-login`, `POST /v1/auth/staff/activate`, `GET /v1/auth/device-members`.
+- Rules: nobody changes their own access; only the owner grants owner-only permissions; `OWNER_PROTECTED`; `stock.convert` never on an attendant (on create and on demotion); `MEMBER_EXISTS`, with re-invite of a removed member on the same row; reset and removal revoke the person's tokens, tablet links and the phones they registered; turning shared off ends the linked members' sessions on that device.
+- Temp PINs: 6 digits, 3 days, HMAC bound to the membership id; a wrong guess counts against every live invite for the phone; the 5th kills it. Activation claims the invite in one atomic statement.
+- Module layout: `staff`, `devices`, `sessions` (refresh tokens, moved out of `auth`) and `business` are data modules; `auth` and the new `team` module orchestrate above them, avoiding a circular import between staff and devices.
+
+**Proof the tests catch mistakes:**
+- Mutation: the "only the owner grants owner-only permissions" check removed; the self-promotion test failed (a manager could hand out `devices.manage`); reverted.
+- One test expectation of mine was wrong, not the code: a replayed setup token is refused at the SMS code check (`OTP_INVALID`, the code is already consumed), one step before the invite claim I expected (`TOKEN_INVALID`). The test now asserts the real refusal and, stronger than before, that the replay created no second device and left the membership unchanged.
+
+**Process slip, corrected:** running the existing suite as a regression check applied the A4 migration to `aberdare_test` before Ian had reviewed it (the test setup runs `prisma migrate deploy`). The function and its history row were removed again (dev was never touched), the migration was shown, and it was applied only after approval. CLAUDE.md now warns about this.
+
+**Things to know:**
+1. Any test run applies pending migrations to the test database.
+2. Queries on one transaction must run one after another; `Promise.all` on the request's transaction is avoided.
+3. A first login with a wrong PIN writes counters in each business with an invite for that phone; an unknown phone writes nothing. The answers are identical; the work differs slightly (a few small updates). Recorded for A5's timing check.
+
+**Open for later steps:**
+- Audit events for staff and device changes, PIN resets and lockouts (A5).

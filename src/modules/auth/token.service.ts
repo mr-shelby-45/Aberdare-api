@@ -4,7 +4,7 @@ import type { RequestAuth } from '../../common/auth/request-auth.js';
 import { randomSecret, sha256 } from '../../common/auth/secrets.js';
 import { Clock } from '../../common/time/clock.js';
 import { AccessTokenService } from './access-token.service.js';
-import { RefreshTokenRepository } from './refresh-token.repository.js';
+import { RefreshTokensService } from '../sessions/refresh-tokens.service.js';
 
 const REFRESH_TOKEN_DAYS = 30;
 
@@ -18,7 +18,7 @@ export class TokenService {
   constructor(
     private readonly accessTokens: AccessTokenService,
     private readonly clock: Clock,
-    private readonly refreshTokens: RefreshTokenRepository,
+    private readonly refreshTokens: RefreshTokensService,
   ) {}
 
   /**

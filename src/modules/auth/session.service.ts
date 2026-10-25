@@ -8,7 +8,7 @@ import { TenantRunner } from '../../database/tenant.js';
 import { BusinessService } from '../business/business.service.js';
 import { DevicesService } from '../devices/devices.service.js';
 import { StaffService } from '../staff/staff.service.js';
-import { RefreshTokenRepository } from './refresh-token.repository.js';
+import { RefreshTokensService } from '../sessions/refresh-tokens.service.js';
 import { TokenService } from './token.service.js';
 
 // Refresh rotation, logout and "who am I" (docs/phase-a-design.md sections 6 and 7).
@@ -22,7 +22,7 @@ export class SessionService {
     private readonly devices: DevicesService,
     private readonly business: BusinessService,
     private readonly tokens: TokenService,
-    private readonly refreshTokens: RefreshTokenRepository,
+    private readonly refreshTokens: RefreshTokensService,
   ) {}
 
   /**
@@ -61,7 +61,7 @@ export class SessionService {
 
   /** Revokes every live refresh token of this membership on this device. Runs in the request's transaction. */
   async logout(auth: RequestAuth): Promise<void> {
-    await this.refreshTokens.revokeForDevice(auth.membershipId, auth.deviceId, this.clock.now());
+    await this.refreshTokens.revokeForMembershipOnDevice(auth.membershipId, auth.deviceId, this.clock.now());
   }
 
   async me(session: RequestSession) {

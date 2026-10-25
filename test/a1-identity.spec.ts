@@ -45,6 +45,8 @@ const COLUMNS: Record<string, string[]> = {
   identity_create_otp_challenge: ['challenge_id', 'outcome'],
   identity_verify_otp: ['challenge_id', 'outcome'],
   identity_complete_owner_signup: ['person_id', 'outcome'],
+  // Added in A4 (tested in test/a4-staff.spec.ts). Returns one boolean.
+  identity_activate_phone: ['identity_activate_phone'],
 };
 
 interface World {

@@ -12,6 +12,7 @@ import {
 const PIN_LOCK_EVERY = 5;
 const PIN_LOCK_MINUTES = 15;
 const PIN_HARD_LOCK_AFTER = 10;
+export const TEMP_PIN_MAX_FAILURES = 5;
 
 @Injectable()
 export class StaffService {
@@ -51,5 +52,47 @@ export class StaffService {
 
   async clearPinLock(membershipId: string): Promise<void> {
     await this.repo.clearPinLock(membershipId);
+  }
+
+  // Data operations for the team module (staff lifecycle) and first login.
+  list() {
+    return this.repo.list();
+  }
+
+  findById(membershipId: string) {
+    return this.repo.findById(membershipId);
+  }
+
+  findByPerson(personId: string) {
+    return this.repo.findByPerson(personId);
+  }
+
+  createInvite(invite: Parameters<StaffRepository['createInvite']>[0]) {
+    return this.repo.createInvite(invite);
+  }
+
+  reinvite(membershipId: string, invite: Parameters<StaffRepository['reinvite']>[1]) {
+    return this.repo.reinvite(membershipId, invite);
+  }
+
+  update(membershipId: string, fields: Parameters<StaffRepository['update']>[1]) {
+    return this.repo.update(membershipId, fields);
+  }
+
+  setStatus(membershipId: string, from: string[], to: 'ACTIVE' | 'SUSPENDED' | 'REMOVED') {
+    return this.repo.setStatus(membershipId, from, to);
+  }
+
+  resetToInvite(membershipId: string, tempPinHash: string, tempPinExpiresAt: Date) {
+    return this.repo.resetToInvite(membershipId, tempPinHash, tempPinExpiresAt);
+  }
+
+  /** A wrong temp PIN. The 5th kills it (docs/phase-a-design.md section 10). */
+  recordTempPinFailure(membershipId: string) {
+    return this.repo.recordTempPinFailure(membershipId, TEMP_PIN_MAX_FAILURES);
+  }
+
+  claimInvite(membershipId: string, pinHash: string, now: Date) {
+    return this.repo.claimInvite(membershipId, pinHash, now);
   }
 }

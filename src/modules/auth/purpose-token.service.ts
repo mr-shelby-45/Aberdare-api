@@ -6,6 +6,13 @@ import { AppConfig } from '../../config/app.config.js';
 
 const SIGNUP_TOKEN_SECONDS = 10 * 60;
 const SELECTION_TOKEN_SECONDS = 5 * 60;
+const SETUP_TOKEN_SECONDS = 10 * 60;
+
+export interface SetupClaims {
+  membershipId: string;
+  businessId: string;
+  phone: string;
+}
 
 export interface SignupClaims {
   phoneChallengeId: string;
@@ -55,6 +62,39 @@ export class PurposeTokenService {
       throw new ApiError(401, 'TOKEN_INVALID', 'Please start again.');
     }
     return { phoneChallengeId: pc, emailChallengeId: ec, phone: ph, email: em };
+  }
+
+  /** Staff first login: proves the temp PIN matched this invite. */
+  async signSetup(claims: SetupClaims): Promise<{ token: string; expiresInSeconds: number }> {
+    const iat = this.nowSeconds();
+    const token = await this.jwt.signAsync(
+      { mid: claims.membershipId, bid: claims.businessId, ph: claims.phone, iat, exp: iat + SETUP_TOKEN_SECONDS },
+      { secret: this.config.jwtSecret, algorithm: 'HS256', audience: 'setup' },
+    );
+    return { token, expiresInSeconds: SETUP_TOKEN_SECONDS };
+  }
+
+  /** The claims, or ApiError TOKEN_EXPIRED / TOKEN_INVALID. */
+  async verifySetup(token: string): Promise<SetupClaims> {
+    let payload: Record<string, unknown>;
+    try {
+      payload = await this.jwt.verifyAsync<Record<string, unknown>>(token, {
+        secret: this.config.jwtSecret,
+        algorithms: ['HS256'],
+        audience: 'setup',
+        clockTimestamp: this.nowSeconds(),
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === 'TokenExpiredError') {
+        throw new ApiError(401, 'TOKEN_EXPIRED', 'This step took too long. Please start again.');
+      }
+      throw new ApiError(401, 'TOKEN_INVALID', 'Please start again.');
+    }
+    const { mid, bid, ph } = payload;
+    if (typeof mid !== 'string' || typeof bid !== 'string' || typeof ph !== 'string') {
+      throw new ApiError(401, 'TOKEN_INVALID', 'Please start again.');
+    }
+    return { membershipId: mid, businessId: bid, phone: ph };
   }
 
   /** For a person with several businesses: lets the second login call choose one without the password. */

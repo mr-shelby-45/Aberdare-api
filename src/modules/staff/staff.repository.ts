@@ -87,6 +87,134 @@ export class StaffRepository {
     return { pinFailedCount: rows[0].pin_failed_count, pinLockedUntil: rows[0].pin_locked_until };
   }
 
+  /** Every membership of the current business, with the phone (never any hash). */
+  async list() {
+    return currentTx().membership.findMany({
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true,
+        displayName: true,
+        rolePreset: true,
+        status: true,
+        extraPermissions: true,
+        createdAt: true,
+        person: { select: { phone: true } },
+      },
+    });
+  }
+
+  async findById(membershipId: string) {
+    return currentTx().membership.findUnique({
+      where: { id: membershipId },
+      select: { id: true, personId: true, displayName: true, rolePreset: true, status: true, extraPermissions: true },
+    });
+  }
+
+  async findByPerson(personId: string) {
+    return currentTx().membership.findFirst({
+      where: { personId },
+      select: { id: true, status: true },
+    });
+  }
+
+  async createInvite(invite: {
+    id: string;
+    personId: string;
+    displayName: string;
+    rolePreset: 'MANAGER' | 'ATTENDANT';
+    extraPermissions: string[];
+    tempPinHash: string;
+    tempPinExpiresAt: Date;
+    createdByMembershipId: string;
+  }): Promise<void> {
+    await currentTx().membership.create({
+      data: { businessId: currentBusinessId(), status: 'INVITED', ...invite },
+      select: { id: true },
+    });
+  }
+
+  /** A REMOVED member invited again: same row, fresh invite. Returns false if it was not REMOVED. */
+  async reinvite(
+    membershipId: string,
+    invite: { displayName: string; rolePreset: 'MANAGER' | 'ATTENDANT'; extraPermissions: string[]; tempPinHash: string; tempPinExpiresAt: Date },
+  ): Promise<boolean> {
+    const { count } = await currentTx().membership.updateMany({
+      where: { id: membershipId, status: 'REMOVED' },
+      data: {
+        ...invite,
+        status: 'INVITED',
+        tempPinFailedCount: 0,
+        pinHash: null,
+        pinSetAt: null,
+        pinFailedCount: 0,
+        pinLockedUntil: null,
+      },
+    });
+    return count === 1;
+  }
+
+  async update(membershipId: string, fields: { displayName?: string; rolePreset?: 'MANAGER' | 'ATTENDANT'; extraPermissions?: string[] }): Promise<void> {
+    await currentTx().membership.updateMany({ where: { id: membershipId }, data: fields });
+  }
+
+  /** Moves the status only from one of `from`. Returns false if it was in another state. */
+  async setStatus(membershipId: string, from: string[], to: 'ACTIVE' | 'SUSPENDED' | 'REMOVED'): Promise<boolean> {
+    const { count } = await currentTx().membership.updateMany({
+      where: { id: membershipId, status: { in: from as ('INVITED' | 'ACTIVE' | 'SUSPENDED' | 'REMOVED')[] } },
+      data: { status: to },
+    });
+    return count === 1;
+  }
+
+  /** PIN reset: back to INVITED with a new temp PIN; the old PIN and its counters are gone. */
+  async resetToInvite(membershipId: string, tempPinHash: string, tempPinExpiresAt: Date): Promise<void> {
+    await currentTx().membership.updateMany({
+      where: { id: membershipId },
+      data: {
+        status: 'INVITED',
+        tempPinHash,
+        tempPinExpiresAt,
+        tempPinFailedCount: 0,
+        pinHash: null,
+        pinSetAt: null,
+        pinFailedCount: 0,
+        pinLockedUntil: null,
+      },
+    });
+  }
+
+  /** One atomic statement: a wrong temp PIN; at `killAt` the temp PIN stops working. */
+  async recordTempPinFailure(membershipId: string, killAt: number): Promise<void> {
+    await currentTx().$executeRaw`
+      UPDATE membership m
+         SET temp_pin_failed_count = m.temp_pin_failed_count + 1,
+             temp_pin_hash = CASE WHEN m.temp_pin_failed_count + 1 >= ${killAt}::int THEN NULL ELSE m.temp_pin_hash END
+       WHERE m.id = ${membershipId}::uuid
+         AND m.business_id = ${currentBusinessId()}::uuid
+         AND m.status = 'INVITED'
+         AND m.temp_pin_hash IS NOT NULL`;
+  }
+
+  /**
+   * Activation, in one atomic statement: only a live invite becomes ACTIVE,
+   * so a second activation (or a replayed setup token) changes nothing.
+   */
+  async claimInvite(membershipId: string, pinHash: string, now: Date): Promise<{ personId: string; displayName: string; rolePreset: string } | null> {
+    const rows = await currentTx().$queryRaw<{ person_id: string; display_name: string; role_preset: string }[]>`
+      UPDATE membership m
+         SET status = 'ACTIVE', pin_hash = ${pinHash}, pin_set_at = ${now}::timestamptz,
+             pin_failed_count = 0, pin_locked_until = NULL,
+             temp_pin_hash = NULL, temp_pin_expires_at = NULL, temp_pin_failed_count = 0
+       WHERE m.id = ${membershipId}::uuid
+         AND m.business_id = ${currentBusinessId()}::uuid
+         AND m.status = 'INVITED'
+         AND m.temp_pin_hash IS NOT NULL
+         AND m.temp_pin_expires_at > ${now}::timestamptz
+      RETURNING m.person_id, m.display_name, m.role_preset::text AS role_preset`;
+    const r = rows[0];
+    return r ? { personId: r.person_id, displayName: r.display_name, rolePreset: r.role_preset } : null;
+  }
+
   /** The owner's way out of a PIN lock: a successful password login. */
   async clearPinLock(membershipId: string): Promise<void> {
     await currentTx().membership.updateMany({
