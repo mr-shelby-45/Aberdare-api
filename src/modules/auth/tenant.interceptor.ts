@@ -10,6 +10,7 @@ import { type Permission, type RolePreset, effectivePermissions } from '../../co
 import { IS_PUBLIC } from '../../common/auth/public.decorator.js';
 import type { AuthedRequest, RequestAuth, RequestSession } from '../../common/auth/request-auth.js';
 import { REQUIRED_PERMISSIONS } from '../../common/auth/require-permission.decorator.js';
+import { type RequestContext, runWithRequestContext } from '../../common/context/request-context.js';
 import { ApiError } from '../../common/errors/api.error.js';
 import { TenantRunner } from '../../database/tenant.js';
 import { DevicesService } from '../devices/devices.service.js';
@@ -21,6 +22,10 @@ import { StaffService } from '../staff/staff.service.js';
 // route's @RequirePermission; then the handler runs in the same transaction.
 // So suspending someone, revoking a device or changing a permission takes
 // effect on the very next request.
+// It also opens the request context (caller IP, acting membership) for the
+// audit log, on public routes too. That lives here rather than in a second
+// global interceptor because Nest does not document the order of global
+// interceptors, and the actor is only known after loadSession.
 @Injectable()
 export class TenantInterceptor implements NestInterceptor {
   constructor(
@@ -32,17 +37,21 @@ export class TenantInterceptor implements NestInterceptor {
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
     const targets = [context.getHandler(), context.getClass()];
-    if (this.reflector.getAllAndOverride<boolean>(IS_PUBLIC, targets)) {
-      return next.handle();
-    }
     const request = context.switchToHttp().getRequest<AuthedRequest>();
+    const requestContext: RequestContext = { ip: request.ip ?? null, actorMembershipId: null };
+    if (this.reflector.getAllAndOverride<boolean>(IS_PUBLIC, targets)) {
+      return from(
+        runWithRequestContext(requestContext, () => lastValueFrom(next.handle(), { defaultValue: undefined })),
+      );
+    }
     const auth = request.auth;
     if (!auth) throw new ApiError(401, 'TOKEN_INVALID', 'Please log in again.');
     const required = this.reflector.getAllAndOverride<Permission[]>(REQUIRED_PERMISSIONS, targets) ?? [];
 
     return from(
-      this.tenants.run(auth.businessId, async () => {
+      runWithRequestContext(requestContext, () => this.tenants.run(auth.businessId, async () => {
         const session = await this.loadSession(auth);
+        requestContext.actorMembershipId = session.membership.id;
         for (const permission of required) {
           if (!session.permissions.has(permission)) {
             throw new ApiError(403, 'PERMISSION_DENIED', 'You are not allowed to do this.');
@@ -51,7 +60,7 @@ export class TenantInterceptor implements NestInterceptor {
         request.session = session;
         // The handler subscribes here, so all its work runs inside this transaction.
         return lastValueFrom(next.handle(), { defaultValue: undefined });
-      }),
+      })),
     );
   }
 

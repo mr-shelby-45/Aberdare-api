@@ -1,6 +1,90 @@
 # Phase A results
 
-Filled in step by step. The full summary (see `docs/phase-a-design.md` section 21) is written when A5 is finished. Only Ian marks the phase done, in `CLAUDE.md` section 2.
+**Status: all five steps (A1 to A5) passed. Waiting for Ian's review.** Only Ian marks Phase A done, in CLAUDE.md section 2. The manual walkthrough for Ian is `docs/phase-a-walkthrough.md`.
+
+**Final suite:** FINAL_SUITE_PLACEHOLDER
+
+## Summary
+
+| Step | Question | Answer | New tests | Workaround needed? |
+|---|---|---|---|---|
+| A1 | Can login find people, devices and tokens before any business is known, without opening RLS? | **Yes**, through narrow `SECURITY DEFINER` functions owned by a NOLOGIN role | 32 | Grants must be set before the ownership hand-over (a real bug, fixed by a follow-up migration) |
+| A2 | Can an owner sign up with both codes proven, without revealing existing accounts? | **Yes** | 24 | `main.ts` loads `.env`; scrypt takes ~430 ms (accepted) |
+| A3 | Do login, refresh rotation and the per-request pipeline hold up, including races? | **Yes** | 31 | Lockout redesigned before coding (was an oracle); "locked for good" is a count, not `'infinity'` |
+| A4 | Do staff invites, activation, shared tablets and device admin keep access tight? | **Yes** | 24 | A `team` module above the data modules (avoids a circular import) |
+| A5 | Is every sensitive change audited, append-only, and are secrets and accounts never revealed? | **Yes** | 17 | Request context inside `TenantInterceptor` |
+
+Phase A added 128 tests to the spike's 80: **208 in all**.
+
+## Final patterns
+
+| Concern | Pattern | Where |
+|---|---|---|
+| Lookups before a business is known | `IdentityLookup` is the only caller of 14 `identity_*` functions: owned by `identity_owner` (NOLOGIN), `SECURITY DEFINER`, `search_path = pg_catalog, public, pg_temp`, STRICT, one exact key, time passed in, executable only by `app_user`. Grant and revoke before `ALTER ... OWNER TO`. Joins the open tenant transaction when there is one | `src/database/identity-lookup.ts`, `*_a1_*`, `*_a2_*`, `*_a4_*`, `*_a5_identity_reset_password` |
+| Request pipeline | Every route protected unless `@Public()`. `AuthGuard` checks the access token only. `TenantInterceptor` opens the request context, runs the request in one tenant transaction, loads the live membership and device, enforces `@RequirePermission`, and runs the handler in the same transaction. Never check status or permissions in a guard | `src/modules/auth/auth.guard.ts`, `tenant.interceptor.ts` |
+| Tokens | JWT HS256, one `aud` per kind (`access` 15 min, `signup` 10 min, `selection` 5 min, `setup` 10 min), `algorithms` and audience pinned on verify, `iat`/`exp` from the Clock. Refresh tokens: random, stored as SHA-256, rotated by one atomic claim; reuse revokes the family. Device secrets: 32 random bytes, SHA-256, shown once | `src/modules/auth/*token*.service.ts` |
+| Hashing | scrypt N=2^15, r=8, p=3, HMAC pepper first, `scrypt$N$r$p$salt$hash`, **about 430 ms per hash** on the dev machine, always outside a transaction. Codes and temp PINs: HMAC-SHA256 over `channel|target|purpose|code` (temp PINs bound to the membership id) | `src/common/auth/password-hasher.ts`, `code-hasher.ts` |
+| Locks | Never answer differently for a right and a wrong guess. Password lock: always `INVALID_CREDENTIALS` with a dummy hash. PIN lock: `ACCOUNT_LOCKED` without checking the PIN. Counters are single atomic statements | `login.service.ts`, `pin-login.service.ts` |
+| Not revealing accounts | Same status, body and number of scrypt calls for known and unknown phones and emails on every public route; "expired" and "rate limited" fold into the same answer where they could leak | A2, A3, A4, A5 tests |
+| Time | Injected `Clock` everywhere (lockouts, expiries, send limits, JWT times); `FakeClock` in tests | `src/common/time/clock.ts`, `test/helpers/clock.ts` |
+| Audit | `AuditService.record()` in the tenant transaction; `audit_log` SELECT and INSERT only, forced RLS; no secret-like metadata keys | `src/modules/audit/` |
+| Module layout | `staff`, `devices`, `sessions`, `business` are data modules; `auth` and `team` orchestrate above them; `audit` sits below all | `src/modules/` |
+
+## Proof the tests catch mistakes
+
+Each was applied temporarily, the named test failed, and the change was reverted and confirmed gone.
+
+| Design mutation | Test that failed |
+|---|---|
+| 1. Skip the membership status check in the interceptor | A3 test 4 (suspended and removed staff got 200) |
+| 2. Read-then-write refresh rotation | A3 test 7 (11 of 20 concurrent refreshes succeeded with one token) |
+| 3. No single-use check on a code | A2 test 2 (a used code verified again) |
+| 4. A different error for an unknown email | A3 tests 1 and 2 (login); A5 test 4 (password forgot) |
+| 5. Stop redacting the device secret in logs | A5 test 3 |
+| 6. `identity_find_device` executable by PUBLIC | A1 grants test |
+| 7. Permission check in a Nest guard | A3 test 6 (even the owner was refused) |
+
+Extra mutation in A4: removing "only the owner grants owner-only permissions" failed the self-promotion test. Real bugs the tests caught on the way: functions left PUBLIC-executable (A1), `ACCOUNT_EXISTS` misreported (A2), the permanent PIN lock never applying (A3).
+
+## Versions
+
+Unchanged from `docs/spike-results.md`, plus `@nestjs/jwt` 12.0.3 (approved for Phase A). Hashing uses Node's built-in `crypto`; no other library was added.
+
+## Things to know
+
+1. **Grant before you hand over a function.** A non-owner's `REVOKE`/`GRANT` only warns and changes nothing, and Prisma reports success. (A1)
+2. **One statement keeps one snapshot under READ COMMITTED.** "Claim, else explain why not" needs two statements, or a concurrent loser is misreported. (A1)
+3. **`'infinity'` timestamps read as `Invalid Date` in Prisma 7** and compare false with everything. Use a count or a flag for "forever". (A3)
+4. **Any test run applies pending migrations to `aberdare_test`.** When a migration is waiting for review, run no tests. (A4)
+5. **Locks and "expired" answers can be oracles.** Design every refusal on a public route as if the attacker controls the timing. (A3, A5)
+6. **Hash before the transaction.** scrypt at ~430 ms inside a transaction would hold a connection and approach Prisma's 5-second limit under load. (A2)
+7. **Queries on one transaction run one after another.** No `Promise.all` on the request's transaction. (A4)
+8. **The request's one transaction includes the audit row,** so an action and its record can never disagree. (A5)
+9. **Tests here are slow:** a full run is over 10 minutes on this machine, and the first after a restart spends ~5 minutes importing. Run long suites in the background. (A5)
+
+## Open risks
+
+Roughly in order of how soon they matter. Spike risks still open are in `docs/spike-results.md`; Phase A resolved spike risks 2 (role and table names: the table is now `person`) and 3 (non-tenant access paths).
+
+1. **Codes are sent inside the request, right after the commit.** With the fake senders this costs nothing; with real SMS and email (Phase F) a slow provider makes requests slow, and known and unknown accounts take visibly different times on `signup/start` and `password/forgot`. Phase F moves sending to the worker.
+2. **scrypt throughput.** Four hashes at a time (libuv thread pool), ~430 ms each: a burst of logins queues. Measure on the real host before launch (Phase H).
+3. **Rate limits are in process memory** (spike risk 5): several API instances each count separately.
+4. **Password reset is not one transaction across businesses.** The password changes first; tokens are then revoked one business at a time. A failure in between leaves some old refresh tokens valid until they expire (at most their lifetime) or the owner resets again.
+5. **How long to keep audit IP addresses**, and the data protection position on storing them (design section 18, item 5). Undecided.
+6. **Small work differences on two public routes:** a wrong temp PIN updates counters only for phones with an invite (A4), and `forgot` stores a code only for real accounts. The answers are identical; the timing difference is a few small queries.
+7. **Selection tokens can be replayed within their 5 minutes** (needs the password first). Accepted in A3.
+8. **The strict refresh rule** ends both sessions when two refreshes race with one token; the client falls back to PIN login. Accepted in A1.
+9. **Audit metadata checks key names, not values.** A caller could still put a secret under an innocent key; review new audit calls.
+10. **No audit read endpoint and no change-password endpoint yet** (Phase G and later).
+11. **Hosted databases need `identity_owner` created by hand**, with `GRANT identity_owner TO migrator WITH INHERIT FALSE, SET TRUE`; the first A1 migration stops with a clear message otherwise.
+12. **`AUTH_DEV_FIXED_CODES`** is refused in production, but a staging server must keep it off too.
+
+## Changes to `docs/architecture.md` and `CLAUDE.md`
+
+- `architecture.md`: section 3 (identity path, `business` RLS, composite keys), section 4 (authentication as built: lockouts in A3, password reset in A5), section 11 (audit log as built), sections 12 to 16 (identity tables, endpoints, permissions, environment variables, open items).
+- `CLAUDE.md`: section 2 points to the Phase A design; section 3 approves `@nestjs/jwt` and Node `crypto` hashing; rule 13 names scrypt; section 8 notes on the identity path, grant-before-hand-over, Clock, hashing, the request pipeline, locks, `'infinity'`, test runs applying migrations, the module layout, the audit log, shadow-only replays and slow test runs.
+
+# Step details
 
 ## A1: Roles, rename, non-tenant path (passed, commit bb4fb0b)
 
@@ -122,3 +206,31 @@ Filled in step by step. The full summary (see `docs/phase-a-design.md` section 2
 
 **Open for later steps:**
 - Audit events for staff and device changes, PIN resets and lockouts (A5).
+
+## A5: Audit log and hardening (passed)
+
+**Result:** 17 new tests pass, covering design section 19 A5 tests 1 to 4 plus password reset end to end; test 5 (ten full runs in a row) is under "Final suite" at the top. Migrations were replayed in the shadow database and shown to Ian before being applied.
+
+**Built (approved by Ian on 2026-10-25):**
+- Migrations `*_a5_audit_log_table` (generated), `*_a5_audit_log_rls` (format and metadata checks, SELECT and INSERT only for `app_user`, forced RLS, `shop_only` policy) and `*_a5_identity_reset_password` (14th identity function; grants before the hand-over; no new column grants).
+- `AuditService` (`src/modules/audit/`): writes in the current tenant transaction; refuses metadata keys that look like secrets or contact details; actor from the request unless given (`null` for system events); IP from the request context that `TenantInterceptor` now opens on every route.
+- Audit rows for: `business.signed_up`; `device.registered` (signup, password login and activation, all through `DevicesService.register`), `device.revoked`, `device.shared_changed` (only on a real change), `device.member_added`, `device.member_removed`; `staff.created`, `updated`, `suspended`, `reactivated`, `removed`, `pin_reset`; `pin.locked` (timed at 5, for good at 10); `refresh_token.reuse_detected`; `password.reset` (one row in each business of the person).
+- `POST /v1/auth/password/forgot` (always 202) and `POST /v1/auth/password/reset` (hash first, verify the code, then one identity function uses the code, sets the hash and clears the lockout; then refresh tokens are revoked in every business). Every failed reset is `400 OTP_INVALID`.
+- Test-only route `POST /spike/careless`: logs every credential field (also nested) and fails with them in its error message.
+
+**Changed from the proposal (told to Ian):** the request context lives inside `TenantInterceptor`, not in a separate global interceptor, because Nest does not document the order of global interceptors and the actor is only known after the session loads.
+
+**Proof the tests catch mistakes** (each applied temporarily, then reverted and confirmed gone):
+- Design mutation 5, `device_secret` removed from log redaction: test 3 failed ("a credential of length 43 appears in the logs", the device secret).
+- Design mutation 4 on the new route, `forgot` answering `404 NOT_FOUND` for an unknown email: test 4 failed (`expected { status: 404 ... } to deeply equal { status: 202 ... }`).
+- The rollback test also forces a crash right after the audit insert: the request answers 500, no audit row exists and the staff member is still `ACTIVE`.
+- Process slip, caught: the script that reverted mutation 4 used `git checkout` on a file that is not in git yet, so the revert silently failed. Noticed in the output, reverted by hand, and a search for leftover mutation markers runs before the final suite.
+
+**Things to know:**
+1. Use `AuditService` for every business event in later phases (voids, adjustments, approvals). Never put a value in metadata that you would not put in a log.
+2. A public route must answer the same for a known and an unknown account, including for "expired" and "rate limited" cases, which leak just as well.
+3. Equal work is checked by counting scrypt calls, not by timing: wall-clock comparisons would be flaky on this machine.
+
+**Open for later steps:**
+- `password.changed` is in the design's list, but Phase A has no change-password endpoint, so there is nothing to record yet.
+- There is no endpoint to read the audit log (reports are Phase G).

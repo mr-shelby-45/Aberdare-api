@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import type { FastifyRequest } from 'fastify';
 import { Public } from '../../src/common/auth/public.decorator.js';
 import { IpAllowlistGuard } from '../../src/common/security/ip-allowlist.guard.js';
+import { SpikeCarelessDto } from './spike-careless.dto.js';
 import { SpikeItemDto } from './spike-item.dto.js';
 import { SpikeLoginDto } from './spike-login.dto.js';
 
@@ -51,6 +52,14 @@ export class SpikeController {
     // A deliberate mistake: logging the whole body. Redaction must catch it.
     request.log.info({ body }, 'login attempt');
     return { ok: true };
+  }
+
+  @Post('careless')
+  careless(@Req() request: FastifyRequest, @Body() body: SpikeCarelessDto): never {
+    // Phase A5 test 3: two deliberate mistakes. Log every credential (nested
+    // too), then fail with them in the error message. Neither may reach a log.
+    request.log.info({ body, nested: { body } }, 'careless handler');
+    throw new Error(`failed with ${JSON.stringify(body)}`);
   }
 
   @Get('allowlist/log')

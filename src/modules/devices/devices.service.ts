@@ -1,14 +1,19 @@
 import { Injectable } from '@nestjs/common';
 import { randomSecret, sha256 } from '../../common/auth/secrets.js';
+import { AuditService } from '../audit/audit.service.js';
 import { type DeviceForSession, DevicesRepository } from './devices.repository.js';
 
 @Injectable()
 export class DevicesService {
-  constructor(private readonly repo: DevicesRepository) {}
+  constructor(
+    private readonly repo: DevicesRepository,
+    private readonly audit: AuditService,
+  ) {}
 
   /**
    * Registers a device and issues its secret: 32 random bytes, returned once
    * to the app and stored only as a SHA-256 hash (docs/phase-a-design.md section 7).
+   * Every registration (signup, password login, staff activation) is audited here.
    */
   async register(device: {
     name: string;
@@ -18,6 +23,13 @@ export class DevicesService {
   }): Promise<{ deviceId: string; deviceSecret: string }> {
     const deviceSecret = randomSecret();
     const deviceId = await this.repo.create({ ...device, secretHash: sha256(deviceSecret) });
+    await this.audit.record({
+      action: 'device.registered',
+      targetType: 'device',
+      targetId: deviceId,
+      metadata: { platform: device.platform },
+      actorMembershipId: device.registeredByMembershipId,
+    });
     return { deviceId, deviceSecret };
   }
 

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { DatabaseModule } from '../../database/database.module.js';
+import { AuditModule } from '../audit/audit.module.js';
 import { DevicesModule } from '../devices/devices.module.js';
 import { SessionsModule } from '../sessions/sessions.module.js';
 import { StaffModule } from '../staff/staff.module.js';
@@ -13,7 +14,7 @@ import { StaffLifecycleService } from './staff-lifecycle.service.js';
 // device changes check memberships (keeping staff and devices free of each
 // other avoids a circular import).
 @Module({
-  imports: [DatabaseModule, StaffModule, DevicesModule, SessionsModule],
+  imports: [DatabaseModule, AuditModule, StaffModule, DevicesModule, SessionsModule],
   controllers: [StaffController, DevicesController],
   providers: [StaffLifecycleService, DeviceAdminService],
 })

@@ -57,7 +57,7 @@ export async function asAppUser<T>(
 export async function resetTables(): Promise<void> {
   await asMigrator((c) =>
     c.query(
-      `TRUNCATE otp_challenge, refresh_token, device_membership, device, membership, person,
+      `TRUNCATE audit_log, otp_challenge, refresh_token, device_membership, device, membership, person,
                 change_log, sync_command, stock_conversion, stock_movement,
                 stock_balance, pack_type, location, product, business CASCADE`,
     ),

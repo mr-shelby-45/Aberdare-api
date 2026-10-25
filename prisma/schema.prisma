@@ -29,6 +29,7 @@ model Business {
   devices           Device[]
   deviceMemberships DeviceMembership[]
   refreshTokens     RefreshToken[]
+  auditLogs         AuditLog[]
 
   @@map("business")
 }
@@ -271,6 +272,7 @@ model Membership {
   devicesRegistered     Device[]
   deviceLinks           DeviceMembership[]
   refreshTokens         RefreshToken[]
+  auditEntries          AuditLog[]
 
   @@unique([businessId, id])
   @@unique([businessId, personId])
@@ -383,4 +385,28 @@ model OtpChallenge {
   // Send limits and "latest live challenge" lookups.
   @@index([target, purpose, createdAt])
   @@map("otp_challenge")
+}
+
+// Who did what, when (docs/phase-a-design.md sections 4 and 14). Tenant
+// table, append-only: app_user may SELECT and INSERT only. Written by
+// AuditService in the same transaction as the change it records. Metadata
+// never holds secrets.
+model AuditLog {
+  id                String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId        String      @map("business_id") @db.Uuid
+  // NULL for system events (PIN lockout, refresh token reuse, password reset).
+  actorMembershipId String?     @map("actor_membership_id") @db.Uuid
+  // For example "staff.suspended".
+  action            String
+  targetType        String      @map("target_type")
+  targetId          String?     @map("target_id") @db.Uuid
+  metadata          Json        @default("{}")
+  ip                String?     @db.Inet
+  // From the Clock.
+  occurredAt        DateTime    @map("occurred_at") @db.Timestamptz(6)
+  business          Business    @relation(fields: [businessId], references: [id])
+  actor             Membership? @relation(fields: [businessId, actorMembershipId], references: [businessId, id])
+
+  @@index([businessId, occurredAt])
+  @@map("audit_log")
 }

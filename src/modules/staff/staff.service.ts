@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { AuditService } from '../audit/audit.service.js';
 import {
   type MembershipForSession,
   type MembershipSummary,
@@ -16,7 +17,10 @@ export const TEMP_PIN_MAX_FAILURES = 5;
 
 @Injectable()
 export class StaffService {
-  constructor(private readonly repo: StaffRepository) {}
+  constructor(
+    private readonly repo: StaffRepository,
+    private readonly audit: AuditService,
+  ) {}
 
   /** The owner membership created at signup: ACTIVE, with the owner's PIN (already hashed). */
   async createOwner(personId: string, displayName: string, pinHash: string, now: Date): Promise<MembershipSummary> {
@@ -31,12 +35,26 @@ export class StaffService {
     return this.repo.findPinState(membershipId);
   }
 
+  /** Counts the attempt atomically. The failure that starts a lock is audited (a system event). */
   async recordPinAttempt(membershipId: string, succeeded: boolean, now: Date) {
-    return this.repo.recordPinAttempt(membershipId, succeeded, {
+    const counters = await this.repo.recordPinAttempt(membershipId, succeeded, {
       now,
       lockEvery: PIN_LOCK_EVERY,
       lockMinutes: PIN_LOCK_MINUTES,
     });
+    if (!succeeded && counters.pinFailedCount % PIN_LOCK_EVERY === 0) {
+      await this.audit.record({
+        action: 'pin.locked',
+        targetType: 'membership',
+        targetId: membershipId,
+        metadata: {
+          lock: counters.pinFailedCount >= PIN_HARD_LOCK_AFTER ? 'for_good' : 'timed',
+          failed_count: counters.pinFailedCount,
+        },
+        actorMembershipId: null,
+      });
+    }
+    return counters;
   }
 
   /**

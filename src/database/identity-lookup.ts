@@ -294,6 +294,25 @@ export class IdentityLookup {
     return rows[0]?.ok === true;
   }
 
+  /**
+   * Password reset: consumes the verified PASSWORD_RESET code for this email,
+   * sets the new hash and clears the password lockout. Returns the person's
+   * id, or null without that proof (and then changes nothing).
+   */
+  async resetPassword(
+    email: string,
+    challengeId: string,
+    passwordHash: string,
+    limits: { now: Date; proofMaxAgeSeconds: number },
+  ): Promise<string | null> {
+    if (!UUID.test(challengeId)) return null;
+    const rows = await this.client().$queryRaw<{ person_id: string | null }[]>`
+      SELECT identity_reset_password(
+        ${email}, ${challengeId}::uuid, ${passwordHash}, ${limits.now}::timestamptz,
+        make_interval(secs => ${limits.proofMaxAgeSeconds}::int)) AS person_id`;
+    return rows[0]?.person_id ?? null;
+  }
+
   /** Creates the person for an E.164 phone if missing. Never changes an existing person. */
   async ensurePerson(phone: string, now: Date): Promise<{ personId: string; created: boolean }> {
     const rows = await this.client().$queryRaw<{ person_id: string; created: boolean }[]>`

@@ -7,6 +7,7 @@ import { ApiError } from '../../common/errors/api.error.js';
 import { Clock } from '../../common/time/clock.js';
 import { maskPhone, normalizeKenyanPhone } from '../../common/validation/contact.js';
 import { IdentityLookup } from '../../database/identity-lookup.js';
+import { type AuditMetadata, AuditService } from '../audit/audit.service.js';
 import { DevicesService } from '../devices/devices.service.js';
 import { RefreshTokensService } from '../sessions/refresh-tokens.service.js';
 import { StaffService } from '../staff/staff.service.js';
@@ -17,7 +18,7 @@ import { checkExtraPermissions, notFound, ownerProtected, refuseSelf } from './s
 
 // The staff endpoints (docs/phase-a-design.md section 11). Runs inside the
 // request's tenant transaction (TenantInterceptor), so every change, its
-// token revocations and its device changes commit together.
+// token revocations, its device changes and its audit row commit together.
 @Injectable()
 export class StaffLifecycleService {
   constructor(
@@ -27,6 +28,7 @@ export class StaffLifecycleService {
     private readonly identity: IdentityLookup,
     private readonly codes: CodeHasher,
     private readonly clock: Clock,
+    private readonly audit: AuditService,
   ) {}
 
   /** Invites a manager or attendant. The temp PIN is returned once and stored hashed. */
@@ -68,6 +70,12 @@ export class StaffLifecycleService {
         createdByMembershipId: actor.membership.id,
       });
     }
+    await this.audit.record({
+      action: 'staff.created',
+      targetType: 'membership',
+      targetId: membershipId,
+      metadata: { role_preset: dto.role_preset, extra_permissions: extras, reinvited: existing !== null },
+    });
     return { membershipId, tempPin, tempPinExpiresAt };
   }
 
@@ -101,6 +109,15 @@ export class StaffLifecycleService {
       rolePreset: dto.role_preset,
       extraPermissions: dto.extra_permissions,
     });
+    const changed = [
+      ...(dto.display_name !== undefined ? ['display_name'] : []),
+      ...(dto.role_preset !== undefined ? ['role_preset'] : []),
+      ...(dto.extra_permissions !== undefined ? ['extra_permissions'] : []),
+    ];
+    const metadata: AuditMetadata = { changed };
+    if (dto.role_preset !== undefined) metadata.role_preset = dto.role_preset;
+    if (dto.extra_permissions !== undefined) metadata.extra_permissions = dto.extra_permissions;
+    await this.audit.record({ action: 'staff.updated', targetType: 'membership', targetId: id, metadata });
   }
 
   /** New temp PIN, back to INVITED; tokens, tablet links and the person's phones are revoked. */
@@ -111,6 +128,7 @@ export class StaffLifecycleService {
     const tempPinExpiresAt = new Date(now.getTime() + TEMP_PIN_DAYS * 86_400_000);
     await this.staff.resetToInvite(target.id, this.codes.hash(tempPinHashInput(target.id, tempPin)), tempPinExpiresAt);
     await this.cutAccess(target.id, now);
+    await this.audit.record({ action: 'staff.pin_reset', targetType: 'membership', targetId: target.id });
     return { membershipId: target.id, tempPin, tempPinExpiresAt };
   }
 
@@ -120,6 +138,7 @@ export class StaffLifecycleService {
       throw new ApiError(422, 'VALIDATION_FAILED', 'Only active staff can be suspended.');
     }
     await this.refreshTokens.revokeForMembership(target.id, this.clock.now());
+    await this.audit.record({ action: 'staff.suspended', targetType: 'membership', targetId: target.id });
   }
 
   async reactivate(actor: RequestSession, id: string): Promise<void> {
@@ -127,6 +146,7 @@ export class StaffLifecycleService {
     if (!(await this.staff.setStatus(target.id, ['SUSPENDED'], 'ACTIVE'))) {
       throw new ApiError(422, 'VALIDATION_FAILED', 'Only suspended staff can be reactivated.');
     }
+    await this.audit.record({ action: 'staff.reactivated', targetType: 'membership', targetId: target.id });
   }
 
   /** Status REMOVED, never a hard delete. */
@@ -136,6 +156,7 @@ export class StaffLifecycleService {
       throw notFound();
     }
     await this.cutAccess(target.id, this.clock.now());
+    await this.audit.record({ action: 'staff.removed', targetType: 'membership', targetId: target.id });
   }
 
   private async guardTarget(actor: RequestSession, id: string) {

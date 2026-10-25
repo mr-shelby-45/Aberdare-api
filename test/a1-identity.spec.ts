@@ -47,6 +47,8 @@ const COLUMNS: Record<string, string[]> = {
   identity_complete_owner_signup: ['person_id', 'outcome'],
   // Added in A4 (tested in test/a4-staff.spec.ts). Returns one boolean.
   identity_activate_phone: ['identity_activate_phone'],
+  // Added in A5 (tested in test/a5-audit.spec.ts). Returns the person id or NULL.
+  identity_reset_password: ['identity_reset_password'],
 };
 
 interface World {

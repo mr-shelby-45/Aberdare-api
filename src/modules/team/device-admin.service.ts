@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ApiError } from '../../common/errors/api.error.js';
 import { Clock } from '../../common/time/clock.js';
+import { AuditService } from '../audit/audit.service.js';
 import { DevicesService } from '../devices/devices.service.js';
 import { RefreshTokensService } from '../sessions/refresh-tokens.service.js';
 import { StaffService } from '../staff/staff.service.js';
@@ -16,6 +17,7 @@ export class DeviceAdminService {
     private readonly staff: StaffService,
     private readonly refreshTokens: RefreshTokensService,
     private readonly clock: Clock,
+    private readonly audit: AuditService,
   ) {}
 
   async list() {
@@ -51,6 +53,14 @@ export class DeviceAdminService {
         }
       }
     }
+    if (dto.is_shared !== undefined && dto.is_shared !== device.isShared) {
+      await this.audit.record({
+        action: 'device.shared_changed',
+        targetType: 'device',
+        targetId: id,
+        metadata: { is_shared: dto.is_shared },
+      });
+    }
   }
 
   /** Status REVOKED, and every session on it ends. */
@@ -59,6 +69,7 @@ export class DeviceAdminService {
     if (!device) throw notFound();
     await this.devices.revoke(id);
     await this.refreshTokens.revokeForDevice(id, this.clock.now());
+    await this.audit.record({ action: 'device.revoked', targetType: 'device', targetId: id });
   }
 
   async addMember(deviceId: string, membershipId: string): Promise<void> {
@@ -72,10 +83,22 @@ export class DeviceAdminService {
       throw new ApiError(422, 'VALIDATION_FAILED', 'Only active staff can be added to a device.');
     }
     await this.devices.addLink(deviceId, membershipId);
+    await this.audit.record({
+      action: 'device.member_added',
+      targetType: 'device',
+      targetId: deviceId,
+      metadata: { membership_id: membershipId },
+    });
   }
 
   async removeMember(deviceId: string, membershipId: string): Promise<void> {
     if ((await this.devices.removeLink(deviceId, membershipId)) === 0) throw notFound();
     await this.refreshTokens.revokeForMembershipOnDevice(membershipId, deviceId, this.clock.now());
+    await this.audit.record({
+      action: 'device.member_removed',
+      targetType: 'device',
+      targetId: deviceId,
+      metadata: { membership_id: membershipId },
+    });
   }
 }

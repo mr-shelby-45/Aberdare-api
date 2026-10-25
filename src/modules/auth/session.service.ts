@@ -5,6 +5,7 @@ import { ApiError } from '../../common/errors/api.error.js';
 import { Clock } from '../../common/time/clock.js';
 import { IdentityLookup } from '../../database/identity-lookup.js';
 import { TenantRunner } from '../../database/tenant.js';
+import { AuditService } from '../audit/audit.service.js';
 import { BusinessService } from '../business/business.service.js';
 import { DevicesService } from '../devices/devices.service.js';
 import { StaffService } from '../staff/staff.service.js';
@@ -23,6 +24,7 @@ export class SessionService {
     private readonly business: BusinessService,
     private readonly tokens: TokenService,
     private readonly refreshTokens: RefreshTokensService,
+    private readonly audit: AuditService,
   ) {}
 
   /**
@@ -36,8 +38,18 @@ export class SessionService {
     if (!claim) throw tokenInvalid();
     if (claim.outcome === 'EXPIRED') throw new ApiError(401, 'TOKEN_EXPIRED', 'Your session has expired. Please log in again.');
     if (claim.outcome === 'ALREADY_USED') {
-      await this.tenants.run(claim.businessId, () => this.refreshTokens.revokeFamily(claim.familyId, now));
-      // TODO(A5): audit "refresh token reuse detected".
+      // A used token came back: it may have been stolen. End the whole family
+      // and record it (a system event: nobody is logged in here).
+      await this.tenants.run(claim.businessId, async () => {
+        const revoked = await this.refreshTokens.revokeFamily(claim.familyId, now);
+        await this.audit.record({
+          action: 'refresh_token.reuse_detected',
+          targetType: 'membership',
+          targetId: claim.membershipId,
+          metadata: { family_id: claim.familyId, device_id: claim.deviceId, revoked_count: revoked },
+          actorMembershipId: null,
+        });
+      });
       throw tokenInvalid();
     }
     if (claim.outcome !== 'CLAIMED') throw tokenInvalid();

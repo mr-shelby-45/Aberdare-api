@@ -9,6 +9,7 @@ import { IdentityLookup } from '../../database/identity-lookup.js';
 import { TenantRunner } from '../../database/tenant.js';
 import { EmailSender } from '../../integrations/email/email.sender.js';
 import { SmsSender } from '../../integrations/sms/sms.sender.js';
+import { AuditService } from '../audit/audit.service.js';
 import { BusinessService } from '../business/business.service.js';
 import { DevicesService } from '../devices/devices.service.js';
 import { StaffService } from '../staff/staff.service.js';
@@ -51,6 +52,7 @@ export class SignupService {
     private readonly devices: DevicesService,
     private readonly sms: SmsSender,
     private readonly email: EmailSender,
+    private readonly audit: AuditService,
   ) {}
 
   /** Creates both codes, then sends them. Answers the same for every phone and email. */
@@ -137,6 +139,13 @@ export class SignupService {
 
         await this.business.createForSignup(dto.business_name, dto.business_type);
         const membership = await this.staff.createOwner(person.personId, dto.owner_name, pinHash, now);
+        await this.audit.record({
+          action: 'business.signed_up',
+          targetType: 'business',
+          targetId: businessId,
+          metadata: { business_type: dto.business_type, new_person: person.outcome === 'CREATED' },
+          actorMembershipId: membership.id,
+        });
         const device = await this.devices.register({
           name: dto.device.name,
           platform: dto.device.platform,
