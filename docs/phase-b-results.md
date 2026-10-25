@@ -67,3 +67,49 @@ Filled in step by step. The full summary (see `docs/phase-b-design.md` section 1
 **Open risks from B2:**
 - **Accepted:** a command with a product or pack type id that exists in another business answers `ALREADY_EXISTS` instead of being created, which reveals that the id exists somewhere. Ids are random UUIDs and are never shown across businesses, so they cannot be guessed; per-business primary keys would be the only full fix.
 - An occurred_at more than 24 hours ahead is stored as a rejection, so a phone with a badly wrong clock must resend under a new command id after fixing it.
+
+## Test speed-ups and the new testing method (approved by Ian before B3)
+
+**Method:** `docs/phase-b-design.md` section 12 now holds Ian's testing method (commit `cc6fe43`). Baseline before it: the full suite was 240 of 240.
+
+**Measured** (one full run each, Vitest JSON reporter, same machine):
+
+| | Before | After |
+|---|---|---|
+| Suite wall time | 267.2 s | 160.7 s |
+| Sum of test files | 212.1 s | 104.3 s |
+| a3-login | 43.4 s | 11.5 s |
+| a5-audit | 34.8 s | 8.6 s |
+| a4-staff | 27.4 s | 9.2 s |
+| b2-commands | 26.4 s | 11.0 s |
+| a2-signup | 15.6 s | 5.7 s |
+| b1-catalogue | 11.7 s | 4.1 s |
+| step2-stock | 28.7 s | 30.6 s (database-bound, unchanged) |
+
+The scrypt benchmark: 372.9 ms per hash at the production cost, 3.9 ms at the test cost.
+
+**Applied:**
+1. `test/helpers/fast-password-hasher.ts`: the production hasher with scrypt N=2^10, p=1, used only by `startTestApp`. In `src/` the only change is that the cost moved from a module constant into a protected field; production has no setting for it. `test/password-hasher.spec.ts` (4 tests) proves the app built by `createApp()` uses exactly `PasswordHasher` and stores `scrypt$32768$8$3$`.
+2. `synchronous_commit = off` on `aberdare_test` only, set by the test global setup, which refuses a database not ending in `_test`. Checked after the run: `off` in `aberdare_test`, `on` in `aberdare`.
+
+**Not applied:** `fsync=off` (dev and test share one container, so it would risk corrupting the dev database on a crash); fewer repeats in spike step 2 (that would weaken a spike proof).
+
+**A real finding from the faster run:** the after-run failed one test (243 of 244). A4's "two concurrent activations with the same setup token" expected the loser to be refused at the atomic invite claim (401). With fast hashing, one request could now finish before the other checked the SMS code, so the loser was refused at the code check instead (400), and the test no longer exercised the claim race at all. The test now holds both requests at the PIN hash until both have arrived, so they always meet at the claim; the exact `[200, 401]` assertion is unchanged, and it passed 5 runs in a row. Slow hashing had been keeping that race alive by luck.
+
+## B3: Barcodes and lookup (passed)
+
+**Result:** new 8, Phase B cumulative 40 (B1 11, B2 21, B3 8), all passing in one gate run. The concurrency test (20 concurrent adds of one code) passed 5 runs in a row. The full suite then passed once: 16 files, 252 of 252 (155.7 s), with lint, build and the drift check clean (240 baseline + 4 production-cost hasher tests + 8 B3 tests).
+
+**Built (approved by Ian on 2026-10-25, with the recommended answers):**
+- `barcode.add` and `barcode.remove` handlers, registered in `CatalogueHandlers` (the endpoint now accepts all five catalogue commands).
+- `barcode.add`: normalise (invalid is `VALIDATION_FAILED`), lock the product (`PRODUCT_NOT_FOUND`), check the pack type belongs to it (`PACK_TYPE_NOT_FOUND`), then `INSERT ... ON CONFLICT DO NOTHING RETURNING id` and, if nothing was inserted, a fresh read: the same pack type is an accepted no-op, otherwise `BARCODE_TAKEN`. Allowed on archived products and pack types. Audit `barcode.added`, not for a no-op.
+- `barcode.remove`: normalise, one `DELETE ... RETURNING`; a missing code is an accepted no-op. Audit `barcode.removed`; the trigger logs the delete with `row_key`.
+- `GET /v1/products/by-barcode/:code` (`ProductsController`, any active member): `{ pack_type_id, product }`, prices with two decimals, `cost_price` key absent without `costs.view`. Unknown, malformed and other businesses' codes: the same `404 BARCODE_NOT_FOUND`. The product view (`product-view.ts`, `ProductsService.view`) is ready for B4.
+
+**Proof the tests catch mistakes:**
+- Design mutation 2, check-then-insert in `barcode.add`: B3 test 3 (concurrent adds) failed. Only 10 of the 19 losers got `BARCODE_TAKEN`; the rest hit the unique index and crashed. Restored from a backup and checked identical.
+- Design mutation 5, the barcode trigger without its delete (test database only): B3 test 4 failed (no `DELETE` row in `change_log`). The function was restored from its migration and its definition checked identical (md5 before and after). B5 test 1 will be checked against the same mutation in B5.
+
+**Things to know:**
+1. The lookup normalises the code the same way as writes, so a 12-digit scan finds a code stored as 13 digits. Case is not changed: `ABC-123` and `abc-123` are different codes.
+2. Codes never reach a log line: the request log records the route pattern, not the URL (checked in B3 test 6).

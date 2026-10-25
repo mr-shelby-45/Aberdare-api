@@ -215,6 +215,8 @@ As designed for Phase B (`docs/phase-b-design.md` sections 2, 4 and 6):
 - Server search: exact barcode match (normalised), then exact SKU, then names starting with `q`, then other names containing `q`. Name matching is `name ILIKE '%...%'` (uses the trigram index `product_name_trgm_idx`), with `%`, `_` and `\` escaped, parameters only. `q` is at least 2 characters, at most 50 results, no paging. Archived products are hidden unless `include_archived=true`. Every read is limited to the caller's business by RLS; no endpoint takes a business id.
 - `cost_price` is omitted from responses (the key is absent, not null) unless the caller has `costs.view`.
 
+As built in B3 (decided with Ian): `barcode.add` uses `INSERT ... ON CONFLICT (business_id, barcode) DO NOTHING RETURNING id`, then, when nothing was inserted, a fresh read of the existing row: the same pack type is an accepted no-op, anything else is `BARCODE_TAKEN`. A concurrent add of the same code waits on the unique index, so exactly one wins. Adding a barcode to an archived product or pack type is allowed. `barcode.remove` is one `DELETE ... RETURNING`; a missing code is an accepted no-op, and the trigger logs the delete with the code in `change_log.row_key`. `GET /v1/products/by-barcode/:code` answers `{ pack_type_id, product }`; unknown, malformed and other businesses' codes all give the same `404 BARCODE_NOT_FOUND`. The product view is built once in `ProductsService` (`product-view.ts`) for B4 to reuse.
+
 ## 8. M-Pesa payments
 
 **DECIDED approach, details need verification against the official Daraja docs.**

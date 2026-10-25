@@ -129,15 +129,17 @@ describe('A2: codes and signup', { timeout: 30_000 }, () => {
         display_name: 'Amina Wanjiru',
       });
 
+      // Stored at the test-only scrypt cost (startTestApp); the production cost is
+      // checked in test/password-hasher.spec.ts.
       const db = await asAdmin(async (c) => ({
         person: (
           await c.query(
             `SELECT phone, email, phone_verified_at IS NOT NULL AS pv, email_verified_at IS NOT NULL AS ev,
-                    password_hash LIKE 'scrypt$32768$8$3$%' AS scrypt FROM person`,
+                    password_hash LIKE 'scrypt$1024$8$1$%' AS scrypt FROM person`,
           )
         ).rows,
         business: (await c.query('SELECT id, name, type FROM business')).rows,
-        membership: (await c.query("SELECT role_preset, status, pin_hash LIKE 'scrypt$32768$8$3$%' AS scrypt FROM membership")).rows,
+        membership: (await c.query("SELECT role_preset, status, pin_hash LIKE 'scrypt$1024$8$1$%' AS scrypt FROM membership")).rows,
         device: (await c.query('SELECT id, secret_hash, status, platform FROM device')).rows,
         refresh: (await c.query('SELECT token_hash FROM refresh_token')).rows,
       }));

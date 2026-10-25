@@ -10,10 +10,16 @@ const scryptAsync = promisify(scrypt) as (
   options: { N: number; r: number; p: number; maxmem: number },
 ) => Promise<Buffer>;
 
+export interface ScryptParams {
+  N: number;
+  r: number;
+  p: number;
+}
+
 // OWASP's scrypt minimum, in the variant that needs the least memory per hash
 // (32 MiB). Chosen by Ian in A2; measured about 430 ms per hash on the dev
 // machine. Stored with every hash, so it can be raised later.
-const PARAMS = { N: 2 ** 15, r: 8, p: 3 };
+export const PRODUCTION_SCRYPT_PARAMS: ScryptParams = { N: 2 ** 15, r: 8, p: 3 };
 const SALT_BYTES = 16;
 const KEY_BYTES = 64;
 
@@ -21,12 +27,20 @@ const KEY_BYTES = 64;
 // scrypt. Stored as scrypt$N$r$p$salt$hash (salt and hash base64url).
 @Injectable()
 export class PasswordHasher {
+  /**
+   * The cost of new hashes. Always the production value in the app: there is
+   * no setting for it. Only the test helpers replace it, with a test-only
+   * subclass (test/helpers/fast-password-hasher.ts), to keep the suite fast.
+   */
+  protected readonly params: ScryptParams = PRODUCTION_SCRYPT_PARAMS;
+
   constructor(private readonly config: AppConfig) {}
 
   async hash(secret: string): Promise<string> {
     const salt = randomBytes(SALT_BYTES);
-    const key = await this.derive(secret, salt, PARAMS);
-    return ['scrypt', PARAMS.N, PARAMS.r, PARAMS.p, salt.toString('base64url'), key.toString('base64url')].join('$');
+    const { N, r, p } = this.params;
+    const key = await this.derive(secret, salt, this.params);
+    return ['scrypt', N, r, p, salt.toString('base64url'), key.toString('base64url')].join('$');
   }
 
   /** Constant-time check. False for any malformed stored value. */
@@ -46,7 +60,7 @@ export class PasswordHasher {
    * takes as long as a wrong password (docs/phase-a-design.md section 10).
    */
   async dummyVerify(secret: string): Promise<false> {
-    await this.derive(secret, randomBytes(SALT_BYTES), PARAMS);
+    await this.derive(secret, randomBytes(SALT_BYTES), this.params);
     return false;
   }
 

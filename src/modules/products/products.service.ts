@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { ApiError } from '../../common/errors/api.error.js';
 import { normalizeMoney } from '../../common/validation/money.js';
 import { Clock } from '../../common/time/clock.js';
 import { uniqueViolationConstraint } from '../../database/db-errors.js';
@@ -7,10 +8,13 @@ import { StockService } from '../stock/stock.service.js';
 import { normalizeBarcode } from './barcode.js';
 import { BarcodesRepository } from './barcodes.repository.js';
 import { CatalogueError } from './catalogue.error.js';
+import type { AddBarcodeDto } from './dto/add-barcode.dto.js';
 import type { CreateProductDto } from './dto/create-product.dto.js';
+import type { RemoveBarcodeDto } from './dto/remove-barcode.dto.js';
 import type { UpdateProductDto } from './dto/update-product.dto.js';
 import type { UpsertPackTypeDto } from './dto/upsert-pack-type.dto.js';
 import { type PackTypeRow, PackTypesRepository } from './pack-types.repository.js';
+import type { ProductView } from './product-view.js';
 import { ProductsRepository } from './products.repository.js';
 
 // Catalogue rules (docs/phase-b-design.md section 4).
@@ -213,6 +217,93 @@ export class ProductsService {
     await this.changePackType(existing, dto, wanted, actorMembershipId);
   }
 
+  /**
+   * barcode.add: one code to one pack type. The same code on the same pack
+   * type again is an accepted no-op; anywhere else it is BARCODE_TAKEN.
+   * Allowed on an archived product or pack type (decided in B3).
+   */
+  async addBarcode(dto: AddBarcodeDto, actorMembershipId: string): Promise<void> {
+    const code = normalizeBarcode(dto.barcode);
+    if (!code) throw invalid('The barcode is not valid.');
+    const product = await this.products.lock(dto.product_id);
+    if (!product) throw productNotFound();
+    const pack = await this.packTypes.lock(dto.pack_type_id);
+    if (!pack || pack.productId !== product.id) throw packTypeNotFound();
+
+    const stored = await this.barcodes.insertIfAbsent({
+      barcode: code,
+      productId: product.id,
+      packTypeId: pack.id,
+      createdByMembershipId: actorMembershipId,
+    });
+    if (!stored) {
+      // A new statement, so it sees the row that won (even a concurrent one).
+      const existing = await this.barcodes.findByCode(code);
+      if (existing && existing.packTypeId === pack.id) return;
+      throw barcodeTaken();
+    }
+    await this.audit.record({
+      action: 'barcode.added',
+      targetType: 'product',
+      targetId: product.id,
+      metadata: { barcode: code, pack_type_id: pack.id },
+      actorMembershipId,
+    });
+  }
+
+  /** barcode.remove: removing a code that is not there is an accepted no-op. */
+  async removeBarcode(dto: RemoveBarcodeDto, actorMembershipId: string): Promise<void> {
+    const code = normalizeBarcode(dto.barcode);
+    if (!code) throw invalid('The barcode is not valid.');
+    // The change_log trigger records the delete, with the code in row_key.
+    const removed = await this.barcodes.remove(code);
+    if (!removed) return;
+    await this.audit.record({
+      action: 'barcode.removed',
+      targetType: 'product',
+      targetId: removed.productId,
+      metadata: { barcode: removed.barcode, pack_type_id: removed.packTypeId },
+      actorMembershipId,
+    });
+  }
+
+  /**
+   * GET /products/by-barcode/:code: the product and the exact pack type the
+   * code belongs to. Unknown, malformed and another business's codes all get
+   * the same 404 (decided in B3).
+   */
+  async findByBarcode(raw: string): Promise<{ packTypeId: string; product: ProductView }> {
+    const code = normalizeBarcode(raw);
+    const found = code ? await this.barcodes.findByCode(code) : null;
+    const product = found ? await this.view(found.productId) : null;
+    if (!found || !product) throw new ApiError(404, 'BARCODE_NOT_FOUND', 'No product has this barcode.');
+    return { packTypeId: found.packTypeId, product };
+  }
+
+  /** The full product for reads (B3 and B4), or null when not visible. */
+  private async view(productId: string): Promise<ProductView | null> {
+    // One query at a time: queries on one transaction cannot run in parallel.
+    const product = await this.products.findById(productId);
+    if (!product) return null;
+    const packTypes = await this.packTypes.listForProduct(productId);
+    const barcodes = await this.barcodes.listForProduct(productId);
+    return {
+      id: product.id,
+      name: product.name,
+      sku: product.sku,
+      archived: product.archivedAt !== null,
+      packTypes: packTypes.map((t) => ({
+        id: t.id,
+        name: t.name,
+        unitsPerPack: t.unitsPerPack,
+        sellPrice: t.sellPrice,
+        costPrice: t.costPrice,
+        archived: t.archivedAt !== null,
+      })),
+      barcodes: barcodes.map((b) => ({ barcode: b.barcode, packTypeId: b.packTypeId })),
+    };
+  }
+
   private async changePackType(
     existing: PackTypeRow,
     dto: UpsertPackTypeDto,
@@ -303,7 +394,7 @@ async function mapConflicts(write: () => Promise<void>, unitsPerPack?: number): 
       case 'product_business_id_sku_key':
         throw new CatalogueError('SKU_TAKEN', 'Another product already has this SKU.');
       case 'product_barcode_business_id_barcode_key':
-        throw new CatalogueError('BARCODE_TAKEN', 'This barcode is already registered to a product.');
+        throw barcodeTaken();
       case 'product_pkey':
       case 'pack_type_pkey':
         throw new CatalogueError('ALREADY_EXISTS', 'This item already exists.');
@@ -321,6 +412,9 @@ async function mapConflicts(write: () => Promise<void>, unitsPerPack?: number): 
   }
 }
 
+function barcodeTaken(): CatalogueError {
+  return new CatalogueError('BARCODE_TAKEN', 'This barcode is already registered to a product.');
+}
 function invalid(message: string): CatalogueError {
   return new CatalogueError('VALIDATION_FAILED', message);
 }

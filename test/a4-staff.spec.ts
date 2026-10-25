@@ -279,7 +279,24 @@ describe('A4: staff and devices', { timeout: 60_000 }, () => {
       const inv = await invite(owner);
       const setup = json<{ setup_token: string }>(await firstLogin(inv.phone, inv.tempPin)).setup_token;
       const code = lastSmsCode(inv.phone);
+      // Hold both requests at the PIN hash (after the code check, before the
+      // claim) until both have arrived, so they always meet at the atomic
+      // invite claim. With slow hashing they overlapped by luck; with the fast
+      // test hasher one could finish first, and the other was then refused at
+      // the code check (400) without testing the claim race at all.
+      const hasher = t.app.get(PasswordHasher);
+      const original = hasher.hash.bind(hasher);
+      let arrived = 0;
+      let release!: () => void;
+      const bothArrived = new Promise<void>((resolve) => (release = resolve));
+      const spy = vi.spyOn(hasher, 'hash').mockImplementation(async (secret) => {
+        if (++arrived === 2) release();
+        await bothArrived;
+        return original(secret);
+      });
       const results = await Promise.all([activate(setup, code), activate(setup, code)]);
+      spy.mockRestore();
+      expect(arrived).toBe(2);
       expect(results.map((r) => r.statusCode).sort((x, y) => x - y)).toEqual([200, 401]);
       const devices = await asAdmin(async (c) =>
         Number((await c.query<{ n: string }>('SELECT count(*) AS n FROM device WHERE registered_by_membership_id = $1', [inv.membershipId])).rows[0].n),

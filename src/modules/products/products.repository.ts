@@ -58,6 +58,14 @@ export class ProductsRepository {
     return r ? { id: r.id, name: r.name, sku: r.sku, archivedAt: r.archived_at } : null;
   }
 
+  /** For reads: no lock. */
+  async findById(id: string): Promise<ProductRow | null> {
+    return currentTx().product.findUnique({
+      where: { id },
+      select: { id: true, name: true, sku: true, archivedAt: true },
+    });
+  }
+
   async update(id: string, fields: { name?: string; sku?: string | null; archivedAt?: Date | null }): Promise<void> {
     await currentTx().product.update({ where: { id }, data: fields, select: { id: true } });
   }

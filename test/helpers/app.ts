@@ -1,11 +1,13 @@
 import type { NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import { Writable } from 'node:stream';
+import { PasswordHasher } from '../../src/common/auth/password-hasher.js';
 import { Clock } from '../../src/common/time/clock.js';
 import { loadConfig } from '../../src/config/app.config.js';
 import { configureApp, createAdapter, withCore } from '../../src/create-app.js';
 import { SpikeModule } from '../spike/spike.module.js';
 import { FakeClock } from './clock.js';
+import { FastPasswordHasher } from './fast-password-hasher.js';
 
 export type LogLine = Record<string, unknown> & { msg?: string; requestId?: string };
 
@@ -45,6 +47,10 @@ export async function startTestApp(env: Record<string, string> = {}): Promise<Te
   const moduleRef = await Test.createTestingModule({ imports: [withCore(SpikeModule, config)] })
     .overrideProvider(Clock)
     .useValue(clock)
+    // Test-only scrypt cost (see fast-password-hasher.ts); the production
+    // cost is checked in test/password-hasher.spec.ts.
+    .overrideProvider(PasswordHasher)
+    .useValue(new FastPasswordHasher(config))
     .compile();
   const app = moduleRef.createNestApplication<NestFastifyApplication>(
     createAdapter(config, { logStream: sink }),
