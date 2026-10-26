@@ -59,4 +59,14 @@ export class BarcodesRepository {
       select: { barcode: true, productId: true, packTypeId: true },
     });
   }
+
+  /** Phase D2 snapshot: every barcode, keyset by id. */
+  async pageForSync(afterId: string | null, limit: number): Promise<(BarcodeRow & { id: string })[]> {
+    return currentTx().productBarcode.findMany({
+      where: afterId ? { id: { gt: afterId } } : {},
+      orderBy: { id: 'asc' },
+      take: limit,
+      select: { id: true, barcode: true, productId: true, packTypeId: true },
+    });
+  }
 }

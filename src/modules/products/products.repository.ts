@@ -137,4 +137,14 @@ export class ProductsRepository {
   async update(id: string, fields: { name?: string; sku?: string | null; archivedAt?: Date | null }): Promise<void> {
     await currentTx().product.update({ where: { id }, data: fields, select: { id: true } });
   }
+
+  /** Phase D2 snapshot: every product, archived too, keyset by id. */
+  async pageForSync(afterId: string | null, limit: number): Promise<ProductRow[]> {
+    return currentTx().product.findMany({
+      where: afterId ? { id: { gt: afterId } } : {},
+      orderBy: { id: 'asc' },
+      take: limit,
+      select: { id: true, name: true, sku: true, archivedAt: true },
+    });
+  }
 }

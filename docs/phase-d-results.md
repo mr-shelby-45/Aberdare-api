@@ -32,3 +32,26 @@ Filled in step by step. The full summary (see `docs/phase-d-design.md` section 1
 1. Devices have only `ACTIVE` and `REVOKED`; there is no suspended device. D2 test 7 and D3 test 9 read "a revoked or suspended device" as "a revoked device, or a suspended member" (decided in D1, answer 8).
 2. Transaction ids and change_log ids are 64-bit; they are carried as decimal text (`txid::text`, `id::text`) and compared in SQL, never as JavaScript numbers. Tests use `BigInt` only to compare them.
 3. The prune's horizon is a position, not a time: rows are removed by `changed_at`, but a transaction that started early can write a higher `txid` later, so the horizon is the newest removed position, which can refuse a cursor slightly more often than strictly needed, never less.
+
+## D2: Snapshot (passed)
+
+**Result:** new 9, Phase D cumulative 16 (`test/d1-change-log.spec.ts` and `test/d2-snapshot.spec.ts`), all passing in the gate run. The held-open-transaction case of D2 test 2 passed 5 runs in a row. The full suite passed once: 28 files, 341 of 341 (354.5 s), with lint, type-check, build and the drift check clean.
+
+**Built (Ian said "proceed to D2"; no migration was needed; defaults chosen as below, open to Ian's review):**
+- `GET /v1/sync/snapshot?table=&cursor=&limit=` on `SyncController`, in the request's own short tenant transaction (no `@OwnTransactions`), any active member on an active device (no permission marker; the pipeline loads both live).
+  - No `table` and no `cursor`: the start. `start_cursor` is taken first (`ChangeFeedService.startCursor`), then the first page of `location` is read.
+  - `table` without `cursor`: that table's first page (no `start_cursor`). `table` with `cursor`: the next page. A `cursor` without `table` is `422`.
+  - Response `{ table, rows, next_cursor, next_table, start_cursor? }`; `next_table` only when the table is finished; both null after `stock_balance`.
+  - `limit` default 500, above 500 quietly capped, 0 refused (as for the other lists).
+- Page cursor: the shared `SignedCursor` (kind `sync-snapshot`) with `{ business_id, table, after_id }`; another table, another business, tampered, or a changes cursor: `422`.
+- `SyncTables` (`src/modules/sync/sync-tables.ts`): one entry per table (name, permission, page), in the fixed order. Each entry reads through the owning module's service (`LocationsService.pageForSync`, `ProductsService.productsPageForSync` / `packTypesPageForSync` / `barcodesPageForSync`, `StockService.balancesPageForSync`), so no module reads another's tables and no read-only exception was needed. Adding a table is one entry.
+- Row shapes (flat, one row per table): location `{ id, name, is_default, archived_at }`; product `{ id, name, sku, archived_at }`; pack_type `{ id, product_id, name, units_per_pack, sell_price, cost_price?, archived_at }` (`cost_price` key absent without `costs.view`); product_barcode `{ id, barcode, product_id, pack_type_id }`; stock_balance `{ id, location_id, pack_type_id, quantity, updated_at }` (zero and negative rows included; the table is empty without `stock.view`). Archived rows carry `archived_at` (the Phase B reads use an `archived` flag; the design names `archived_at`).
+- Every page stamps the calling device with `DevicesService.stampSync()` after the data is read (at most once every 5 minutes).
+
+**Proof the tests catch mistakes** (each applied, shown failing, reverted, revert checked with `cmp`):
+- Mutation 2, `start_cursor` taken after the first rows are read: D2 test 2 (the held-open case) failed: the change committed between the read and the cursor was lost. The plain "change during the download" case did not catch it, by nature; the held-open case forces the order.
+- Mutation 8, the live device status check skipped: D2 test 7 failed (a revoked device downloaded a page). D3 test 9 will be checked against the same mutation.
+
+**Things to know:**
+1. No preset lacks `stock.view`, so "stock_balance empty without stock.view" is tested through `SnapshotService.page()` with a reader built directly.
+2. The held-open case commits T1 from inside a spy on the location table's page read, so the commit lands exactly between the read and anything after it.

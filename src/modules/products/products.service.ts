@@ -305,6 +305,21 @@ export class ProductsService {
     return new Map(rows.map((r) => [r.id, { productId: r.productId, unitsPerPack: r.unitsPerPack, archived: r.archived }]));
   }
 
+  // For the sync snapshot (Phase D2): every row, archived too, in id order.
+  // Cost prices are included; the sync module leaves them out for members
+  // without costs.view.
+  async productsPageForSync(afterId: string | null, limit: number) {
+    return this.products.pageForSync(afterId, limit);
+  }
+
+  async packTypesPageForSync(afterId: string | null, limit: number): Promise<PackTypeRow[]> {
+    return this.packTypes.pageForSync(afterId, limit);
+  }
+
+  async barcodesPageForSync(afterId: string | null, limit: number) {
+    return this.barcodes.pageForSync(afterId, limit);
+  }
+
   /** GET /products/:id. Another business's id, a missing one and a non-UUID: the same 404. */
   async findById(id: string): Promise<ProductView> {
     const [product] = UUID.test(id) ? await this.views([id]) : [];

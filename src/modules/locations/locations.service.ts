@@ -32,6 +32,11 @@ export class LocationsService {
     return location;
   }
 
+  /** For the sync snapshot (Phase D2): every location, archived too, in id order. */
+  async pageForSync(afterId: string | null, limit: number): Promise<LocationRow[]> {
+    return this.repo.pageForSync(afterId, limit);
+  }
+
   /** For the stock commands (Phase C2). Another business's id gives null, like a missing one. */
   async findById(id: string): Promise<LocationRow | null> {
     return this.repo.findById(id);

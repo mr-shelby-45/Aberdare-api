@@ -198,4 +198,17 @@ export class StockRepository {
     const row = await currentTx().stockMovement.findFirst({ where: { packTypeId }, select: { id: true } });
     return row !== null;
   }
+
+  /** Phase D2 snapshot: every balance row, zero and negative too, keyset by id. */
+  async balancesPageForSync(
+    afterId: string | null,
+    limit: number,
+  ): Promise<{ id: string; locationId: string; packTypeId: string; quantity: number; updatedAt: Date }[]> {
+    return currentTx().stockBalance.findMany({
+      where: afterId ? { id: { gt: afterId } } : {},
+      orderBy: { id: 'asc' },
+      take: limit,
+      select: { id: true, locationId: true, packTypeId: true, quantity: true, updatedAt: true },
+    });
+  }
 }

@@ -1,8 +1,10 @@
-import { Body, Controller, HttpCode, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Post, Query, Req } from '@nestjs/common';
 import { OwnTransactions } from '../../common/auth/own-transactions.decorator.js';
 import type { AuthedRequest } from '../../common/auth/request-auth.js';
 import type { CommandResult } from './command-outcome.js';
+import { SnapshotQueryDto } from './dto/snapshot-query.dto.js';
 import { SyncBatchDto } from './dto/sync-batch.dto.js';
+import { SnapshotService } from './snapshot.service.js';
 import { SyncService } from './sync.service.js';
 
 // Phone commands (docs/phase-b-design.md section 5). Each command runs in its
@@ -10,7 +12,10 @@ import { SyncService } from './sync.service.js';
 // Permissions are checked per command by SyncService.
 @Controller('v1/sync')
 export class SyncController {
-  constructor(private readonly sync: SyncService) {}
+  constructor(
+    private readonly sync: SyncService,
+    private readonly snapshots: SnapshotService,
+  ) {}
 
   @Post('commands')
   @HttpCode(200)
@@ -31,6 +36,26 @@ export class SyncController {
       }
     }
     return { results: results.map(toJson) };
+  }
+
+  // The offline download (docs/phase-d-design.md section 5). Any active member
+  // on an active device (the pipeline loads both live); runs in the request's
+  // own short tenant transaction like any read. The request log has the route
+  // pattern only, never the cursor.
+  @Get('snapshot')
+  async snapshot(@Req() request: AuthedRequest, @Query() query: SnapshotQueryDto) {
+    const p = await this.snapshots.page(query, {
+      businessId: request.auth!.businessId,
+      deviceId: request.auth!.deviceId,
+      permissions: request.session!.permissions,
+    });
+    return {
+      table: p.table,
+      rows: p.rows,
+      next_cursor: p.nextCursor,
+      next_table: p.nextTable,
+      ...(p.startCursor !== undefined ? { start_cursor: p.startCursor } : {}),
+    };
   }
 }
 

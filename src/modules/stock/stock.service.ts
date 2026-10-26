@@ -169,6 +169,11 @@ export class StockService {
     return { quantity, delta };
   }
 
+  /** For the sync snapshot (Phase D2): every balance row, zero and negative too, in id order. */
+  async balancesPageForSync(afterId: string | null, limit: number) {
+    return this.repo.balancesPageForSync(afterId, limit);
+  }
+
   /** For sale.create from sync: always records the sale, flags an oversell. */
   async decreaseForSale(
     locationId: string,

@@ -58,4 +58,14 @@ export class LocationsRepository {
   async restore(id: string): Promise<void> {
     await currentTx().location.update({ where: { id }, data: { archivedAt: null }, select: { id: true } });
   }
+
+  /** Phase D2 snapshot: every location, archived too, keyset by id. */
+  async pageForSync(afterId: string | null, limit: number): Promise<LocationRow[]> {
+    return currentTx().location.findMany({
+      where: afterId ? { id: { gt: afterId } } : {},
+      orderBy: { id: 'asc' },
+      take: limit,
+      select: SELECT,
+    });
+  }
 }

@@ -115,4 +115,27 @@ export class PackTypesRepository {
   async update(id: string, fields: Partial<PackTypeWrite>): Promise<void> {
     await currentTx().packType.update({ where: { id }, data: fields, select: { id: true } });
   }
+
+  /** Phase D2 snapshot: every pack type, archived too, keyset by id. Prices as canonical text. */
+  async pageForSync(afterId: string | null, limit: number): Promise<PackTypeRow[]> {
+    const rows = await currentTx().$queryRaw<
+      { id: string; product_id: string; name: string; units_per_pack: number; sell_price: string; cost_price: string | null; archived_at: Date | null }[]
+    >`
+      SELECT id, product_id, name, units_per_pack, sell_price::text AS sell_price,
+             cost_price::text AS cost_price, archived_at
+        FROM pack_type
+       WHERE business_id = ${currentBusinessId()}::uuid
+         AND (${afterId}::uuid IS NULL OR id > ${afterId}::uuid)
+       ORDER BY id
+       LIMIT ${limit}::int`;
+    return rows.map((r) => ({
+      id: r.id,
+      productId: r.product_id,
+      name: r.name,
+      unitsPerPack: r.units_per_pack,
+      sellPrice: r.sell_price,
+      costPrice: r.cost_price,
+      archivedAt: r.archived_at,
+    }));
+  }
 }
