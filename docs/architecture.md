@@ -166,7 +166,15 @@ As designed for Phase C (`docs/phase-c-design.md` section 5): the four stock com
 
 **Reads**:
 - `GET /v1/sync/snapshot`: full data for the business (products, barcodes, pack types, stock, recent sales), paged. Used on first login and after reinstall.
-- `GET /v1/sync/changes?cursor=`: changes since a cursor, taken from a `change_log` table. The server re-reads a small overlap window before the cursor and the phone dedupes by id, so nothing is missed when transactions commit out of order.
+- `GET /v1/sync/changes?cursor=`: changes since a cursor, taken from a `change_log` table.
+
+As designed for Phase D (`docs/phase-d-design.md` sections 2 to 7; this replaces the earlier "overlap window" idea):
+- **Finished transactions only.** Every `change_log` row stores its transaction id (`txid xid8`, default `pg_current_xact_id()`). `changes` returns only rows with `txid < pg_snapshot_xmin(pg_current_snapshot())`, ordered by `(txid, id)`. Every transaction below that bound has finished, and any transaction that writes later gets a higher id, so no row can ever appear behind a position already handed out: no gaps, no overlap window, no dedupe by time. Rows of a transaction that is still open (or that started before another open one) wait until it is safe. Never order by `id` alone or by `created_at`.
+- **Cursor.** Signed with the shared `SignedCursor`: the business id, the last position returned `(txid, id)` and `costs` (whether the member could see cost fields when it was issued). Tampered, malformed, unsigned, or issued to another business is `422 VALIDATION_FAILED` (all the same answer). Older than the retained history, or `costs` different from the member's current `costs.view`, is `410 SNAPSHOT_REQUIRED`. The cursor is not tied to a device.
+- **Devices.** Both sync reads need an active member on an active device (the request pipeline loads both live, as on every route). They stamp the calling device's `last_sync_at` (the A1 column, unused until D) at most once every 5 minutes, in one conditional `UPDATE` inside the request's transaction; it writes no `change_log` or audit row and is not shown by any endpoint in Phase D. It is the only per-device server state. Since D1 `app_user` may update only the device columns the application writes (`name`, `is_shared`, `status`, `last_seen_at`, `last_sync_at`).
+- **Snapshot.** `GET /v1/sync/snapshot?table=&cursor=&limit=` (500 per page): the first page returns `start_cursor`, taken before any row is read; tables in a fixed order (`location`, `product`, `pack_type`, `product_barcode`, `stock_balance`), keyset by `id`, each page its own short request. After the download the phone calls `changes` from `start_cursor`, so anything that moved during the download is delivered.
+- **Changes.** `{ changes, next_cursor, has_more }` (default 200, max 500): each change is the record's current state read at request time, or a delete marker; never a stored copy. Several log rows for one record in a page collapse into one. Cost fields follow the member's current permissions; tables the member cannot see are skipped while the cursor moves past them.
+- **Retention.** `change_log_prune()` removes rows older than 30 days (a config constant) and records the newest removed position; cursors older than it get `410`. Nothing schedules it until Phase F.
 
 **Conflicts**: the shop already sold the goods, so the server never refuses a real sale because stock ran out on paper. It accepts the sale, lets the balance go negative if necessary, marks the command `flagged`, and shows it to the owner. Rejection is only for invalid or unauthorised commands.
 
@@ -354,7 +362,7 @@ Table list (exact columns are designed during the build and reviewed by Ian befo
 | mpesa_transaction | raw M-Pesa notifications, unique on trans_id |
 | order_inbox, order_inbox_item | orders from a website |
 | sync_command | every received command: UUID unique, result, status, `occurred_at` (phone) and `received_at` (server) |
-| change_log | what changed, for `sync/changes` |
+| change_log | what changed, for `sync/changes`; each row carries its transaction id (`txid`, Phase D) |
 | subscription | plan, state, trial end, grace end, payments |
 | notification | see section 10 |
 | audit_log | see section 11. Built in Phase A: actor membership, action, target type and id, metadata (never secrets), ip, occurred_at. Append-only |
@@ -367,7 +375,7 @@ Hand-written SQL migrations are required for: RLS policies, the change-log trigg
 As built in the spike (columns approved by Ian per step):
 - Tables that exist: `business` (no RLS yet), `product` (with `sku`), `location`, `pack_type`, `stock_balance`, `stock_movement`, `stock_conversion`, `sync_command`, `change_log`. Columns were kept to what each spike step needed; the rest of each table (prices, categories, `reason` on movements, `approved_by` on conversions and so on) is added with the feature that uses it.
 - Exceptions to the standard columns: append-only tables (`stock_movement`, `stock_conversion`, `sync_command`, `change_log`) have no `updated_at`. `change_log.id` is a `BIGSERIAL`, not a UUID, because it is the sync cursor and must grow.
-- `change_log` (`id`, `business_id`, `table_name`, `row_id`, `operation`, `changed_at`) is written only by triggers (`product_change_log` so far, `SECURITY INVOKER`).
+- `change_log` (`id`, `business_id`, `table_name`, `row_id`, `operation`, `changed_at`; `row_key` since B1; `txid xid8 NOT NULL DEFAULT pg_current_xact_id()` since D1, indexed with `(business_id, txid, id)`) is written only by triggers (`SECURITY INVOKER`). Phase D1 adds `change_log_horizon` (one row: the newest position removed by `change_log_prune()`), readable by `app_user`, written only by that function.
 - Special indexes: GIN trigram `product_name_trgm_idx` (declared in `schema.prisma` too, so Prisma does not drop it) and the partial unique `pack_type_one_base_unit_per_product` (one pack type with `units_per_pack = 1` per product).
 - Every reference between tenant tables is a composite foreign key (section 3).
 
@@ -397,7 +405,7 @@ All under `/v1`, JSON, access token required unless stated.
 - **devices** (`devices.manage`): `GET /devices`, `PATCH /devices/:id` (name, shared flag), `DELETE /devices/:id` (revoke), `POST /devices/:id/members`, `DELETE /devices/:id/members/:membershipId`
 - **stock** (Phase C, `stock.view`, any active member; writes are sync commands only): `GET /stock?location_id=&product_id=&include_zero=&include_archived=&limit=&cursor=` (balances; zero rows hidden by default, negative rows shown), `GET /stock/movements?location_id=&pack_type_id=&product_id=&type=&from=&to=&limit=&cursor=` (newest first; the `unit_cost` key absent without `costs.view`), `GET /stock/approvers` (active members with `stock.convert`, names only), `POST /stock/approvals` (`{ approver_membership_id, approver_pin, purpose }`, 201 `{ approval_id, valid_until }`; every refusal is the same `403 APPROVAL_DENIED`; 10 per minute per IP)
 - **reads**: `/sales`, `/payments/pending`, `/orders`, `/reports/*`, `/audit-log`, `/notifications`, `/subscription`
-- **sync**: `POST /sync/commands` (Phase B), `GET /sync/snapshot`, `GET /sync/changes?cursor=` (Phase D)
+- **sync**: `POST /sync/commands` (Phase B), `GET /sync/snapshot?table=&cursor=&limit=` (Phase D, any active member; `start_cursor` on the first page; cost fields only with `costs.view`, balances only with `stock.view`), `GET /sync/changes?cursor=&limit=` (Phase D; `410 SNAPSHOT_REQUIRED` for a cursor older than the retained history or issued under another cost visibility)
 - **manager actions**: `POST /sales/:id/void`, `POST /payments/:id/approve`
 - **orders**: `PATCH /orders/:id`; `POST /orders-inbox/key` (create or regenerate the shop key)
 - **subscription**: `POST /subscription/pay`
@@ -491,3 +499,13 @@ Added with the Phase C design (`docs/phase-c-design.md` section 17):
 39. The 50-line limit and the 15-minute approval window are defaults; measure and revisit.
 40. An approval can be hoarded for 15 minutes of phone time; a phone with a wrong clock can stretch that, up to the server cap of 24 hours.
 41. The approval mechanism is generic; Phase E decides whether voiding a sale reuses it.
+
+Found in the Phase D design (`docs/phase-d-design.md` section 15):
+
+42. Pushing "something changed" to phones (a later phase; phones poll for now).
+43. Scheduling the `change_log` prune and watching its size (Phase F).
+44. Idle-in-transaction connections delay what `changes` can return (the finished-transactions bound waits for them). Add a database idle-in-transaction timeout in Phase H and measure.
+45. Stock movement history is online-only. Decide in the mobile phase whether phones need a local copy.
+46. Sales, orders and subscription state join the snapshot in later phases (one entry in the table list each).
+47. Showing `last_sync_at` to the owner (devices list endpoint) and warning about stale phones: Phase F or G.
+48. Snapshot size for a very large catalogue (tens of thousands of products) on a slow connection: measure with the Flutter app, then consider compression.

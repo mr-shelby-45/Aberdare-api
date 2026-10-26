@@ -14,7 +14,9 @@ Terms used in this file:
 - **Cursor**: a signed bookmark the server gives the phone, meaning "you have everything up to here". The phone stores it and sends it back on the next call.
 - **Snapshot**: the full copy of the business's data, delivered in pages. The phone stores it in its local database. The server never stores anything per phone.
 
-In scope: `GET /v1/sync/snapshot`, `GET /v1/sync/changes`, a `change_log` migration for the transaction id, the 410 rule, a prune function (not scheduled), tests, walkthrough, results.
+In scope: `GET /v1/sync/snapshot`, `GET /v1/sync/changes`, a `change_log` migration for the transaction id, the 410 rule, a prune function (not scheduled), a `last_synced_at` stamp on the device, tests, walkthrough, results.
+
+Devices: every access token carries a `device_id` and the request pipeline loads the device live, so a revoked or suspended device is already refused on every route. Phase D must prove this for the sync routes (tests below) and must not add per-device server state beyond `last_synced_at`. The cursor itself is not tied to a device: it is a position in the business's change log and lives on the phone. (A reinstall is a new device and takes a fresh snapshot anyway.)
 
 Tables covered: `location`, `product`, `pack_type`, `product_barcode`, `stock_balance`. Sales and payments are added in Phase E, orders and subscription state later. Design the table list so adding a table later means adding one entry, not new machinery.
 
@@ -29,7 +31,8 @@ Out of scope (do not build): scheduling the prune (Phase F), push or WebSocket n
 | Change contents | `changes` returns each row's current state read at request time, or a delete marker. Row copies are never stored in `change_log`. |
 | Too old or different view | A cursor older than the retained history, or issued under a different cost visibility, gets `410 SNAPSHOT_REQUIRED`. |
 | Page sizes | Snapshot 500 rows per page. Changes default 200, max 500, with `has_more`. |
-| Who | Any active member with a valid token; content depends on their permissions. |
+| Who | Any active member on an active device with a valid token; content depends on their permissions. |
+| Device freshness | `snapshot` and `changes` stamp `last_synced_at` on the calling device, at most once every 5 minutes. Used later to show the owner which phones are stale. |
 
 ## 3. Data model
 
@@ -39,10 +42,11 @@ Same rules as before. Claude Code proposes the exact SQL and waits for approval 
 - An index supporting `(business_id, txid, id)` ordering.
 - `app_user` keeps only the grants it has; the prune function is the only thing that deletes `change_log` rows, and it is a `SECURITY DEFINER`-style function or a migrator-only operation (choose the smaller privilege change and show Ian). Add it to the exact inventories in `test/step4-migrations.spec.ts` and `test/b5-hardening.spec.ts`.
 - Retention: 30 days. A constant in config, not hard-coded in SQL.
+- The device table (check its real name and columns first) gains `last_synced_at timestamptz null`. `app_user` gets UPDATE on that column only (add to the grants inventory). The stamp is one atomic statement using the Clock, of the form `UPDATE device SET last_synced_at = $now WHERE id = $device AND (last_synced_at IS NULL OR last_synced_at < $now - interval '5 minutes')`. It runs inside the request's tenant transaction, after the data is read. Zero rows updated is normal and not an error. It writes no `change_log` row and no audit row (check that the device table's existing triggers do not log it; if one would, exclude this column and tell Ian). Do not expose it in any endpoint in Phase D.
 
 ## 4. The cursor
 
-- Signed with the existing `SignedCursor` helper (generalise, do not copy). Contents: the last position returned `(txid, id)`, and `costs` (true or false: whether the member could see cost fields when it was issued). Opaque to the phone.
+- Signed with the existing `SignedCursor` helper (generalise, do not copy). Contents: the business id (so a cursor from one business is refused by another with `422 VALIDATION_FAILED`, the same answer as a tampered one), the last position returned `(txid, id)`, and `costs` (true or false: whether the member could see cost fields when it was issued). Opaque to the phone.
 - A tampered, malformed or unsigned cursor: `422 VALIDATION_FAILED`, as for other cursors.
 - Position order is `(txid, id)`. Use `txid` as the primary order; `id` breaks ties inside one transaction. Never order by `created_at` (rows in one transaction share it).
 - **Finished transactions only.** A query returns only rows with `txid < pg_snapshot_xmin(pg_current_snapshot())`, so a row from a transaction that is still open, or that started before another open one, is never returned until it is safe. Show Ian the exact query. Write and keep a comment explaining why this removes the gap problem.
@@ -94,7 +98,9 @@ Same rules as before. Claude Code proposes the exact SQL and waits for approval 
 - Letting a snapshot run as one long transaction or hold locks.
 - Taking `start_cursor` after reading the first rows instead of before.
 - Putting `business_id` in a query parameter or response key the phone must send back. The tenant comes from the token only.
-- Per-phone server state (last synced tables, device cursors). The cursor lives on the phone.
+- Per-phone server state (last synced tables, device cursors). The cursor lives on the phone. The only per-device value is `last_synced_at`.
+- Writing `last_synced_at` on every poll (write storm), or logging that update as a change or audit event.
+- Skipping the device check because "sync is just a read", or tying the cursor to a device id.
 - Scheduling the prune, or deleting `change_log` from application code outside the prune function.
 - Building push, WebSocket, sales or staff sync.
 - Writing a cursor format that does not bind `costs`, so a promoted manager keeps stale data.
@@ -117,7 +123,8 @@ Real Docker database, injectable `Clock`, genuinely concurrent concurrency tests
 2. The `txid` is set on every `change_log` row, for insert, update and delete, on every covered table, including through the stock strict update and the sale-mode upsert.
 3. **Gap test.** Open transaction T1 and make a change (not committed). Commit T2 (later, higher id). The finished-transactions query returns neither. Commit T1: now both are returned, in `(txid, id)` order, and a phone using the cursor from before sees both exactly once. Repeat 5 times.
 4. A rolled-back transaction leaves no `change_log` row.
-5. Cursor: tampered, unsigned, malformed are `422`; one issued with `costs: true` fails the check when the member lacks `costs.view`, and the other way round.
+5. Cursor: tampered, unsigned, malformed are `422`; a cursor issued to business A used by business B is `422`, identical to a tampered one; one issued with `costs: true` fails the check when the member lacks `costs.view`, and the other way round.
+5a. Device stamp: the first sync call sets `last_synced_at`; a second call within 5 minutes (move the Clock) does not change it; after 5 minutes it does; 20 concurrent calls leave one valid value and no error; it writes no `change_log` or audit row; `app_user` can update no other device column.
 6. Prune: rows older than 30 days (by the Clock) go, newer stay; after pruning, a cursor older than the oldest retained position is rejected; one at or after it is accepted; pruning leaves other businesses' newer rows untouched.
 
 **D2**
@@ -127,7 +134,8 @@ Real Docker database, injectable `Clock`, genuinely concurrent concurrency tests
 4. Archived rows included with `archived_at`.
 5. Another business's rows are never visible; identical names never mix; `business_id` as a query parameter is `422`, as a header ignored.
 6. A tampered page cursor is `422`; a cursor for table A used with `table=B` is `422`.
-7. A suspended member and a request without a token are refused.
+7. A suspended member, a revoked or suspended device, and a request without a token are refused. A device revoked between two snapshot pages: the second page is refused.
+8. The first page of a snapshot stamps `last_synced_at` on the calling device and not on another device of the same business.
 
 **D3**
 1. After the snapshot, each kind of change (new product, edit, archive, barcode add and remove, location change, stock receive, adjust, count, convert, sale-mode decrease) appears once in `changes`, as upsert or delete, with current state.
@@ -137,6 +145,7 @@ Real Docker database, injectable `Clock`, genuinely concurrent concurrency tests
 5. A cursor older than the retained history is `410 SNAPSHOT_REQUIRED`.
 6. A change to a record that was deleted before the request is returned as a delete.
 7. Tenant isolation: another business's changes never appear and never move a cursor.
+9. A revoked or suspended device is refused on `changes`, with its valid cursor; a different, active device of the same member can use the same cursor value (the cursor is not tied to a device).
 8. **Out-of-order commit.** With a held-open transaction as in D1 test 3, a phone polling `changes` while transactions commit out of order ends with every change, none skipped (5 runs).
 
 **D4**
@@ -153,6 +162,9 @@ Real Docker database, injectable `Clock`, genuinely concurrent concurrency tests
 5. Prune deletes rows inside the retention window: D1 test 6.
 6. Return a row copy stored at log time instead of the current state: D3 tests 1 and 6.
 7. Remove the business filter protection (run a read outside the tenant transaction): the tenant isolation tests.
+8. Skip the device check on the sync routes (for example by marking them public or skipping the live device load): D2 test 7 and D3 test 9.
+9. Stamp `last_synced_at` on every call without the 5 minute condition: D1 test 5a.
+10. Leave the business id out of the signed cursor: D1 test 5.
 
 ## 12. Manual walkthrough (for Ian)
 
@@ -178,4 +190,5 @@ When D4 is finished Claude Code writes `docs/phase-d-results.md` in the style of
 3. Idle-in-transaction connections delay what `changes` can return. Add a database idle-in-transaction timeout in Phase H and measure.
 4. Stock movement history is online-only. Decide in the mobile phase whether phones need a local copy.
 5. Sales, orders and subscription state join the snapshot in later phases (one entry in the table list each).
-6. Snapshot size for a very large catalogue (tens of thousands of products) on a slow connection: measure with the Flutter app, then consider compression.
+6. Showing `last_synced_at` to the owner (devices list endpoint) and warning about stale phones: Phase F or G.
+7. Snapshot size for a very large catalogue (tens of thousands of products) on a slow connection: measure with the Flutter app, then consider compression.
