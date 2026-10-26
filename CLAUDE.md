@@ -37,7 +37,7 @@ Rules for every phase:
 - Every phase ends with passing tests shown in the session and a commit.
 - Open risks listed in `docs/spike-results.md` are handled in the phase where they first matter. Do not ignore them, and do not fix them early without asking.
 
-Status: I Ian mark Phase A approved. start on phase B
+Status: I Ian mark Phase B approved. start on phase C
 
 ## 3. Fixed technology decisions
 
