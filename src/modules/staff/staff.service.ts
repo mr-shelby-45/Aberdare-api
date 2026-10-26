@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import {
+  type ApproverState,
   type MembershipForSession,
   type MembershipSummary,
   type PinState,
@@ -66,6 +67,44 @@ export class StaffService {
     if (state.pinFailedCount >= PIN_HARD_LOCK_AFTER) return { kind: 'for-good' };
     if (state.pinLockedUntil && state.pinLockedUntil > now) return { kind: 'until', until: state.pinLockedUntil };
     return { kind: 'none' };
+  }
+
+  /** Phase C5: active members, names and roles only. */
+  async listActive() {
+    return this.repo.listActive();
+  }
+
+  /** Phase C5: a member's approving state (PIN hash, role, status, approval lock). */
+  async findApproverState(membershipId: string): Promise<ApproverState | null> {
+    return this.repo.findApproverState(membershipId);
+  }
+
+  /**
+   * Counts one checked approval PIN (decided in C5). The row is locked first,
+   * so concurrent attempts are counted exactly. A wrong PIN always counts;
+   * every lockEvery-th one starts a lock, unless one is already running.
+   * A right PIN resets the count, unless a lock is running (then it is
+   * refused like the rest). Never touches the PIN login counters.
+   * granted: the approval may be issued. lockedNow: this attempt started a lock.
+   */
+  async recordApprovalAttempt(
+    membershipId: string,
+    succeeded: boolean,
+    rules: { now: Date; lockEvery: number; lockMinutes: number },
+  ): Promise<{ granted: boolean; lockedNow: boolean; failedCount: number }> {
+    const current = await this.repo.lockApprovalCounters(membershipId);
+    if (!current) return { granted: false, lockedNow: false, failedCount: 0 };
+    const locked = current.lockedUntil !== null && current.lockedUntil > rules.now;
+    if (succeeded) {
+      if (locked) return { granted: false, lockedNow: false, failedCount: current.failedCount };
+      if (current.failedCount !== 0) await this.repo.setApprovalCounters(membershipId, 0, current.lockedUntil);
+      return { granted: true, lockedNow: false, failedCount: 0 };
+    }
+    const failedCount = current.failedCount + 1;
+    const lockedNow = !locked && failedCount % rules.lockEvery === 0;
+    const lockedUntil = lockedNow ? new Date(rules.now.getTime() + rules.lockMinutes * 60_000) : current.lockedUntil;
+    await this.repo.setApprovalCounters(membershipId, failedCount, lockedUntil);
+    return { granted: false, lockedNow, failedCount };
   }
 
   async clearPinLock(membershipId: string): Promise<void> {

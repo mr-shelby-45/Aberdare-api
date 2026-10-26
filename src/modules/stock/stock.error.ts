@@ -12,7 +12,9 @@ export type StockErrorCode =
   | 'INVALID_LINES'
   // stock.convert (C4; replaced the spike's STOCK_CONVERSION_INVALID).
   | 'PACK_TYPES_NOT_CONVERTIBLE'
-  | 'CONVERSION_RATIO_INVALID';
+  | 'CONVERSION_RATIO_INVALID'
+  // C5: the same for a missing, used, expired, foreign or rebound approval.
+  | 'APPROVAL_INVALID';
 
 export type StockLineReason =
   | 'DUPLICATE_LINE'

@@ -122,7 +122,7 @@ export class SyncService {
       }
     }
     try {
-      return await withSavepoint(() => handler.handle(payload, { actor, occurredAt, syncCommandId }));
+      return await withSavepoint(() => handler.handle(payload, { actor, occurredAt, syncCommandId, receivedAt }));
     } catch (err) {
       // The savepoint has already undone whatever the handler wrote.
       if (err instanceof CommandRejectedError) {

@@ -281,7 +281,7 @@ describe('B1: schema, triggers and locations', { timeout: 120_000 }, () => {
     const sync = t.app.get(SyncService, { strict: false });
     const serverNow = t.clock.now().toISOString();
     const commandId = randomUUID();
-    const [result] = await sync.processCommands({ businessId: shop.biz, membershipId: shop.membershipId, permissions: new Set(['stock.receive']) }, [
+    const [result] = await sync.processCommands({ businessId: shop.biz, membershipId: shop.membershipId, deviceId: randomUUID(), permissions: new Set(['stock.receive']) }, [
       {
         command_id: commandId,
         occurred_at: '2026-10-22T07:30:00.000Z',
@@ -300,7 +300,7 @@ describe('B1: schema, triggers and locations', { timeout: 120_000 }, () => {
     expect(row.receivedAt.toISOString()).toBe(serverNow);
 
     // A command without occurred_at is rejected and stores nothing.
-    const [bad] = await sync.processCommands({ businessId: shop.biz, membershipId: shop.membershipId, permissions: new Set(['stock.receive']) }, [
+    const [bad] = await sync.processCommands({ businessId: shop.biz, membershipId: shop.membershipId, deviceId: randomUUID(), permissions: new Set(['stock.receive']) }, [
       { command_id: randomUUID(), type: 'stock.receive', payload: { location_id: shop.loc, lines: [{ pack_type_id: shop.piece, quantity: 3 }] } },
     ]);
     expect(bad).toMatchObject({ status: 'REJECTED', code: 'VALIDATION_FAILED' });

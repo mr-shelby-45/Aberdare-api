@@ -29,8 +29,49 @@ export interface PinState {
   pinLockedUntil: Date | null;
 }
 
+/** What approving needs to know about a member (Phase C5). Never sent anywhere. */
+export interface ApproverState {
+  id: string;
+  rolePreset: string;
+  status: string;
+  extraPermissions: string[] | null;
+  pinHash: string | null;
+  approvalLockedUntil: Date | null;
+}
+
 @Injectable()
 export class StaffRepository {
+  async findApproverState(membershipId: string): Promise<ApproverState | null> {
+    return currentTx().membership.findUnique({
+      where: { id: membershipId },
+      select: { id: true, rolePreset: true, status: true, extraPermissions: true, pinHash: true, approvalLockedUntil: true },
+    });
+  }
+
+  /**
+   * The approval counters, with the row locked until the end of the
+   * transaction, so concurrent attempts are counted one after another
+   * (each waits here and then reads the committed count). Separate from the
+   * PIN login counters on purpose (docs/phase-c-design.md section 6).
+   */
+  async lockApprovalCounters(membershipId: string): Promise<{ failedCount: number; lockedUntil: Date | null } | null> {
+    const rows = await currentTx().$queryRaw<{ approval_failed_count: number; approval_locked_until: Date | null }[]>`
+      SELECT approval_failed_count, approval_locked_until
+        FROM membership
+       WHERE id = ${membershipId}::uuid AND business_id = ${currentBusinessId()}::uuid
+         FOR UPDATE`;
+    const r = rows[0];
+    return r ? { failedCount: r.approval_failed_count, lockedUntil: r.approval_locked_until } : null;
+  }
+
+  /** Only after lockApprovalCounters() in the same transaction. */
+  async setApprovalCounters(membershipId: string, failedCount: number, lockedUntil: Date | null): Promise<void> {
+    await currentTx().$executeRaw`
+      UPDATE membership
+         SET approval_failed_count = ${failedCount}::int, approval_locked_until = ${lockedUntil}::timestamptz
+       WHERE id = ${membershipId}::uuid AND business_id = ${currentBusinessId()}::uuid`;
+  }
+
   async createOwner(personId: string, displayName: string, pinHash: string, now: Date): Promise<MembershipSummary> {
     return currentTx().membership.create({
       data: {
@@ -85,6 +126,15 @@ export class StaffRepository {
          AND m.business_id = ${currentBusinessId()}::uuid
       RETURNING m.pin_failed_count, m.pin_locked_until`;
     return { pinFailedCount: rows[0].pin_failed_count, pinLockedUntil: rows[0].pin_locked_until };
+  }
+
+  /** Active members, names and roles only (Phase C5: who could approve). */
+  async listActive(): Promise<{ id: string; displayName: string; rolePreset: string; extraPermissions: string[] | null }[]> {
+    return currentTx().membership.findMany({
+      where: { status: 'ACTIVE' },
+      orderBy: [{ displayName: 'asc' }, { id: 'asc' }],
+      select: { id: true, displayName: true, rolePreset: true, extraPermissions: true },
+    });
   }
 
   /** Every membership of the current business, with the phone (never any hash). */

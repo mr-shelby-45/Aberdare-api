@@ -226,10 +226,10 @@ describe('C4: stock convert', { timeout: 180_000 }, () => {
     const w = await api.world();
     await api.sendOne(w.manager.token, receive(w.loc, [{ pack_type_id: w.maize.carton, quantity: 5 }]));
     expect(await api.sendOne(w.attendant.token, convert(w.loc, w.maize.carton, w.maize.piece, 1))).toMatchObject({ status: 'REJECTED', reason: 'PERMISSION_DENIED' });
-    // Approvals arrive in C5; until then an approval_id changes nothing.
+    // A made-up approval_id: refused (PERMISSION_DENIED in C4; since C5 it is checked as an approval).
     expect(await api.sendOne(w.attendant.token, convert(w.loc, w.maize.carton, w.maize.piece, 1, { approval_id: randomUUID() }))).toMatchObject({
       status: 'REJECTED',
-      reason: 'PERMISSION_DENIED',
+      reason: 'APPROVAL_INVALID',
     });
     // stock.convert written straight into the attendant's extras (test setup, as the superuser;
     // the API refuses it): the live permission check still ignores it.

@@ -1,0 +1,17 @@
+import { IsIn, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
+
+// POST /v1/stock/approvals (docs/phase-c-design.md section 6). The PIN is
+// only checked against the approver's hash; it is never stored or logged
+// (the request log never has bodies, and "pin" keys are redacted).
+export class CreateApprovalDto {
+  @IsUUID()
+  approver_membership_id!: string;
+
+  @IsString()
+  @MinLength(1)
+  @MaxLength(64)
+  approver_pin!: string;
+
+  @IsIn(['STOCK_CONVERT'])
+  purpose!: 'STOCK_CONVERT';
+}

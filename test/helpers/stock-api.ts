@@ -19,7 +19,15 @@ export interface Member {
   businessId: string;
   membershipId: string;
   token: string;
+  // Staff only (C5: PIN login checks).
+  deviceId?: string;
+  deviceSecret?: string;
 }
+
+/** The PIN every staff member gets at activation. */
+export const STAFF_PIN = '6071';
+/** The owner's PIN at signup. */
+export const OWNER_PIN = '9384';
 export interface Result {
   command_id: string | null;
   status: string;
@@ -54,7 +62,7 @@ export interface MovementRow {
   note: string | null;
 }
 
-const PIN = '9384';
+const PIN = OWNER_PIN;
 const PASSWORD = 'baobab-sunrise-73';
 
 /** phoneBase keeps each test file's phone numbers apart (8 digits after +2547). */
@@ -111,11 +119,12 @@ export function stockApi(t: TestApp, ip: string, phoneBase: number) {
     const res = await post('/v1/auth/staff/activate', {
       setup_token: json<{ setup_token: string }>(first).setup_token,
       code: lastCode(sms().outbox, phone),
-      new_pin: '6071',
+      new_pin: STAFF_PIN,
       device: { name: 'Staff phone', platform: 'android' },
     });
     expect(res.statusCode, JSON.stringify(res.json())).toBe(200);
-    return { businessId: owner.businessId, membershipId, token: json<{ access_token: string }>(res).access_token };
+    const s = json<{ access_token: string; device_id: string; device_secret: string }>(res);
+    return { businessId: owner.businessId, membershipId, token: s.access_token, deviceId: s.device_id, deviceSecret: s.device_secret };
   }
 
   const command = (type: string, payload: object, occurredAt = t.clock.now().toISOString()) => ({
@@ -248,5 +257,6 @@ export function stockApi(t: TestApp, ip: string, phoneBase: number) {
     integrity,
     sell,
     resetOutboxes,
+    activeStaff,
   };
 }

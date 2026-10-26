@@ -28,5 +28,7 @@ export interface CommandResult extends Omit<CommandOutcome, 'status'> {
 export interface SyncActor {
   businessId: string;
   membershipId: string;
+  // The device of the access token (Phase C5: an approval is bound to it).
+  deviceId: string;
   permissions: ReadonlySet<string>;
 }

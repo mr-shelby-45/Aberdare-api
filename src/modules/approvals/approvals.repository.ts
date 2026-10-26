@@ -5,9 +5,24 @@ export type ApprovalPurpose = 'STOCK_CONVERT';
 
 // approval SQL (docs/phase-c-design.md sections 3 and 6), on the current
 // tenant transaction. app_user may update only consumed_at and
-// consumed_by_sync_command_id, and never delete. Minting comes in Phase C5.
+// consumed_by_sync_command_id, and never delete. Minting since Phase C5.
 @Injectable()
 export class ApprovalsRepository {
+  /** A new, unused approval. Times come from the caller (the Clock). */
+  async insert(approval: {
+    purpose: ApprovalPurpose;
+    requesterMembershipId: string;
+    approverMembershipId: string;
+    deviceId: string;
+    createdAt: Date;
+    validUntil: Date;
+  }): Promise<{ id: string; validUntil: Date }> {
+    return currentTx().approval.create({
+      data: { businessId: currentBusinessId(), ...approval },
+      select: { id: true, validUntil: true },
+    });
+  }
+
   /**
    * Uses an approval once, in one atomic statement: of any number of
    * concurrent attempts exactly one gets the row (a concurrent one waits for

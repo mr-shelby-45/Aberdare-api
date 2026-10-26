@@ -104,3 +104,32 @@ Filled in step by step. The full summary (see `docs/phase-c-design.md` section 1
 
 **Things to know:**
 1. The first C4 run failed one test on its own setup (a superuser `INSERT` of a balance row the first conversion had already created); the setup now raises the existing row with a matching movement.
+
+## C5: Approvals (passed)
+
+**Result:** new 10, Phase C cumulative 47 (C1 to C4 and `test/c5-approvals.spec.ts`), all passing in the gate run. The two race tests (20 concurrent wrong PINs held together at the PIN check; 20 concurrent commands using one approval) passed 5 runs in a row. The changed earlier files (B2's marker test, spike step 3, B1, C4) passed once on their own. The full suite passed once: 24 files, 317 of 317 (561.7 s; the machine was slower than usual, nothing failed), with lint, type-check, build and the drift check clean.
+
+**Built (approved by Ian on 2026-10-26, with the five recommended answers):** no migration (C1 had the table, grants and counters).
+- `GET /v1/stock/approvers`: active members other than the caller with an effective `stock.convert`, names and roles only.
+- `POST /v1/stock/approvals` in `ApprovalsModule`: 201 `{ approval_id, valid_until }` (15 minutes, Clock); `422 APPROVAL_NOT_NEEDED` for a caller who can convert; every refusal the same `403 APPROVAL_DENIED` after exactly one scrypt run (checked by counting scrypt runs per request).
+- Answer 1: the route has `@OwnTransactions()` (the second route with it; the B2 marker test lists both), so the PIN is checked outside any transaction, as in PIN login.
+- Answer 2: counters as decided; the counter row is read `FOR UPDATE` first, so concurrent attempts are counted exactly (20 wrong guesses: count 20, one lock, one `approval.locked` row).
+- Answer 3: only real approvers are counted; naming anyone else locks nobody.
+- Answer 4: `SyncActor.deviceId` (from the token) and `CommandContext.receivedAt` (Clock).
+- Answer 5: the approver's own login PIN.
+- `stock.convert` approval path: a member without `stock.convert` and with an `approval_id` uses it once (the C1 statement), then the approver is re-checked live; any failure is `APPROVAL_INVALID`. The use rolls back with a failed conversion. Audit `approval.granted`, `approval.locked`, and `stock.converted` with the approver and approval id.
+
+**Earlier tests changed by C5 (mechanical; no assertion weakened):**
+- B2's marker test expects the two marked routes (approved).
+- Spike step 3 and B1 test 4 pass a device id on hand-built actors.
+- C4 test 5: an attendant's made-up `approval_id` is now `APPROVAL_INVALID` (was `PERMISSION_DENIED` "until C5"); without an approval it is still `PERMISSION_DENIED`.
+
+**Proof the tests catch mistakes** (each applied, shown failing, reverted, revert checked with `cmp`):
+- Mutation 5, `consumed_at IS NULL` removed from the consumption: C5 test 4 failed (a reused approval was `ACCEPTED`).
+- Mutation 6, the requester and device binding removed: C5 test 5 failed (another member's use was `ACCEPTED`).
+- Mutation 9, approval attempts written to the PIN login counters: C5 test 3 failed (the approval count stayed 0).
+
+**Things to know:**
+1. The "another device" case is sent through the app's own `SyncService` with a different `deviceId`, as the dispatcher would receive it from another phone's token; the "another member" case goes through the real API.
+2. Three first-run failures were in my tests: the approvals module needed `DatabaseModule` for `TenantRunner`; access tokens expire when the fake clock moves (tests now log in again by PIN on the same device); staff PATCH answers 204, not 200.
+3. Notifying the approver ("your PIN was used") stays for Phase F (design open item 2).

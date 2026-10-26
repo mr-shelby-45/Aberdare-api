@@ -7,6 +7,8 @@ export interface CommandContext {
   occurredAt: Date;
   // The claimed sync_command row (Phase C: movements point at it).
   syncCommandId: string;
+  // When the server received it, from the Clock (Phase C5: approval time limits).
+  receivedAt: Date;
 }
 
 // One command type from the phone (docs/architecture.md section 5). A handler

@@ -268,7 +268,8 @@ describe('B2: command endpoint and catalogue commands', { timeout: 120_000 }, ()
           }
         }
       }
-      expect(marked).toEqual(['v1/sync/commands']);
+      // C5 added the approvals route (approved by Ian): the PIN is checked outside any transaction.
+      expect(marked.sort()).toEqual(['v1/stock/approvals', 'v1/sync/commands']);
     });
   });
 

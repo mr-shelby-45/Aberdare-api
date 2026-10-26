@@ -18,7 +18,7 @@ export class SyncController {
   async commands(@Req() request: AuthedRequest, @Body() dto: SyncBatchDto) {
     const session = request.session!;
     const results = await this.sync.processCommands(
-      { businessId: request.auth!.businessId, membershipId: session.membership.id, permissions: session.permissions },
+      { businessId: request.auth!.businessId, membershipId: session.membership.id, deviceId: request.auth!.deviceId, permissions: session.permissions },
       dto.commands,
     );
     for (const r of results) {

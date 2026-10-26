@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { MONEY_PATTERN, normalizeMoney } from '../../common/validation/money.js';
+import { ApprovalsService } from '../approvals/approvals.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { LocationsService } from '../locations/locations.service.js';
 import { ProductsService } from '../products/products.service.js';
@@ -47,6 +48,7 @@ export class StockCommandsService {
     private readonly products: ProductsService,
     private readonly locations: LocationsService,
     private readonly audit: AuditService,
+    private readonly approvals: ApprovalsService,
   ) {}
 
   /**
@@ -149,17 +151,39 @@ export class StockCommandsService {
   }
 
   /**
-   * stock.convert for a member with stock.convert (C4): the creator is the
-   * approver. Archived locations and pack types are allowed. The pack type
-   * rules, the strict source and the lock order are in StockService.convert.
+   * stock.convert. Without an approval (C4) the caller has stock.convert and
+   * is their own approver. With one (C5: an attendant), the approval is used
+   * once and the approver re-checked live; any problem is APPROVAL_INVALID,
+   * the same for every cause. The approval is used inside the command's
+   * savepoint, so a conversion that then fails leaves it unused. Archived
+   * locations and pack types are allowed. The pack type rules, the strict
+   * source and the lock order are in StockService.convert.
    */
   async convert(
     dto: ConvertStockDto,
     actor: StockActor,
+    approval: { approvalId: string; deviceId: string; receivedAt: Date } | null = null,
   ): Promise<{ fromAfter: number; toAfter: number; unitsAdded: number; approvedByMembershipId: string }> {
     const note = cleanText(dto.note);
     if (!(await this.locations.findById(dto.location_id))) throw locationNotFound();
-    const r = await this.stock.convert(dto.location_id, dto.from_pack_type_id, dto.to_pack_type_id, dto.quantity, movementContext(actor), { note });
+    let approvedByMembershipId: string | undefined;
+    if (approval) {
+      const approver = await this.approvals.useForConversion({
+        approvalId: approval.approvalId,
+        requesterMembershipId: actor.membershipId,
+        deviceId: approval.deviceId,
+        syncCommandId: actor.syncCommandId,
+        occurredAt: actor.occurredAt,
+        receivedAt: approval.receivedAt,
+      });
+      if (!approver) throw new StockError('APPROVAL_INVALID', 'This approval cannot be used. Ask for a new one.');
+      approvedByMembershipId = approver;
+    }
+    const r = await this.stock.convert(dto.location_id, dto.from_pack_type_id, dto.to_pack_type_id, dto.quantity, movementContext(actor), {
+      note,
+      approvedByMembershipId,
+      approvalId: approval?.approvalId ?? null,
+    });
     // Ids and numbers only: never the note.
     await this.audit.record({
       action: 'stock.converted',
@@ -172,7 +196,7 @@ export class StockCommandsService {
         quantity: dto.quantity,
         units_added: r.unitsAdded,
         approved_by_membership_id: r.approvedByMembershipId,
-        approval_id: null,
+        approval_id: approval?.approvalId ?? null,
       },
       actorMembershipId: actor.membershipId,
     });

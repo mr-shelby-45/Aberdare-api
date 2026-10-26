@@ -35,11 +35,14 @@ describe('step 3: idempotent commands', () => {
   const manager = (s: Shop): SyncActor => ({
     businessId: s.biz,
     membershipId: s.member,
+    deviceId: NO_DEVICE,
     permissions: new Set(['stock.receive', 'stock.adjust']),
   });
 
   // Any valid ISO time; the spike tests do not depend on it.
   const OCCURRED = '2026-10-24T08:00:00.000Z';
+  // A device id for the actor (Phase C5); these tests use no approvals, so it is never compared.
+  const NO_DEVICE = randomUUID();
 
   const receive = (s: Shop, quantity: number, commandId = randomUUID()) => ({
     command_id: commandId,
@@ -154,6 +157,7 @@ describe('step 3: idempotent commands', () => {
     const receiver: SyncActor = {
       businessId: shop.biz,
       membershipId: shop.member,
+      deviceId: NO_DEVICE,
       permissions: new Set(['stock.receive']),
     };
     const batch = [receive(shop, 1), adjust(shop, 3), receive(shop, 2)];
@@ -172,6 +176,7 @@ describe('step 3: idempotent commands', () => {
     const noAdjust: SyncActor = {
       businessId: shop.biz,
       membershipId: shop.member,
+      deviceId: NO_DEVICE,
       permissions: new Set(['stock.receive']),
     };
     const cmd = adjust(shop, 3);
