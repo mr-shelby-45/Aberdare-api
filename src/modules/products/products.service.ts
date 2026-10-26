@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ApiError } from '../../common/errors/api.error.js';
+import { SignedCursor, cursorUuid } from '../../common/paging/signed-cursor.js';
 import { normalizeMoney } from '../../common/validation/money.js';
 import { Clock } from '../../common/time/clock.js';
 import { uniqueViolationConstraint } from '../../database/db-errors.js';
@@ -15,7 +16,6 @@ import type { RemoveBarcodeDto } from './dto/remove-barcode.dto.js';
 import type { UpdateProductDto } from './dto/update-product.dto.js';
 import type { UpsertPackTypeDto } from './dto/upsert-pack-type.dto.js';
 import { type PackTypeRow, PackTypesRepository } from './pack-types.repository.js';
-import { ProductCursor } from './product-cursor.js';
 import type { ProductView } from './product-view.js';
 import { ProductsRepository } from './products.repository.js';
 
@@ -29,6 +29,7 @@ const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 const SEARCH_MIN = 2;
 const SEARCH_MAX = 100;
+const PRODUCT_CURSOR = 'products';
 // Control characters, NUL included: Postgres text cannot hold a NUL, so it
 // would otherwise become a 500.
 // oxlint-disable-next-line no-control-regex -- matching control characters is the point
@@ -49,7 +50,7 @@ export class ProductsService {
     private readonly stock: StockService,
     private readonly audit: AuditService,
     private readonly clock: Clock,
-    private readonly cursor: ProductCursor,
+    private readonly cursor: SignedCursor,
   ) {}
 
   /** product.create: the product, its pack types and its barcodes, or nothing. */
@@ -293,6 +294,17 @@ export class ProductsService {
     return { packTypeId: found.packTypeId, product };
   }
 
+  /**
+   * For the stock commands (Phase C2): which of these pack types exist in
+   * this business, and whether each can take new stock. A pack type counts as
+   * archived when it or its product is archived (decided in C2). Ids of
+   * another business are simply missing, like ids that do not exist.
+   */
+  async packTypesForStock(ids: string[]): Promise<Map<string, { productId: string; unitsPerPack: number; archived: boolean }>> {
+    const rows = await this.packTypes.stockStatus(ids);
+    return new Map(rows.map((r) => [r.id, { productId: r.productId, unitsPerPack: r.unitsPerPack, archived: r.archived }]));
+  }
+
   /** GET /products/:id. Another business's id, a missing one and a non-UUID: the same 404. */
   async findById(id: string): Promise<ProductView> {
     const [product] = UUID.test(id) ? await this.views([id]) : [];
@@ -326,7 +338,7 @@ export class ProductsService {
       return { products: await this.views(ids) };
     }
 
-    const after = query.cursor === undefined ? null : this.cursor.read(query.cursor, includeArchived);
+    const after = query.cursor === undefined ? null : this.readCursor(query.cursor, includeArchived);
     if (query.cursor !== undefined && !after) throw readInvalid('The cursor is not valid.');
     // One row more than asked tells whether there is a next page.
     const rows = await this.products.page({ includeArchived, after, limit: limit + 1 });
@@ -334,8 +346,19 @@ export class ProductsService {
     const last = page[page.length - 1];
     return {
       products: await this.views(page.map((r) => r.id)),
-      nextCursor: rows.length > limit && last ? this.cursor.sign({ name: last.name, id: last.id }, includeArchived) : null,
+      nextCursor:
+        rows.length > limit && last
+          ? this.cursor.sign(PRODUCT_CURSOR, { name: last.name, id: last.id, include_archived: includeArchived })
+          : null,
     };
+  }
+
+  /** The last row's name and id, if the cursor is genuine and was issued for this include_archived. */
+  private readCursor(raw: string, includeArchived: boolean): { name: string; id: string } | null {
+    const v = this.cursor.read(PRODUCT_CURSOR, raw);
+    const id = cursorUuid(v?.id);
+    if (!v || typeof v.name !== 'string' || !id || v.include_archived !== includeArchived) return null;
+    return { name: v.name, id };
   }
 
   /**

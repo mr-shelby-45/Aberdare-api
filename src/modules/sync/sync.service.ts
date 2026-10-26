@@ -3,7 +3,7 @@ import { Clock } from '../../common/time/clock.js';
 import { validateDto } from '../../common/validation/validate-dto.js';
 import { errorCodeForLog, isForeignKeyViolation } from '../../database/db-errors.js';
 import { TenantRunner, withSavepoint } from '../../database/tenant.js';
-import { CatalogueHandlers } from './catalogue-handlers.js';
+import { CommandHandlers } from './command-handlers.js';
 import type { CommandHandler } from './command-handler.js';
 import type {
   CommandOutcome,
@@ -37,7 +37,7 @@ export class SyncService {
     private readonly tenants: TenantRunner,
     private readonly repo: SyncRepository,
     private readonly clock: Clock,
-    handlers: CatalogueHandlers,
+    handlers: CommandHandlers,
   ) {
     this.handlers = new Map(handlers.all.map((h) => [h.type, h]));
   }
@@ -126,7 +126,7 @@ export class SyncService {
     } catch (err) {
       // The savepoint has already undone whatever the handler wrote.
       if (err instanceof CommandRejectedError) {
-        return rejected(err.code, err.message);
+        return rejected(err.code, err.message, err.data);
       }
       if (isForeignKeyViolation(err)) {
         return rejected(
@@ -139,6 +139,6 @@ export class SyncService {
   }
 }
 
-function rejected(code: string, message: string): CommandOutcome {
-  return { status: 'REJECTED', code, message };
+function rejected(code: string, message: string, data?: CommandOutcome['data']): CommandOutcome {
+  return data === undefined ? { status: 'REJECTED', code, message } : { status: 'REJECTED', code, message, data };
 }

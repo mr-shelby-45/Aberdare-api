@@ -1,38 +1,30 @@
 import { Injectable } from '@nestjs/common';
 import type { CommandContext, CommandHandler } from '../../sync/command-handler.js';
 import type { CommandOutcome } from '../../sync/command-outcome.js';
-import { CommandRejectedError } from '../../sync/command-rejected.error.js';
-import { StockQuantityChangeDto } from '../dto/stock-quantity-change.dto.js';
-import { StockError } from '../stock.error.js';
-import { StockService } from '../stock.service.js';
+import { AdjustStockDto } from '../dto/adjust-stock.dto.js';
+import { StockCommandsService } from '../stock-commands.service.js';
+import { rejectionFor } from './stock-rejection.js';
 
-// stock.adjust (spike version: decreases only, strict mode, so it can never
-// go below zero). Needs the stock.adjust permission.
+// stock.adjust (docs/phase-c-design.md section 5): a correction with a
+// reason. A decrease is strict. Needs stock.adjust.
 @Injectable()
-export class AdjustStockHandler
-  implements CommandHandler<StockQuantityChangeDto>
-{
+export class AdjustStockHandler implements CommandHandler<AdjustStockDto> {
   readonly type = 'stock.adjust';
   readonly permission = 'stock.adjust';
-  readonly payloadDto = StockQuantityChangeDto;
+  readonly payloadDto = AdjustStockDto;
 
-  constructor(private readonly stock: StockService) {}
+  constructor(private readonly commands: StockCommandsService) {}
 
-  async handle(payload: StockQuantityChangeDto, ctx: CommandContext): Promise<CommandOutcome> {
-    const movement = { occurredAt: ctx.occurredAt, createdByMembershipId: ctx.actor.membershipId, syncCommandId: ctx.syncCommandId };
+  async handle(payload: AdjustStockDto, ctx: CommandContext): Promise<CommandOutcome> {
     try {
-      const { quantity } = await this.stock.decreaseStrict(
-        payload.locationId,
-        payload.packTypeId,
-        payload.quantity,
-        movement,
-      );
-      return { status: 'ACCEPTED', data: { quantity } };
+      const quantityAfter = await this.commands.adjust(payload, {
+        membershipId: ctx.actor.membershipId,
+        occurredAt: ctx.occurredAt,
+        syncCommandId: ctx.syncCommandId,
+      });
+      return { status: 'ACCEPTED', data: { quantity_after: quantityAfter } };
     } catch (err) {
-      if (err instanceof StockError) {
-        throw new CommandRejectedError(err.code, err.message);
-      }
-      throw err;
+      throw rejectionFor(err);
     }
   }
 }

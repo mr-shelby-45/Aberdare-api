@@ -1,9 +1,16 @@
 import { Injectable } from '@nestjs/common';
 import { StockError } from './stock.error.js';
-import { type AdjustReason, type MovementContext, StockRepository } from './stock.repository.js';
+import { type AdjustReason, MAX_BALANCE, type MovementContext, StockRepository } from './stock.repository.js';
 
 export interface StockChangeResult {
   quantity: number;
+}
+
+/** Optional details of a received line, stored on its movement. */
+export interface ReceiveDetails {
+  unitCost?: string | null;
+  note?: string | null;
+  reference?: string | null;
 }
 
 export interface SaleDecreaseResult {
@@ -35,16 +42,58 @@ export class StockService {
     return this.repo.hasMovements(packTypeId);
   }
 
+  /** One line of a delivery: not strict (a negative pool can be refilled), capped at MAX_BALANCE. */
   async receive(
     locationId: string,
     packTypeId: string,
     qty: number,
     ctx: MovementContext,
+    details: ReceiveDetails = {},
   ): Promise<StockChangeResult> {
     assertPositiveWholeNumber(qty);
-    const quantity = await this.repo.changeBalance(locationId, packTypeId, qty);
+    const quantity = withinLimit(await this.repo.changeBalance(locationId, packTypeId, qty));
     await this.repo.insertMovement(
-      { locationId, packTypeId, quantityChange: qty, movementType: 'RECEIVE', quantityAfter: quantity },
+      {
+        locationId,
+        packTypeId,
+        quantityChange: qty,
+        movementType: 'RECEIVE',
+        quantityAfter: quantity,
+        unitCost: details.unitCost ?? null,
+        note: details.note ?? null,
+        reference: details.reference ?? null,
+      },
+      ctx,
+    );
+    return { quantity };
+  }
+
+  /**
+   * stock.adjust: a decrease is strict (one conditional statement, never
+   * below zero), an increase is capped at MAX_BALANCE. The caller has
+   * already checked that the sign fits the reason; the database checks it too.
+   */
+  async adjust(
+    locationId: string,
+    packTypeId: string,
+    change: number,
+    reason: AdjustReason,
+    note: string | null,
+    ctx: MovementContext,
+  ): Promise<StockChangeResult> {
+    if (!Number.isSafeInteger(change) || change === 0) {
+      throw new StockError('STOCK_QUANTITY_INVALID', 'The change must be a whole number other than zero');
+    }
+    let quantity: number;
+    if (change < 0) {
+      const left = await this.repo.decreaseIfAvailable(locationId, packTypeId, -change);
+      if (left === null) throw new StockError('STOCK_INSUFFICIENT', 'Not enough stock');
+      quantity = left;
+    } else {
+      quantity = withinLimit(await this.repo.changeBalance(locationId, packTypeId, change));
+    }
+    await this.repo.insertMovement(
+      { locationId, packTypeId, quantityChange: change, movementType: 'ADJUST', quantityAfter: quantity, reason, note },
       ctx,
     );
     return { quantity };
@@ -86,11 +135,8 @@ export class StockService {
     ctx: MovementContext,
   ): Promise<SaleDecreaseResult> {
     assertPositiveWholeNumber(qty);
-    const quantity = await this.repo.changeBalance(
-      locationId,
-      packTypeId,
-      -qty,
-    );
+    // A decrease never reaches the upper limit, so this is never null.
+    const quantity = withinLimit(await this.repo.changeBalance(locationId, packTypeId, -qty));
     await this.repo.insertMovement(
       { locationId, packTypeId, quantityChange: -qty, movementType: 'SALE', quantityAfter: quantity },
       ctx,
@@ -140,7 +186,7 @@ export class StockService {
       { locationId, packTypeId: fromPackTypeId, quantityChange: -1, movementType: 'CONVERT_OUT', quantityAfter: left },
       ctx,
     );
-    const toAfter = await this.repo.changeBalance(locationId, toPackTypeId, toQuantity);
+    const toAfter = withinLimit(await this.repo.changeBalance(locationId, toPackTypeId, toQuantity));
     const inMovementId = await this.repo.insertMovement(
       { locationId, packTypeId: toPackTypeId, quantityChange: toQuantity, movementType: 'CONVERT_IN', quantityAfter: toAfter },
       ctx,
@@ -153,6 +199,14 @@ export class StockService {
     });
     return { conversionId, outMovementId, inMovementId, toQuantity };
   }
+}
+
+/** The new balance, or VALIDATION_FAILED when the capped statement changed nothing. */
+function withinLimit(quantity: number | null): number {
+  if (quantity === null) {
+    throw new StockError('VALIDATION_FAILED', `A stock balance cannot go above ${MAX_BALANCE.toLocaleString('en-US')}`);
+  }
+  return quantity;
 }
 
 // Quantities are whole numbers for now (CLAUDE.md rule 8).

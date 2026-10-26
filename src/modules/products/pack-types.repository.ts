@@ -100,6 +100,18 @@ export class PackTypesRepository {
     }));
   }
 
+  /** Product, units and archived state (the pack type's or its product's) of these pack types. */
+  async stockStatus(ids: string[]): Promise<{ id: string; productId: string; unitsPerPack: number; archived: boolean }[]> {
+    if (ids.length === 0) return [];
+    const rows = await currentTx().$queryRaw<{ id: string; product_id: string; units_per_pack: number; archived: boolean }[]>`
+      SELECT pt.id, pt.product_id, pt.units_per_pack,
+             (pt.archived_at IS NOT NULL OR p.archived_at IS NOT NULL) AS archived
+        FROM pack_type pt
+        JOIN product p ON p.business_id = pt.business_id AND p.id = pt.product_id
+       WHERE pt.id = ANY(${ids}::uuid[]) AND pt.business_id = ${currentBusinessId()}::uuid`;
+    return rows.map((r) => ({ id: r.id, productId: r.product_id, unitsPerPack: r.units_per_pack, archived: r.archived }));
+  }
+
   async update(id: string, fields: Partial<PackTypeWrite>): Promise<void> {
     await currentTx().packType.update({ where: { id }, data: fields, select: { id: true } });
   }

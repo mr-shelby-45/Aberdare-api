@@ -181,6 +181,8 @@ model StockMovement {
 
   @@unique([businessId, id])
   @@index([businessId, locationId, packTypeId])
+  // Phase C2: GET /v1/stock/movements, newest first, keyset on (occurred_at, id).
+  @@index([businessId, occurredAt(sort: Desc), id(sort: Desc)])
   @@map("stock_movement")
 }
 

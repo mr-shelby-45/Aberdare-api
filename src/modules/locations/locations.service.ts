@@ -32,6 +32,11 @@ export class LocationsService {
     return location;
   }
 
+  /** For the stock commands (Phase C2). Another business's id gives null, like a missing one. */
+  async findById(id: string): Promise<LocationRow | null> {
+    return this.repo.findById(id);
+  }
+
   async list(includeArchived: boolean): Promise<LocationRow[]> {
     return this.repo.list(includeArchived);
   }

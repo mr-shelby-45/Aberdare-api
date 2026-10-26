@@ -1,3 +1,6 @@
+/** A JSON value, for command results (Phase C: lists of lines). */
+export type ResultValue = string | number | boolean | null | ResultValue[] | { [key: string]: ResultValue };
+
 // What a command handler decides, stored in sync_command.result and returned
 // unchanged to every caller that sends the same command again.
 export interface CommandOutcome {
@@ -8,7 +11,7 @@ export interface CommandOutcome {
   // Safe to show to a user.
   message?: string;
   // Sent to the phone as `result`.
-  data?: Record<string, string | number | boolean>;
+  data?: Record<string, ResultValue>;
 }
 
 // What processCommands returns per command. FAILED is never stored: the

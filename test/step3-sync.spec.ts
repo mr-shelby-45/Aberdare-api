@@ -1,26 +1,32 @@
 import { randomUUID } from 'node:crypto';
-import { Clock } from '../src/common/time/clock.js';
-import { PrismaService } from '../src/database/prisma.service.js';
+import { IsUUID } from 'class-validator';
 import { TenantRunner, currentTx } from '../src/database/tenant.js';
-import { AdjustStockHandler } from '../src/modules/stock/commands/adjust-stock.handler.js';
-import { ReceiveStockHandler } from '../src/modules/stock/commands/receive-stock.handler.js';
 import { StockError } from '../src/modules/stock/stock.error.js';
 import { StockRepository } from '../src/modules/stock/stock.repository.js';
-import { StockService } from '../src/modules/stock/stock.service.js';
 import type { SyncActor } from '../src/modules/sync/command-outcome.js';
+import type { CommandHandler } from '../src/modules/sync/command-handler.js';
+import type { CommandHandlers } from '../src/modules/sync/command-handlers.js';
 import { SyncRepository } from '../src/modules/sync/sync.repository.js';
 import { SyncService } from '../src/modules/sync/sync.service.js';
+import { type TestApp, startTestApp } from './helpers/app.js';
 import { resetTables } from './helpers/db.js';
-import { prismaWithPool } from './helpers/prisma.js';
 import { type Shop, seedShop } from './helpers/shop.js';
 
 // Spike step 3: idempotent commands (docs/spike.md).
 // Numbered tests match the numbered list in the spike document.
+// Since Phase C2 the real stock.receive and stock.adjust handlers are on the
+// endpoint, so this file uses the app's own SyncService and handlers, with
+// the C2 payloads (snake_case, a delivery of lines, a signed adjust change).
+
+/** Payload of the test-only handler in the INVALID_REFERENCE test. */
+class RawReceiveDto {
+  @IsUUID()
+  location_id!: string;
+}
 
 describe('step 3: idempotent commands', () => {
-  const stockRepo = new StockRepository();
-  const stock = new StockService(stockRepo);
-  let prisma: PrismaService;
+  let t: TestApp;
+  let stockRepo: StockRepository;
   let tenants: TenantRunner;
   let sync: SyncService;
   let shop: Shop;
@@ -39,15 +45,19 @@ describe('step 3: idempotent commands', () => {
     command_id: commandId,
     occurred_at: OCCURRED,
     type: 'stock.receive',
-    payload: { locationId: s.loc, packTypeId: s.piece, quantity },
+    payload: { location_id: s.loc, lines: [{ pack_type_id: s.piece, quantity }] },
   });
 
+  /** Takes `quantity` away (the spike's adjust was a decrease). */
   const adjust = (s: Shop, quantity: number, commandId = randomUUID()) => ({
     command_id: commandId,
     occurred_at: OCCURRED,
     type: 'stock.adjust',
-    payload: { locationId: s.loc, packTypeId: s.piece, quantity },
+    payload: { location_id: s.loc, pack_type_id: s.piece, quantity_change: -quantity, reason: 'CORRECTION' },
   });
+
+  /** The accepted result of a one-line receive. */
+  const received = (s: Shop, quantityAfter: number) => ({ lines: [{ pack_type_id: s.piece, quantity_after: quantityAfter }] });
 
   /** Stock and command rows as the tenant sees them. */
   async function state(s: Shop) {
@@ -60,20 +70,15 @@ describe('step 3: idempotent commands', () => {
   }
 
   beforeAll(async () => {
-    prisma = prismaWithPool(10);
-    await prisma.$connect();
-    tenants = new TenantRunner(prisma);
-    sync = new SyncService(
-      tenants,
-      new SyncRepository(),
-      new Clock(),
-      // The endpoint's own list is the catalogue handlers; the spike tests the stock ones.
-      { all: [new ReceiveStockHandler(stock), new AdjustStockHandler(stock)] },
-    );
-  });
+    t = await startTestApp();
+    tenants = t.app.get(TenantRunner, { strict: false });
+    sync = t.app.get(SyncService, { strict: false });
+    // The same instance the handlers use, so the crash tests can spy on it.
+    stockRepo = t.app.get(StockRepository, { strict: false });
+  }, 60_000);
 
   afterAll(async () => {
-    await prisma.$disconnect();
+    await t.app.close();
   });
 
   beforeEach(async () => {
@@ -93,7 +98,7 @@ describe('step 3: idempotent commands', () => {
     expect(first).toEqual({
       commandId: cmd.command_id,
       status: 'ACCEPTED',
-      data: { quantity: 5 },
+      data: received(shop, 5),
     });
     expect(second).toEqual(first);
     expect(await state(shop)).toEqual({ balance: 5, sum: 5, movements: 1, commands: 1 });
@@ -113,7 +118,7 @@ describe('step 3: idempotent commands', () => {
       expect(r).toEqual({
         commandId: cmd.command_id,
         status: 'ACCEPTED',
-        data: { quantity: 5 },
+        data: received(shop, 5),
       });
     }
     expect(await state(shop)).toEqual({ balance: 5, sum: 5, movements: 1, commands: 1 });
@@ -129,13 +134,16 @@ describe('step 3: idempotent commands', () => {
     ];
     const results = await sync.processCommands(manager(shop), batch);
 
+    // Since C2 a bad quantity is reported per line (INVALID_LINES), not as a
+    // malformed command.
     expect(results.map((r) => [r.commandId, r.status, r.code])).toEqual([
       [batch[0].command_id, 'ACCEPTED', undefined],
       [batch[1].command_id, 'ACCEPTED', undefined],
-      [batch[2].command_id, 'REJECTED', 'VALIDATION_FAILED'],
+      [batch[2].command_id, 'REJECTED', 'INVALID_LINES'],
       [batch[3].command_id, 'ACCEPTED', undefined],
       [batch[4].command_id, 'ACCEPTED', undefined],
     ]);
+    expect(results[2].data).toEqual({ invalid_lines: [{ line: 1, reason: 'QUANTITY_INVALID' }] });
     // 1 + 2 + 4 + 5; the rejection is stored too.
     expect(await state(shop)).toEqual({ balance: 12, sum: 12, movements: 4, commands: 5 });
   });
@@ -193,8 +201,8 @@ describe('step 3: idempotent commands', () => {
     const [a] = await sync.processCommands(manager(shop), [receive(shop, 3, shared)]);
     const [b] = await sync.processCommands(manager(shopB), [receive(shopB, 7, shared)]);
 
-    expect(a).toEqual({ commandId: shared, status: 'ACCEPTED', data: { quantity: 3 } });
-    expect(b).toEqual({ commandId: shared, status: 'ACCEPTED', data: { quantity: 7 } });
+    expect(a).toEqual({ commandId: shared, status: 'ACCEPTED', data: received(shop, 3) });
+    expect(b).toEqual({ commandId: shared, status: 'ACCEPTED', data: received(shopB, 7) });
     expect(await state(shop)).toEqual({ balance: 3, sum: 3, movements: 1, commands: 1 });
     expect(await state(shopB)).toEqual({ balance: 7, sum: 7, movements: 1, commands: 1 });
   });
@@ -223,7 +231,7 @@ describe('step 3: idempotent commands', () => {
     expect(retried).toEqual({
       commandId: cmd.command_id,
       status: 'ACCEPTED',
-      data: { quantity: 5 },
+      data: received(shop, 5),
     });
     expect(await state(shop)).toEqual({ balance: 5, sum: 5, movements: 1, commands: 1 });
   });
@@ -250,10 +258,34 @@ describe('step 3: idempotent commands', () => {
       expect(await state(shop)).toEqual({ balance: 0, sum: 0, movements: 0, commands: 1 });
     });
 
-    it("a command pointing at another business's location is rejected as INVALID_REFERENCE, not retried forever", async () => {
+    it("a command pointing at another business's location is rejected, not retried forever", async () => {
       const shopB = await seedShop(tenants, 'Shop B');
       const [r] = await sync.processCommands(manager(shop), [
-        { command_id: randomUUID(), occurred_at: OCCURRED, type: 'stock.receive', payload: { locationId: shopB.loc, packTypeId: shop.piece, quantity: 5 } },
+        { command_id: randomUUID(), occurred_at: OCCURRED, type: 'stock.receive', payload: { location_id: shopB.loc, lines: [{ pack_type_id: shop.piece, quantity: 5 }] } },
+      ]);
+      // Since C2 stock.receive looks the location up first (C2 test 3).
+      expect(r).toMatchObject({ status: 'REJECTED', code: 'LOCATION_NOT_FOUND' });
+      expect(await state(shop)).toEqual({ balance: 0, sum: 0, movements: 0, commands: 1 });
+      expect(await state(shopB)).toEqual({ balance: 0, sum: 0, movements: 0, commands: 0 });
+    });
+
+    it('a handler that writes a foreign reference without checking is rejected as INVALID_REFERENCE, not retried forever', async () => {
+      // The dispatcher's backstop: the composite foreign key refuses the write,
+      // and the command is stored as REJECTED / INVALID_REFERENCE. No real
+      // handler reaches it any more, so a test-only one writes unchecked.
+      const shopB = await seedShop(tenants, 'Shop B');
+      const raw: CommandHandler<RawReceiveDto> = {
+        type: 'test.raw_receive',
+        permission: 'stock.receive',
+        payloadDto: RawReceiveDto,
+        async handle(payload) {
+          await stockRepo.changeBalance(payload.location_id, shop.piece, 5);
+          return { status: 'ACCEPTED' };
+        },
+      };
+      const unchecked = new SyncService(tenants, new SyncRepository(), t.clock, { all: [raw] } as unknown as CommandHandlers);
+      const [r] = await unchecked.processCommands(manager(shop), [
+        { command_id: randomUUID(), occurred_at: OCCURRED, type: 'test.raw_receive', payload: { location_id: shopB.loc } },
       ]);
       expect(r).toMatchObject({ status: 'REJECTED', code: 'INVALID_REFERENCE' });
       expect(await state(shop)).toEqual({ balance: 0, sum: 0, movements: 0, commands: 1 });
@@ -268,9 +300,9 @@ describe('step 3: idempotent commands', () => {
         { command_id: 'not-a-uuid', occurred_at: OCCURRED, type: 'stock.receive', payload: {} },
         { command_id: randomUUID(), occurred_at: OCCURRED, type: 'stock.receive', payload: {}, extra: 1 },
         { command_id: randomUUID(), occurred_at: OCCURRED, type: 'stock.teleport', payload: {} },
-        { command_id: valid, occurred_at: OCCURRED, type: 'stock.receive', payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: '5' } },
-        { command_id: randomUUID(), occurred_at: OCCURRED, type: 'stock.receive', payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: 2.5 } },
-        { command_id: randomUUID(), occurred_at: OCCURRED, type: 'stock.receive', payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: 1, businessId: randomUUID() } },
+        { command_id: valid, occurred_at: OCCURRED, type: 'stock.receive', payload: { location_id: shop.loc, lines: [{ pack_type_id: shop.piece, quantity: '5' }] } },
+        { command_id: randomUUID(), occurred_at: OCCURRED, type: 'stock.receive', payload: { location_id: shop.loc, lines: [{ pack_type_id: shop.piece, quantity: 2.5 }] } },
+        { command_id: randomUUID(), occurred_at: OCCURRED, type: 'stock.receive', payload: { location_id: shop.loc, lines: [{ pack_type_id: shop.piece, quantity: 1 }], business_id: randomUUID() } },
       ]);
       expect(results.map((r) => [r.status, r.code])).toEqual([
         ['REJECTED', 'VALIDATION_FAILED'],
@@ -279,9 +311,10 @@ describe('step 3: idempotent commands', () => {
         ['REJECTED', 'VALIDATION_FAILED'],
         ['REJECTED', 'UNKNOWN_COMMAND_TYPE'],
         ['REJECTED', 'VALIDATION_FAILED'], // "5" is a string, not a number
-        ['REJECTED', 'VALIDATION_FAILED'], // no fractional quantities
+        ['REJECTED', 'INVALID_LINES'], // no fractional quantities (a line reason since C2)
         ['REJECTED', 'VALIDATION_FAILED'], // business_id never comes from the phone
       ]);
+      expect(results[6].data).toEqual({ invalid_lines: [{ line: 1, reason: 'QUANTITY_INVALID' }] });
       expect(results.slice(0, 4).every((r) => r.commandId === null)).toBe(true);
       // Stored: unknown type + the three payload failures.
       expect(await state(shop)).toEqual({ balance: 0, sum: 0, movements: 0, commands: 4 });

@@ -10,14 +10,8 @@ import { SmsSender } from '../src/integrations/sms/sms.sender.js';
 import { AuditService } from '../src/modules/audit/audit.service.js';
 import { DevicesService } from '../src/modules/devices/devices.service.js';
 import { LocationsService } from '../src/modules/locations/locations.service.js';
-import { AdjustStockHandler } from '../src/modules/stock/commands/adjust-stock.handler.js';
-import { ReceiveStockHandler } from '../src/modules/stock/commands/receive-stock.handler.js';
-import { StockRepository } from '../src/modules/stock/stock.repository.js';
-import { StockService } from '../src/modules/stock/stock.service.js';
-import { SyncRepository } from '../src/modules/sync/sync.repository.js';
 import { SyncService } from '../src/modules/sync/sync.service.js';
 import { type TestApp, startTestApp } from './helpers/app.js';
-import { FakeClock } from './helpers/clock.js';
 import { asAdmin, createBusiness, resetTables } from './helpers/db.js';
 import { seedShop } from './helpers/shop.js';
 
@@ -283,16 +277,16 @@ describe('B1: schema, triggers and locations', { timeout: 120_000 }, () => {
   // ---------------------------------------------------------------- 4. sync_command timestamps
   it('4. sync_command stores occurred_at from the phone and received_at from the server clock', async () => {
     const shop = await shopWithMember();
-    const clock = new FakeClock(new Date('2026-10-25T12:00:00.000Z'));
-    const stock = new StockService(new StockRepository());
-    const sync = new SyncService(tenants(), new SyncRepository(), clock, { all: [new ReceiveStockHandler(stock), new AdjustStockHandler(stock)] });
+    // The app's own dispatcher and stock.receive handler (since C2), on the app's fake clock.
+    const sync = t.app.get(SyncService, { strict: false });
+    const serverNow = t.clock.now().toISOString();
     const commandId = randomUUID();
     const [result] = await sync.processCommands({ businessId: shop.biz, membershipId: shop.membershipId, permissions: new Set(['stock.receive']) }, [
       {
         command_id: commandId,
         occurred_at: '2026-10-22T07:30:00.000Z',
         type: 'stock.receive',
-        payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: 3 },
+        payload: { location_id: shop.loc, lines: [{ pack_type_id: shop.piece, quantity: 3 }] },
       },
     ]);
     expect(result).toMatchObject({ status: 'ACCEPTED' });
@@ -303,11 +297,11 @@ describe('B1: schema, triggers and locations', { timeout: 120_000 }, () => {
       }),
     );
     expect(row.occurredAt.toISOString()).toBe('2026-10-22T07:30:00.000Z');
-    expect(row.receivedAt.toISOString()).toBe('2026-10-25T12:00:00.000Z');
+    expect(row.receivedAt.toISOString()).toBe(serverNow);
 
     // A command without occurred_at is rejected and stores nothing.
     const [bad] = await sync.processCommands({ businessId: shop.biz, membershipId: shop.membershipId, permissions: new Set(['stock.receive']) }, [
-      { command_id: randomUUID(), type: 'stock.receive', payload: { locationId: shop.loc, packTypeId: shop.piece, quantity: 3 } },
+      { command_id: randomUUID(), type: 'stock.receive', payload: { location_id: shop.loc, lines: [{ pack_type_id: shop.piece, quantity: 3 }] } },
     ]);
     expect(bad).toMatchObject({ status: 'REJECTED', code: 'VALIDATION_FAILED' });
     expect(await tenants().run(shop.biz, () => currentTx().syncCommand.count())).toBe(1);

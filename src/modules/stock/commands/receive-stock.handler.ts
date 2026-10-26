@@ -1,37 +1,38 @@
 import { Injectable } from '@nestjs/common';
 import type { CommandContext, CommandHandler } from '../../sync/command-handler.js';
 import type { CommandOutcome } from '../../sync/command-outcome.js';
-import { CommandRejectedError } from '../../sync/command-rejected.error.js';
-import { StockQuantityChangeDto } from '../dto/stock-quantity-change.dto.js';
-import { StockError } from '../stock.error.js';
-import { StockService } from '../stock.service.js';
+import { ReceiveStockDto } from '../dto/receive-stock.dto.js';
+import { StockCommandsService } from '../stock-commands.service.js';
+import { rejectionFor } from './stock-rejection.js';
 
-// stock.receive: goods arrived. Needs the stock.receive permission.
+// stock.receive (docs/phase-c-design.md section 5): one delivery. Needs
+// stock.receive, and costs.view when any line carries unit_cost (even null),
+// as for cost_price in Phase B.
 @Injectable()
-export class ReceiveStockHandler
-  implements CommandHandler<StockQuantityChangeDto>
-{
+export class ReceiveStockHandler implements CommandHandler<ReceiveStockDto> {
   readonly type = 'stock.receive';
   readonly permission = 'stock.receive';
-  readonly payloadDto = StockQuantityChangeDto;
+  readonly payloadDto = ReceiveStockDto;
 
-  constructor(private readonly stock: StockService) {}
+  constructor(private readonly commands: StockCommandsService) {}
 
-  async handle(payload: StockQuantityChangeDto, ctx: CommandContext): Promise<CommandOutcome> {
-    const movement = { occurredAt: ctx.occurredAt, createdByMembershipId: ctx.actor.membershipId, syncCommandId: ctx.syncCommandId };
+  extraPermissions(payload: ReceiveStockDto): string[] {
+    return payload.lines.some((l) => l.unit_cost !== undefined) ? ['costs.view'] : [];
+  }
+
+  async handle(payload: ReceiveStockDto, ctx: CommandContext): Promise<CommandOutcome> {
     try {
-      const { quantity } = await this.stock.receive(
-        payload.locationId,
-        payload.packTypeId,
-        payload.quantity,
-        movement,
-      );
-      return { status: 'ACCEPTED', data: { quantity } };
+      const lines = await this.commands.receive(payload, {
+        membershipId: ctx.actor.membershipId,
+        occurredAt: ctx.occurredAt,
+        syncCommandId: ctx.syncCommandId,
+      });
+      return {
+        status: 'ACCEPTED',
+        data: { lines: lines.map((l) => ({ pack_type_id: l.packTypeId, quantity_after: l.quantityAfter })) },
+      };
     } catch (err) {
-      if (err instanceof StockError) {
-        throw new CommandRejectedError(err.code, err.message);
-      }
-      throw err;
+      throw rejectionFor(err);
     }
   }
 }

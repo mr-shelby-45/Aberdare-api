@@ -3,7 +3,9 @@ import { currentRequestContext } from '../../common/context/request-context.js';
 import { Clock } from '../../common/time/clock.js';
 import { AuditRepository } from './audit.repository.js';
 
-export type AuditValue = string | number | boolean | null | string[];
+// Nested objects and arrays since Phase C2 (approved by Ian), for lists of
+// lines such as [{ pack_type_id, quantity }]. Keys are checked at every level.
+export type AuditValue = string | number | boolean | null | AuditValue[] | { [key: string]: AuditValue };
 export type AuditMetadata = Record<string, AuditValue>;
 
 // Metadata keys that suggest a secret or a full contact detail. A key like
@@ -38,11 +40,7 @@ export class AuditService {
 
   async record(entry: AuditEntry): Promise<void> {
     const metadata = entry.metadata ?? {};
-    for (const key of Object.keys(metadata)) {
-      if (FORBIDDEN_KEY.test(key) && !ALLOWED_KEYS.has(key)) {
-        throw new Error(`AuditService: metadata key "${key}" looks like a secret or contact detail`);
-      }
-    }
+    checkKeys(metadata);
     const context = currentRequestContext();
     await this.repo.insert({
       actorMembershipId:
@@ -54,5 +52,20 @@ export class AuditService {
       ip: context?.ip ?? null,
       occurredAt: this.clock.now(),
     });
+  }
+}
+
+/** Refuses a suspicious key anywhere in the metadata, nested ones included. */
+function checkKeys(value: AuditValue): void {
+  if (Array.isArray(value)) {
+    for (const item of value) checkKeys(item);
+    return;
+  }
+  if (value === null || typeof value !== 'object') return;
+  for (const [key, inner] of Object.entries(value)) {
+    if (FORBIDDEN_KEY.test(key) && !ALLOWED_KEYS.has(key)) {
+      throw new Error(`AuditService: metadata key "${key}" looks like a secret or contact detail`);
+    }
+    checkKeys(inner);
   }
 }

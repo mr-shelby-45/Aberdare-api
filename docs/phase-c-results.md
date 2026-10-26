@@ -33,3 +33,37 @@ Filled in step by step. The full summary (see `docs/phase-c-design.md` section 1
 
 **Open for later steps:**
 - The real `stock.receive`, `stock.adjust`, `stock.count` and `stock.convert` handlers, the reads and the approval minting (C2 to C5).
+
+## C2: Receive, adjust and reads (passed)
+
+**Result:** new 14, Phase C cumulative 21 (`test/c1-stock-schema.spec.ts` plus `test/c2-stock-commands.spec.ts`), all passing in the gate run. The two concurrency tests (C2 test 5: 20 concurrent receives and 20 copies of one command; C2 test 6: 50 concurrent adjusts of -1 against 10) passed 5 runs in a row. The mechanically changed earlier files (spike step 3, B1) passed once on their own (25 of 25) before the gate. The first full-suite run failed one test (290 of 291: C2 test 10, a test bug, see below); after the fix the gate passed again (21 of 21) and the full suite passed once: 21 files, 291 of 291 (219.1 s), with lint and type-check clean. Build and the drift check were clean in the first run, and only a test file changed after it.
+
+**Built (approved by Ian on 2026-10-26, with the six recommended answers):**
+- One migration, generated and declared in `schema.prisma`: `*_c2_stock_movement_history_index`, `stock_movement (business_id, occurred_at DESC, id DESC)` for the movement history. Replayed in the shadow database first; the drift check was clean.
+- `stock.receive` and `stock.adjust` (design section 5) in `StockCommandsModule` (answer 1: a module above stock, products and locations, because `ProductsModule` already imports `StockModule`). They replace the spike's minimal handlers and their camelCase payloads.
+- Every delivery line is checked before anything is written; a bad delivery lists every bad line and saves nothing. A malformed command is `VALIDATION_FAILED` as a whole, a bad value is a line reason, and an archived product's pack type is `PACK_TYPE_ARCHIVED` (answer 4).
+- Lines are applied larger pack first, then by pack type id: the conversion lock order, so deliveries cannot deadlock each other or a conversion. Found while building; not in the design text, now in `architecture.md` section 6.
+- The 2,000,000,000 cap is a `WHERE` on the upsert's conflict branch (answer 5): one atomic statement, `VALIDATION_FAILED` when it stops the change.
+- `GET /v1/stock` and `GET /v1/stock/movements` (design section 7), with the read-only joins documented as the one exception to the module rule (answer 3), and the shared `SignedCursor` (answer 6), which also binds the filters.
+- Audit `stock.received` and `stock.adjusted`, actor passed explicitly. Audit metadata may now nest objects and arrays (answer 2); the forbidden-key check runs at every level.
+- `CommandRejectedError` can carry `data` (the `result` of `INVALID_LINES`), and `CatalogueHandlers` became `CommandHandlers`.
+
+**Spike and earlier tests changed by C2 (mechanical; no assertion weakened):**
+- Spike step 3 now uses the app's own `SyncService` and stock handlers with the C2 payloads (`location_id` plus `lines`; adjust as a negative `quantity_change` with reason `CORRECTION`), and expects the C2 result shapes.
+- Two expected codes changed because the design changed them: a quantity of 0 or 2.5 is now `INVALID_LINES` (with `QUANTITY_INVALID` for line 1, now also asserted), and another business's location is now `LOCATION_NOT_FOUND`. The string `"5"` and an unknown `business_id` are still `VALIDATION_FAILED`.
+- The dispatcher's foreign-key backstop (`INVALID_REFERENCE`) was only reached through the spike's receive. To keep that proof, step 3 gained a test with a test-only handler that writes a foreign reference without checking, and still expects `INVALID_REFERENCE` with nothing stored.
+- B1 test 4 uses the app's dispatcher and fake clock (the expected `received_at` is the app clock's time instead of a second clock's).
+
+**Proof the tests catch mistakes** (each applied, shown failing, reverted, revert checked with `cmp` or the trigger definition's md5):
+- Mutation 1, the valid lines of a bad delivery saved: C2 test 2 failed (the command was `ACCEPTED`).
+- Mutation 2, adjust reads the balance, checks it in JavaScript, then writes: C2 test 6 failed (`[18, 32]` instead of `[10, 40]`: 18 adjusts accepted against a balance of 10).
+- Mutation 7, `unit_cost` accepted without `costs.view`: C2 test 4 failed (the manager's cost lines were `ACCEPTED`).
+- Mutation 8, the `stock_balance` change-log trigger dropped (test database only): C2 test 11 failed (no `change_log` rows). The trigger was recreated from its migration; definition md5 `7ee6bf7f6b6e7c07f8e75f3804871667` before and after.
+
+**Things to know:**
+1. Rows written in one transaction share `created_at`, so two first runs of my tests failed on order, not on behaviour (an audit order by time and name, and a movement time measured after the clock had moved). The tests were corrected, not loosened: the lock order is checked through `change_log.id`, and same-transaction rows are compared as a set.
+2. The first full run failed C2 test 10 on its own check: "the audit text never contains 177" (from the cost 177.25) matched a random UUID containing 4177. It now looks for the exact value 177.25 and for quoted key names (`"unit_cost"`, `"note"`, ...); a first try with `cost"` matched the approved `with_cost` flag and was corrected too. The audit row never held a cost.
+3. Product list cursors issued before C2 are refused once (the cursor format changed).
+
+**Open for later steps:**
+- `stock.count` (C3), `stock.convert` (C4), approvals (C5), hardening (C6).

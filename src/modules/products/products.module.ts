@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { SignedCursor } from '../../common/paging/signed-cursor.js';
 import { AuditModule } from '../audit/audit.module.js';
 import { StockModule } from '../stock/stock.module.js';
 import { BarcodesRepository } from './barcodes.repository.js';
@@ -8,7 +9,6 @@ import { RemoveBarcodeHandler } from './commands/remove-barcode.handler.js';
 import { UpdateProductHandler } from './commands/update-product.handler.js';
 import { UpsertPackTypeHandler } from './commands/upsert-pack-type.handler.js';
 import { PackTypesRepository } from './pack-types.repository.js';
-import { ProductCursor } from './product-cursor.js';
 import { ProductsController } from './products.controller.js';
 import { ProductsRepository } from './products.repository.js';
 import { ProductsService } from './products.service.js';
@@ -21,7 +21,7 @@ import { ProductsService } from './products.service.js';
   controllers: [ProductsController],
   providers: [
     ProductsService,
-    ProductCursor,
+    SignedCursor,
     ProductsRepository,
     PackTypesRepository,
     BarcodesRepository,
@@ -31,6 +31,7 @@ import { ProductsService } from './products.service.js';
     AddBarcodeHandler,
     RemoveBarcodeHandler,
   ],
-  exports: [CreateProductHandler, UpdateProductHandler, UpsertPackTypeHandler, AddBarcodeHandler, RemoveBarcodeHandler],
+  // ProductsService for the stock commands (pack type lookups, Phase C2).
+  exports: [ProductsService, CreateProductHandler, UpdateProductHandler, UpsertPackTypeHandler, AddBarcodeHandler, RemoveBarcodeHandler],
 })
 export class ProductsModule {}

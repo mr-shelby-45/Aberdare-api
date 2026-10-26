@@ -1,8 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { currentBusinessId, currentTx } from '../../database/tenant.js';
 
-export type MovementType = 'RECEIVE' | 'ADJUST' | 'COUNT' | 'CONVERT_OUT' | 'CONVERT_IN' | 'SALE';
-export type AdjustReason = 'DAMAGED' | 'EXPIRED' | 'LOST' | 'FOUND' | 'SUPPLIER_RETURN' | 'CORRECTION' | 'OTHER';
+export const MOVEMENT_TYPES = ['RECEIVE', 'ADJUST', 'COUNT', 'CONVERT_OUT', 'CONVERT_IN', 'SALE'] as const;
+export type MovementType = (typeof MOVEMENT_TYPES)[number];
+export const ADJUST_REASONS = ['DAMAGED', 'EXPIRED', 'LOST', 'FOUND', 'SUPPLIER_RETURN', 'CORRECTION', 'OTHER'] as const;
+export type AdjustReason = (typeof ADJUST_REASONS)[number];
 
 /** Who and when, for every movement (docs/phase-c-design.md section 3). */
 export interface MovementContext {
@@ -20,7 +22,15 @@ export interface MovementRow {
   movementType: MovementType;
   quantityAfter: number;
   reason?: AdjustReason | null;
+  // RECEIVE only. A canonical money string ("120.50"), never a number.
+  unitCost?: string | null;
+  note?: string | null;
+  reference?: string | null;
 }
+
+// The largest balance a pool may hold (docs/phase-c-design.md section 4): an
+// INTEGER guard with room to spare.
+export const MAX_BALANCE = 2_000_000_000;
 
 // All stock SQL. Every method runs on the current tenant transaction.
 // The business_id filters below are in addition to RLS, never instead of it
@@ -51,21 +61,25 @@ export class StockRepository {
   }
 
   /**
-   * Unconditional change (positive or negative), creating the balance row if
-   * it does not exist yet. One atomic statement. Returns the new quantity.
+   * Non-strict change (positive or negative), creating the balance row if it
+   * does not exist yet. One atomic statement. Returns the new quantity, or
+   * null if it would go above MAX_BALANCE (then nothing changed). The cap is
+   * part of the statement (decided in C2), so it holds under concurrency too.
+   * Lines are at most 1,000,000, so the sum in the check cannot overflow.
    */
   async changeBalance(
     locationId: string,
     packTypeId: string,
     delta: number,
-  ): Promise<number> {
+  ): Promise<number | null> {
     const rows = await currentTx().$queryRaw<{ quantity: number }[]>`
       INSERT INTO stock_balance (business_id, location_id, pack_type_id, quantity)
       VALUES (${currentBusinessId()}::uuid, ${locationId}::uuid, ${packTypeId}::uuid, ${delta}::int)
       ON CONFLICT (business_id, location_id, pack_type_id)
       DO UPDATE SET quantity = stock_balance.quantity + EXCLUDED.quantity, updated_at = now()
+       WHERE stock_balance.quantity + EXCLUDED.quantity <= ${MAX_BALANCE}::int
       RETURNING quantity`;
-    return rows[0].quantity;
+    return rows[0]?.quantity ?? null;
   }
 
   /**
@@ -82,6 +96,9 @@ export class StockRepository {
         movementType: movement.movementType,
         quantityAfter: movement.quantityAfter,
         reason: movement.reason ?? null,
+        unitCost: movement.unitCost ?? null,
+        note: movement.note ?? null,
+        reference: movement.reference ?? null,
         occurredAt: ctx.occurredAt,
         createdByMembershipId: ctx.createdByMembershipId,
         syncCommandId: ctx.syncCommandId,

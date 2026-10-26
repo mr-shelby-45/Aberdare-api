@@ -1,12 +1,18 @@
 import { Module } from '@nestjs/common';
+import { SignedCursor } from '../../common/paging/signed-cursor.js';
 import { StockIntegrityService } from './stock-integrity.service.js';
+import { StockReadsRepository } from './stock-reads.repository.js';
+import { StockReadsService } from './stock-reads.service.js';
+import { StockController } from './stock.controller.js';
 import { StockRepository } from './stock.repository.js';
 import { StockService } from './stock.service.js';
 
-// Phase B uses StockService.hasMovements (the units lock). Phase C1 adds the
-// integrity check; the stock commands come in C2 to C5.
+// The ledger and the stock reads. Phase B uses StockService.hasMovements (the
+// units lock); C1 adds the integrity check; C2 the reads. The stock commands
+// live in StockCommandsModule, above this one and the catalogue.
 @Module({
-  providers: [StockService, StockRepository, StockIntegrityService],
+  controllers: [StockController],
+  providers: [StockService, StockRepository, StockIntegrityService, StockReadsService, StockReadsRepository, SignedCursor],
   exports: [StockService, StockIntegrityService],
 })
 export class StockModule {}

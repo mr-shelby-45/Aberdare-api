@@ -4,13 +4,15 @@ import { CreateProductHandler } from '../products/commands/create-product.handle
 import { RemoveBarcodeHandler } from '../products/commands/remove-barcode.handler.js';
 import { UpdateProductHandler } from '../products/commands/update-product.handler.js';
 import { UpsertPackTypeHandler } from '../products/commands/upsert-pack-type.handler.js';
+import { AdjustStockHandler } from '../stock/commands/adjust-stock.handler.js';
+import { ReceiveStockHandler } from '../stock/commands/receive-stock.handler.js';
 import type { CommandHandler } from './command-handler.js';
 
-// The command types POST /v1/sync/commands accepts in Phase B: the five
-// catalogue commands. The spike's stock handlers wait for Phase C (the spike
-// step 3 test passes its own list).
+// The command types POST /v1/sync/commands accepts: the five catalogue
+// commands (Phase B) and the stock commands built so far (Phase C2: receive
+// and adjust).
 @Injectable()
-export class CatalogueHandlers {
+export class CommandHandlers {
   readonly all: readonly CommandHandler<object>[];
 
   constructor(
@@ -19,7 +21,9 @@ export class CatalogueHandlers {
     upsertPackType: UpsertPackTypeHandler,
     addBarcode: AddBarcodeHandler,
     removeBarcode: RemoveBarcodeHandler,
+    receiveStock: ReceiveStockHandler,
+    adjustStock: AdjustStockHandler,
   ) {
-    this.all = [createProduct, updateProduct, upsertPackType, addBarcode, removeBarcode];
+    this.all = [createProduct, updateProduct, upsertPackType, addBarcode, removeBarcode, receiveStock, adjustStock];
   }
 }
