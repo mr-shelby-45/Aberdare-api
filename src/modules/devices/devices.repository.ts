@@ -119,4 +119,17 @@ export class DevicesRepository {
   async touchLastSeen(deviceId: string, now: Date): Promise<void> {
     await currentTx().device.updateMany({ where: { id: deviceId }, data: { lastSeenAt: now } });
   }
+
+  /**
+   * Stamps last_sync_at unless it was stamped less than `minutes` ago. One
+   * atomic statement: concurrent calls each either write or not, never fail.
+   */
+  async stampSync(deviceId: string, now: Date, minutes: number): Promise<boolean> {
+    const count = await currentTx().$executeRaw`
+      UPDATE device SET last_sync_at = ${now}::timestamptz
+       WHERE id = ${deviceId}::uuid
+         AND business_id = ${currentBusinessId()}::uuid
+         AND (last_sync_at IS NULL OR last_sync_at < ${now}::timestamptz - make_interval(mins => ${minutes}::int))`;
+    return count === 1;
+  }
 }

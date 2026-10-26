@@ -266,10 +266,28 @@ model ChangeLog {
   // can remove a barcode it only knows by its code. NULL for other tables.
   rowKey     String?  @map("row_key")
   changedAt  DateTime @default(now()) @map("changed_at") @db.Timestamptz(6)
+  // Phase D1: the writing transaction's id. changes returns only rows of
+  // finished transactions, in (txid, id) order (docs/phase-d-design.md section 4).
+  // Read as text (txid::text); Prisma has no xid8 type.
+  txid       Unsupported("xid8") @default(dbgenerated("pg_current_xact_id()"))
   business   Business @relation(fields: [businessId], references: [id])
 
   @@index([businessId, id])
+  // Phase D1: GET /v1/sync/changes, (txid, id) order per business.
+  @@index([businessId, txid, id])
   @@map("change_log")
+}
+
+// Phase D1: the newest change_log position removed by the prune, for the
+// whole database (one row). A changes cursor older than it gets 410
+// SNAPSHOT_REQUIRED. Written only by change_log_prune().
+model ChangeLogHorizon {
+  id                Int                 @id @default(1) @db.SmallInt
+  prunedThroughTxid Unsupported("xid8") @map("pruned_through_txid")
+  prunedThroughId   BigInt              @map("pruned_through_id")
+  prunedAt          DateTime            @map("pruned_at") @db.Timestamptz(6)
+
+  @@map("change_log_horizon")
 }
 
 // Phase B: barcode (text, never a number) to one product and pack type,

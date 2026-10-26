@@ -30,6 +30,9 @@ const IsAddressOrRangeEach = () =>
 // Settings read from the environment and checked once at startup. A bad value
 // stops the app from starting (CLAUDE.md section 3). Only DATABASE_URL style
 // variables and these; no provider-specific settings.
+/** change_log retention (Phase D1). */
+export const CHANGE_LOG_RETENTION_DAYS = 30;
+
 export class AppConfig {
   @IsIn(APP_ENVS)
   appEnv!: (typeof APP_ENVS)[number];
@@ -86,6 +89,13 @@ export class AppConfig {
   @IsInt()
   @Min(1000)
   rateLimitWindowMs!: number;
+
+  // How long change_log rows are kept for GET /v1/sync/changes, in days
+  // (docs/phase-d-design.md section 3). A constant, not an environment
+  // setting (decided in D1); the prune passes the cut-off to SQL.
+  @IsInt()
+  @Min(1)
+  changeLogRetentionDays!: number;
 }
 
 /** Reads and validates the configuration. Throws, listing the bad settings, if invalid. */
@@ -104,6 +114,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     webhookAllowlistMode: env.WEBHOOK_IP_ALLOWLIST_MODE ?? 'log',
     rateLimitMax: toInt(env.RATE_LIMIT_MAX, 100),
     rateLimitWindowMs: toInt(env.RATE_LIMIT_WINDOW_MS, 60_000),
+    changeLogRetentionDays: CHANGE_LOG_RETENTION_DAYS,
   });
   const errors = validateSync(config);
   if (errors.length > 0) {

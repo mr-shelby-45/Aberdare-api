@@ -119,6 +119,24 @@ describe('step 4: migrations keep hand-written SQL', () => {
         { tgname: 'stock_balance_change_log', tbl: 'stock_balance' },
       ]);
       expect(found.functions).toEqual([{ proname: 'log_product_barcode_change' }, { proname: 'log_product_change' }]);
+      // Phase D1: the one function that deletes change_log rows, and the owner policies it relies on.
+      const prune = await asAdmin(async (c) => ({
+        functions: (
+          await c.query(
+            `SELECT p.proname, p.prosecdef AS security_definer,
+                    has_function_privilege('app_user', p.oid, 'EXECUTE') AS app_user_may_run,
+                    has_function_privilege('public', p.oid, 'EXECUTE') AS public_may_run
+               FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname LIKE 'change\\_log\\_%' ORDER BY 1`,
+          )
+        ).rows,
+        policies: (await c.query(`SELECT polname, polcmd FROM pg_policy WHERE polrelid = 'change_log'::regclass ORDER BY 1`)).rows,
+      }));
+      expect(prune.functions).toEqual([{ proname: 'change_log_prune', security_definer: true, app_user_may_run: true, public_may_run: false }]);
+      expect(prune.policies).toEqual([
+        { polname: 'owner_prune_delete', polcmd: 'd' },
+        { polname: 'owner_prune_read', polcmd: 'r' },
+        { polname: 'shop_only', polcmd: '*' },
+      ]);
       expect(found.extensions).toEqual([{ extname: 'pg_trgm' }]);
       const byName = new Map(found.indexes.map((i) => [i.indexname, i.indexdef]));
       expect(byName.get('location_one_default_per_business')).toMatch(/CREATE UNIQUE INDEX .* WHERE is_default/);

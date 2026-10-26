@@ -447,8 +447,9 @@ describe('B5: hardening', { timeout: 120_000 }, () => {
       approval: 'SELECT,INSERT', // plus UPDATE of the two consumption columns only (checked below; Phase C1)
       audit_log: 'SELECT,INSERT',
       business: 'SELECT', // plus INSERT of id, name, type only (checked below)
-      change_log: 'SELECT,INSERT',
-      device: 'SELECT,INSERT,UPDATE',
+      change_log: 'SELECT,INSERT', // pruned only through change_log_prune() (Phase D1)
+      change_log_horizon: 'SELECT', // written only by change_log_prune() (Phase D1)
+      device: 'SELECT,INSERT', // plus UPDATE of five columns only (checked below; Phase D1)
       device_membership: 'SELECT,INSERT,DELETE',
       location: 'SELECT,INSERT,UPDATE',
       membership: 'SELECT,INSERT,UPDATE',
@@ -470,7 +471,7 @@ describe('B5: hardening', { timeout: 120_000 }, () => {
           await c.query<{ table_name: string; privilege_type: string; columns: string }>(
             `SELECT table_name, privilege_type, string_agg(column_name, ',' ORDER BY column_name) AS columns
                FROM information_schema.column_privileges
-              WHERE grantee = 'app_user' AND table_schema = 'public' AND table_name IN ('approval', 'business', 'person')
+              WHERE grantee = 'app_user' AND table_schema = 'public' AND table_name IN ('approval', 'business', 'device', 'person')
               GROUP BY 1, 2 ORDER BY 1, 2`,
           )
         ).rows,
@@ -489,6 +490,18 @@ describe('B5: hardening', { timeout: 120_000 }, () => {
       { table_name: 'approval', privilege_type: 'UPDATE', columns: 'consumed_at,consumed_by_sync_command_id' },
       { table_name: 'business', privilege_type: 'INSERT', columns: 'id,name,type' },
       { table_name: 'business', privilege_type: 'SELECT', columns: 'created_at,id,name,type,updated_at' },
+      // Phase D1: table-wide UPDATE replaced by the columns the application writes.
+      {
+        table_name: 'device',
+        privilege_type: 'INSERT',
+        columns: 'business_id,created_at,id,is_shared,last_seen_at,last_sync_at,name,platform,push_token,registered_by_membership_id,secret_hash,status',
+      },
+      {
+        table_name: 'device',
+        privilege_type: 'SELECT',
+        columns: 'business_id,created_at,id,is_shared,last_seen_at,last_sync_at,name,platform,push_token,registered_by_membership_id,secret_hash,status',
+      },
+      { table_name: 'device', privilege_type: 'UPDATE', columns: 'is_shared,last_seen_at,last_sync_at,name,status' },
       { table_name: 'person', privilege_type: 'SELECT', columns: 'created_at,email,email_verified_at,id,phone,phone_verified_at' },
     ]);
     // Nothing is granted to PUBLIC on any table.

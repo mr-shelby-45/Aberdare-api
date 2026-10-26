@@ -62,6 +62,8 @@ export async function resetTables(): Promise<void> {
                 stock_balance, pack_type, location, product, business CASCADE`,
     ),
   );
+  // Phase D1: the prune horizon back to "nothing removed".
+  await asMigrator((c) => c.query(`UPDATE change_log_horizon SET pruned_through_txid = '0', pruned_through_id = 0`));
 }
 
 /**
