@@ -62,9 +62,34 @@ export class SalesRepository {
     });
   }
 
-  /** Who created the sale and its status, or null when this business has no such sale. */
-  async findForPayment(saleId: string): Promise<{ createdByMembershipId: string; status: string } | null> {
-    return currentTx().sale.findUnique({ where: { id: saleId }, select: { createdByMembershipId: true, status: true } });
+  /** Who created the sale, its status, number and location, or null when this business has no such sale. */
+  async findState(saleId: string): Promise<{ createdByMembershipId: string; status: string; saleNumber: number; locationId: string } | null> {
+    return currentTx().sale.findUnique({ where: { id: saleId }, select: { createdByMembershipId: true, status: true, saleNumber: true, locationId: true } });
+  }
+
+  /**
+   * Phase E5, sale.void: one conditional statement. Only a COMPLETED sale
+   * matches (and the voided_is_final policy makes a VOIDED one match nothing
+   * as well), so of any number of concurrent voids exactly one changes the row;
+   * the others wait for its row lock and then match nothing. False when
+   * nothing changed.
+   */
+  async markVoided(
+    saleId: string,
+    v: { voidedAt: Date; voidedByMembershipId: string; reason: string; note: string | null; approvalId: string | null; approvedByMembershipId: string },
+  ): Promise<boolean> {
+    const changed = await currentTx().$executeRaw`
+      UPDATE sale
+         SET status = 'VOIDED', voided_at = ${v.voidedAt}, voided_by_membership_id = ${v.voidedByMembershipId}::uuid,
+             void_reason = ${v.reason}, void_note = ${v.note}, void_approval_id = ${v.approvalId}::uuid,
+             void_approved_by_membership_id = ${v.approvedByMembershipId}::uuid
+       WHERE id = ${saleId}::uuid AND business_id = ${currentBusinessId()}::uuid AND status = 'COMPLETED'`;
+    return changed === 1;
+  }
+
+  /** The sale's lines: what a void puts back. */
+  async lines(saleId: string): Promise<{ packTypeId: string; quantity: number }[]> {
+    return currentTx().saleItem.findMany({ where: { saleId }, orderBy: { lineNo: 'asc' }, select: { packTypeId: true, quantity: true } });
   }
 
   /**

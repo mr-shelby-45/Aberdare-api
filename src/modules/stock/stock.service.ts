@@ -213,6 +213,24 @@ export class StockService {
     }
   }
 
+  /**
+   * Phase E5, sale.void: puts each line back at the sale's location, in the
+   * order given (the caller sorts them in the lock order), with one SALE_VOID
+   * movement per line pointing at the sale. Never refuses (an increase may
+   * fill a negative pool); only the MAX_BALANCE cap can stop it.
+   */
+  async returnForVoid(saleId: string, locationId: string, lines: { packTypeId: string; quantity: number }[], ctx: MovementContext): Promise<void> {
+    // One after another: queries on one transaction cannot run in parallel.
+    for (const line of lines) {
+      assertPositiveWholeNumber(line.quantity);
+      const quantityAfter = withinLimit(await this.repo.changeBalance(locationId, line.packTypeId, line.quantity));
+      await this.repo.insertMovement(
+        { locationId, packTypeId: line.packTypeId, quantityChange: line.quantity, movementType: 'SALE_VOID', quantityAfter, saleId },
+        ctx,
+      );
+    }
+  }
+
   /** For sale.create from sync: always records the sale, flags an oversell. */
   async decreaseForSale(
     locationId: string,

@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { currentBusinessId, currentTx } from '../../database/tenant.js';
 
-export const MOVEMENT_TYPES = ['RECEIVE', 'ADJUST', 'COUNT', 'CONVERT_OUT', 'CONVERT_IN', 'SALE'] as const;
+export const MOVEMENT_TYPES = ['RECEIVE', 'ADJUST', 'COUNT', 'CONVERT_OUT', 'CONVERT_IN', 'SALE', 'SALE_VOID'] as const;
 export type MovementType = (typeof MOVEMENT_TYPES)[number];
 export const ADJUST_REASONS = ['DAMAGED', 'EXPIRED', 'LOST', 'FOUND', 'SUPPLIER_RETURN', 'CORRECTION', 'OTHER'] as const;
 export type AdjustReason = (typeof ADJUST_REASONS)[number];

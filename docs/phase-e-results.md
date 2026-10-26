@@ -109,3 +109,25 @@ Filled in step by step. The full summary (see `docs/phase-e-design.md` section 1
 1. Changes collapse repeats of a record only within one page (Phase D3). My first draft of test 5 drained with pages of 3 and expected each sale once; it now checks "once" with one page and checks separately that pages of 3 end in the same state.
 2. While any transaction is held open, `changes` hands out nothing committed after it (the finished-transactions rule of D1), not only the held change. My first draft expected a later sale to arrive while the transaction was open.
 3. Payments know only payments, so the snapshot's payment pages get the window's visible sale ids from the sales module and query `sale_id = ANY(ids)` (no cross-module join). With item pages (by id, filtered by date) this is fine for 30 days of a normal shop; measure for a busy wholesaler in Phase H (`docs/architecture.md` open item 59).
+
+## E5: Void and approvals (passed)
+
+**Result:** new 11, Phase E cumulative 46 (`test/e5-void.spec.ts` plus the E1 to E4 files), all passing in the gate run, run together with `test/c5-approvals.spec.ts` because the approval code changed (6 files, 56 of 56). The concurrency tests (20 concurrent voids of one sale, 20 voids sharing one approval, an attach racing a void 10 times) passed 5 runs in a row. The full suite passed: 36 files, 401 of 401 (619.1 s). Lint, type-check, build and the drift check were clean. No schema change and no migration.
+
+**Built (approved by Ian on 2026-10-26, with the eight recommended answers):**
+- `sale.void` (`VoidSaleHandler`, `SalesService.void()`): dispatcher permission `sales.create`, the real check inside (answer 4): with `sales.void` the member voids and any `approval_id` is ignored and not used; without it an approval is needed (`PERMISSION_DENIED` without one). Order (answer 5): permission rule, the sale (`SALE_NOT_FOUND` for unknown, another business's, and for members without `sales.void` another member's sale even with an approval, answer 1; `SALE_ALREADY_VOIDED`), the approval (`APPROVAL_INVALID`), one conditional `UPDATE sale ... WHERE status = 'COMPLETED'`, payments `REVERSED` (`PaymentsService.reverseForSale()`), one `SALE_VOID` movement per item at the sale's location in the lock order (`StockService.returnForVoid()`, never refuses; the `MAX_BALANCE` cap is `VALIDATION_FAILED`, answer 8), then the audit row `sale.voided`.
+- `voided_at` and the movements' `occurred_at` are the command's `occurred_at` (answer 2). `paid_total` and `balance_due` stay as they were (answer 3).
+- Approvals: `SALE_VOID` purpose (`APPROVAL_PURPOSES`), `GET /v1/stock/approvers?purpose=` (default `STOCK_CONVERT`, unknown `422`, answer 7), `APPROVAL_NOT_NEEDED` and eligibility by the purpose's permission, and `ApprovalsService.use(purpose, ...)` replacing `useForConversion()` (stock convert passes `STOCK_CONVERT`). The lock counters stay per approver, shared by both purposes. The `APPROVAL_NOT_NEEDED` message is now purpose-neutral ("You can do this yourself; no approval is needed.").
+- `MOVEMENT_TYPES` gains `SALE_VOID`, so `GET /v1/stock/movements?type=SALE_VOID` works.
+
+**Mutations (each reverted and checked with `cmp`; no `MUTATION` marker left):**
+- Design 6a, void without `status = 'COMPLETED'` (answer 6): with the E1 policy `voided_is_final` in place, test 2 still passed: the policy alone makes a second void match zero rows. With the policy also dropped in `aberdare_test` only, the race test failed (more than one void accepted). The policy was then re-created with the E1 SQL; an md5 of the sale table's policies from `pg_policies` was `0f9a6143ae0ec2c3f7c0640ac622d967` before and after. The sequential case of test 2 passed even then, because the early status read answers `SALE_ALREADY_VOIDED`; only the forced race reaches the statement.
+- Design 6b, no stock returned: test 1 failed.
+- Design 7, an attendant voids without an approval (`canVoid` always true): both test 3 cases failed.
+- Design 8, the approval purpose not checked at use: test 4 failed.
+- Extra, payments left `RECORDED`: test 1 failed.
+
+**Things to know:**
+1. Two layers stop a double void: the conditional `UPDATE` and the restrictive `voided_is_final` policy. A test of one alone needs the other removed; dropping a policy is only ever done in `aberdare_test`, with an md5 check of `pg_policies` after re-creating it.
+2. My first draft of test 1 expected `balance_due` 4300.00; every line of the test helper is priced 100.00, so the sale is 600.00 with 300.00 due. The expectation was wrong, not the code.
+3. The race tests hold the row (`sale` or `approval`) `FOR UPDATE` in an open admin transaction and wait for lock waiters, like E3.

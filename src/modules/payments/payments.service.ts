@@ -62,6 +62,11 @@ export class PaymentsService {
     return { duplicates };
   }
 
+  /** Phase E5, sale.void: the sale's payments become REVERSED; returns how many. */
+  async reverseForSale(saleId: string): Promise<number> {
+    return this.repo.reverseForSale(saleId);
+  }
+
   // Reads (Phase E4). The sales module decides which sales a reader may see;
   // these only fetch the payments of the sales it names, or by id.
 

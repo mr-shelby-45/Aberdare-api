@@ -1,15 +1,18 @@
 import { Injectable } from '@nestjs/common';
 import { MAX_CENTS, fromCents, toCents } from '../../common/money/cents.js';
 import { isNumericOverflow, uniqueViolationConstraint } from '../../database/db-errors.js';
+import { ApprovalsService } from '../approvals/approvals.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { LocationsService } from '../locations/locations.service.js';
 import { PaymentsService, type ValidPayment, paymentsTotal } from '../payments/payments.service.js';
 import type { PackTypeForSale } from '../products/pack-types.repository.js';
 import { ProductsService } from '../products/products.service.js';
 import { inLockOrder } from '../stock/lock-order.js';
+import { StockError } from '../stock/stock.error.js';
 import { StockService } from '../stock/stock.service.js';
 import type { AttachPaymentDto } from './dto/attach-payment.dto.js';
 import type { CreateSaleDto, SaleLineDto } from './dto/create-sale.dto.js';
+import type { VoidSaleDto } from './dto/void-sale.dto.js';
 import { type InvalidSaleLine, type SaleLineReason, SalesError } from './sales.error.js';
 import { SalesRepository } from './sales.repository.js';
 
@@ -45,6 +48,22 @@ export interface PaymentsAttached {
   flags: SaleFlag[];
 }
 
+/** Who voids: canVoid when the member holds sales.void; otherwise an approval is needed. */
+export interface VoidActor {
+  membershipId: string;
+  deviceId: string;
+  canVoid: boolean;
+  occurredAt: Date;
+  receivedAt: Date;
+  syncCommandId: string;
+}
+
+export interface SaleVoided {
+  saleId: string;
+  voidedAt: Date;
+  approvedByMembershipId: string;
+}
+
 export interface SaleCreated {
   saleId: string;
   saleNumber: number;
@@ -68,6 +87,7 @@ export class SalesService {
     private readonly locations: LocationsService,
     private readonly audit: AuditService,
     private readonly payments: PaymentsService,
+    private readonly approvals: ApprovalsService,
   ) {}
 
   /**
@@ -206,7 +226,7 @@ export class SalesService {
    */
   async attachPayments(dto: AttachPaymentDto, actor: PaymentActor): Promise<PaymentsAttached> {
     const payments = this.validPayments(dto.payments);
-    const sale = await this.repo.findForPayment(dto.sale_id);
+    const sale = await this.repo.findState(dto.sale_id);
     if (!sale || (!actor.seesAllSales && sale.createdByMembershipId !== actor.membershipId)) {
       throw new SalesError('SALE_NOT_FOUND', 'Sale not found.');
     }
@@ -241,6 +261,82 @@ export class SalesService {
     return { paidTotal: paid.paidTotal, balanceDue: paid.balanceDue, flags };
   }
 
+  /**
+   * sale.void (docs/phase-e-design.md section 5; order decided in E5): the
+   * permission rule, then the sale (another member's is SALE_NOT_FOUND for a
+   * member without sales.void, even with an approval), then the approval, then
+   * one conditional UPDATE, the payments reversed, the stock put back in the
+   * lock order, and the audit row. All in the command's savepoint: any
+   * failure undoes everything, including the use of the approval.
+   */
+  async void(dto: VoidSaleDto, actor: VoidActor): Promise<SaleVoided> {
+    if (!actor.canVoid && dto.approval_id === undefined) {
+      // The dispatcher's own wording for a missing permission.
+      throw new SalesError('PERMISSION_DENIED', 'You are not allowed to do this');
+    }
+    const note = cleanText(dto.note);
+    const sale = await this.repo.findState(dto.sale_id);
+    if (!sale || (!actor.canVoid && sale.createdByMembershipId !== actor.membershipId)) {
+      throw new SalesError('SALE_NOT_FOUND', 'Sale not found.');
+    }
+    if (sale.status !== 'COMPLETED') throw alreadyVoided();
+
+    // A member with sales.void approves their own void; any approval_id is ignored and stays unused.
+    let approvedBy = actor.membershipId;
+    let approvalId: string | null = null;
+    if (!actor.canVoid) {
+      const approver = await this.approvals.use('SALE_VOID', {
+        approvalId: dto.approval_id!,
+        requesterMembershipId: actor.membershipId,
+        deviceId: actor.deviceId,
+        syncCommandId: actor.syncCommandId,
+        occurredAt: actor.occurredAt,
+        receivedAt: actor.receivedAt,
+      });
+      if (!approver) throw new SalesError('APPROVAL_INVALID', 'This approval cannot be used. Ask for a new one.');
+      approvedBy = approver;
+      approvalId = dto.approval_id!;
+    }
+
+    // voided_at is the phone's time of the void, like the sale's own occurred_at (decided in E5).
+    const voided = await this.repo.markVoided(dto.sale_id, {
+      voidedAt: actor.occurredAt,
+      voidedByMembershipId: actor.membershipId,
+      reason: dto.reason,
+      note,
+      approvalId,
+      approvedByMembershipId: approvedBy,
+    });
+    // A concurrent void committed between the read and the update.
+    if (!voided) throw alreadyVoided();
+
+    await this.payments.reverseForSale(dto.sale_id);
+    const lines = await this.repo.lines(dto.sale_id);
+    const packs = await this.products.packTypesForSale([...new Set(lines.map((l) => l.packTypeId))]);
+    const ordered = inLockOrder(lines.map((l) => ({ ...l, pack_type_id: l.packTypeId })), packs);
+    try {
+      await this.stock.returnForVoid(dto.sale_id, sale.locationId, ordered, {
+        occurredAt: actor.occurredAt,
+        createdByMembershipId: actor.membershipId,
+        syncCommandId: actor.syncCommandId,
+      });
+    } catch (err) {
+      // Only the MAX_BALANCE cap can stop an increase.
+      if (err instanceof StockError) throw new SalesError('VALIDATION_FAILED', err.message);
+      throw err;
+    }
+
+    // Ids, the number and the reason enum: never the note.
+    await this.audit.record({
+      action: 'sale.voided',
+      targetType: 'sale',
+      targetId: dto.sale_id,
+      metadata: { sale_id: dto.sale_id, sale_number: sale.saleNumber, reason: dto.reason, approver_membership_id: approvedBy, approval_id: approvalId },
+      actorMembershipId: actor.membershipId,
+    });
+    return { saleId: dto.sale_id, voidedAt: actor.occurredAt, approvedByMembershipId: approvedBy };
+  }
+
   private validPayments(payments: Parameters<PaymentsService['validate']>[0]): ValidPayment[] {
     const { valid, invalid } = this.payments.validate(payments);
     if (invalid.length > 0) {
@@ -269,6 +365,10 @@ function cleanText(value: string | null | undefined): string | null {
 /** The flags that apply, in the design's order (the first is the command's reason). */
 function inFlagOrder(raised: Partial<Record<SaleFlag, boolean>>): SaleFlag[] {
   return FLAG_ORDER.filter((f) => raised[f] === true);
+}
+
+function alreadyVoided(): SalesError {
+  return new SalesError('SALE_ALREADY_VOIDED', 'This sale was already voided.');
 }
 
 function voided(): SalesError {

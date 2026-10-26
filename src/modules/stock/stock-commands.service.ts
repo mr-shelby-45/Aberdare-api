@@ -169,7 +169,7 @@ export class StockCommandsService {
     if (!(await this.locations.findById(dto.location_id))) throw locationNotFound();
     let approvedByMembershipId: string | undefined;
     if (approval) {
-      const approver = await this.approvals.useForConversion({
+      const approver = await this.approvals.use('STOCK_CONVERT', {
         approvalId: approval.approvalId,
         requesterMembershipId: actor.membershipId,
         deviceId: approval.deviceId,

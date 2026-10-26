@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Post, Query, Req } from '@nestjs/common';
 import { RouteConfig } from '@nestjs/platform-fastify';
 import { OwnTransactions } from '../../common/auth/own-transactions.decorator.js';
 import type { AuthedRequest } from '../../common/auth/request-auth.js';
@@ -6,6 +6,7 @@ import { RequirePermission } from '../../common/auth/require-permission.decorato
 import { AUTH_ROUTE_RATE_LIMIT } from '../../common/http/auth-rate-limit.js';
 import { ApprovalsService } from './approvals.service.js';
 import { CreateApprovalDto } from './dto/create-approval.dto.js';
+import { ListApproversQueryDto } from './dto/list-approvers-query.dto.js';
 
 // Approvals (docs/phase-c-design.md section 6). Any active member with
 // stock.view may ask. The request log records the route pattern only and
@@ -16,8 +17,8 @@ export class ApprovalsController {
 
   @Get('approvers')
   @RequirePermission('stock.view')
-  async approvers(@Req() request: AuthedRequest) {
-    const list = await this.approvals.listApprovers(request.session!.membership.id);
+  async approvers(@Req() request: AuthedRequest, @Query() query: ListApproversQueryDto) {
+    const list = await this.approvals.listApprovers(request.session!.membership.id, query.purpose ?? 'STOCK_CONVERT');
     return { approvers: list.map((a) => ({ membership_id: a.membershipId, display_name: a.displayName, role_preset: a.rolePreset })) };
   }
 

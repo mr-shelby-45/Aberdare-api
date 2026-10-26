@@ -7,7 +7,10 @@ export type SalesErrorCode =
   | 'INVALID_LINES'
   | 'INVALID_PAYMENTS'
   | 'SALE_NOT_FOUND'
-  | 'SALE_VOIDED';
+  | 'SALE_VOIDED'
+  | 'SALE_ALREADY_VOIDED'
+  | 'PERMISSION_DENIED'
+  | 'APPROVAL_INVALID';
 
 export type SaleLineReason = 'PACK_TYPE_NOT_FOUND' | 'QUANTITY_INVALID' | 'PRICE_INVALID';
 

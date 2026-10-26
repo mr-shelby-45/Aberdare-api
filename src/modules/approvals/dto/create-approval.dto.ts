@@ -1,4 +1,5 @@
 import { IsIn, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
+import { APPROVAL_PURPOSES, type ApprovalPurpose } from '../approvals.repository.js';
 
 // POST /v1/stock/approvals (docs/phase-c-design.md section 6). The PIN is
 // only checked against the approver's hash; it is never stored or logged
@@ -12,6 +13,7 @@ export class CreateApprovalDto {
   @MaxLength(64)
   approver_pin!: string;
 
-  @IsIn(['STOCK_CONVERT'])
-  purpose!: 'STOCK_CONVERT';
+  // SALE_VOID since Phase E5.
+  @IsIn(APPROVAL_PURPOSES)
+  purpose!: ApprovalPurpose;
 }

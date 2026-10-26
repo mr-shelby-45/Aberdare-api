@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PasswordHasher } from '../../common/auth/password-hasher.js';
-import { type RolePreset, effectivePermissions } from '../../common/auth/permissions.js';
+import { type Permission, type RolePreset, effectivePermissions } from '../../common/auth/permissions.js';
 import { ApiError } from '../../common/errors/api.error.js';
 import { Clock } from '../../common/time/clock.js';
 import { TenantRunner } from '../../database/tenant.js';
@@ -14,6 +14,12 @@ const VALID_MINUTES = 15;
 const LOCK_EVERY = 5;
 const LOCK_MINUTES = 15;
 
+/** The permission an approver needs, and a caller who needs no approval has, per purpose (Phase E5 adds SALE_VOID). */
+const PURPOSE_PERMISSION: Record<ApprovalPurpose, Permission> = {
+  STOCK_CONVERT: 'stock.convert',
+  SALE_VOID: 'sales.void',
+};
+
 /** Who is asking, all from the token and the live session. */
 export interface ApprovalCaller {
   businessId: string;
@@ -22,8 +28,10 @@ export interface ApprovalCaller {
   permissions: ReadonlySet<string>;
 }
 
-// Approvals (Phase C5): an attendant gets a short-lived approval from a
-// manager's or owner's PIN, then uses it once to convert stock.
+// Approvals (Phase C5, extended in E5): an attendant gets a short-lived
+// approval from a manager's or owner's PIN, then uses it once to convert
+// stock (STOCK_CONVERT) or to void a sale (SALE_VOID). The approver's lock
+// counters are shared by both purposes.
 @Injectable()
 export class ApprovalsService {
   constructor(
@@ -35,11 +43,11 @@ export class ApprovalsService {
     private readonly clock: Clock,
   ) {}
 
-  /** GET /v1/stock/approvers: active members other than the caller who can convert. Names only. */
-  async listApprovers(callerMembershipId: string): Promise<{ membershipId: string; displayName: string; rolePreset: string }[]> {
+  /** GET /v1/stock/approvers: active members other than the caller who could approve this purpose. Names only. */
+  async listApprovers(callerMembershipId: string, purpose: ApprovalPurpose): Promise<{ membershipId: string; displayName: string; rolePreset: string }[]> {
     const members = await this.staff.listActive();
     return members
-      .filter((m) => m.id !== callerMembershipId && canConvert(m.rolePreset, m.extraPermissions))
+      .filter((m) => m.id !== callerMembershipId && canApprove(purpose, m.rolePreset, m.extraPermissions))
       .map((m) => ({ membershipId: m.id, displayName: m.displayName, rolePreset: m.rolePreset }));
   }
 
@@ -54,8 +62,8 @@ export class ApprovalsService {
    * someone who cannot approve locks nobody (decided in C5).
    */
   async mint(caller: ApprovalCaller, dto: CreateApprovalDto): Promise<{ approvalId: string; validUntil: Date }> {
-    if (caller.permissions.has('stock.convert')) {
-      throw new ApiError(422, 'APPROVAL_NOT_NEEDED', 'You can convert stock yourself; no approval is needed.');
+    if (caller.permissions.has(PURPOSE_PERMISSION[dto.purpose])) {
+      throw new ApiError(422, 'APPROVAL_NOT_NEEDED', 'You can do this yourself; no approval is needed.');
     }
     const now = this.clock.now();
     const approver = await this.tenants.run(caller.businessId, () => this.staff.findApproverState(dto.approver_membership_id));
@@ -64,7 +72,7 @@ export class ApprovalsService {
       approver.status === 'ACTIVE' &&
       approver.id !== caller.membershipId &&
       approver.pinHash !== null &&
-      canConvert(approver.rolePreset, approver.extraPermissions);
+      canApprove(dto.purpose, approver.rolePreset, approver.extraPermissions);
     const locked = eligible && approver.approvalLockedUntil !== null && approver.approvalLockedUntil > now;
     if (!eligible || locked) {
       await this.hasher.dummyVerify(dto.approver_pin);
@@ -85,7 +93,7 @@ export class ApprovalsService {
         });
       }
       if (!attempt.granted) return null;
-      const purpose: ApprovalPurpose = dto.purpose;
+      const purpose = dto.purpose;
       const approval = await this.repo.insert({
         purpose,
         requesterMembershipId: caller.membershipId,
@@ -107,13 +115,14 @@ export class ApprovalsService {
   }
 
   /**
-   * stock.convert by a member without stock.convert: uses the approval once
-   * (one atomic statement bound to the requester, the device and the time
-   * limits), then re-checks the approver live. Returns the approver, or null
-   * for every kind of failure. Runs in the command's savepoint, so a
-   * conversion that fails afterwards leaves the approval unused.
+   * stock.convert or sale.void by a member without the permission: uses the
+   * approval once (one atomic statement bound to the purpose, the requester,
+   * the device and the time limits), then re-checks the approver live for
+   * that purpose. Returns the approver, or null for every kind of failure.
+   * Runs in the command's savepoint, so a command that fails afterwards
+   * leaves the approval unused.
    */
-  async useForConversion(use: {
+  async use(purpose: ApprovalPurpose, use: {
     approvalId: string;
     requesterMembershipId: string;
     deviceId: string;
@@ -121,17 +130,17 @@ export class ApprovalsService {
     occurredAt: Date;
     receivedAt: Date;
   }): Promise<string | null> {
-    const approverId = await this.repo.consume({ ...use, purpose: 'STOCK_CONVERT' });
+    const approverId = await this.repo.consume({ ...use, purpose });
     if (!approverId) return null;
     const approver = await this.staff.findForSession(approverId);
-    if (!approver || approver.status !== 'ACTIVE' || !canConvert(approver.rolePreset, approver.extraPermissions)) return null;
+    if (!approver || approver.status !== 'ACTIVE' || !canApprove(purpose, approver.rolePreset, approver.extraPermissions)) return null;
     return approverId;
   }
 }
 
-/** The live rule: preset plus extras, where an attendant never gets stock.convert. */
-function canConvert(rolePreset: string, extras: readonly string[] | null): boolean {
-  return effectivePermissions(rolePreset as RolePreset, extras).has('stock.convert');
+/** The live rule: preset plus extras (an attendant never gets stock.convert) hold the purpose's permission. */
+function canApprove(purpose: ApprovalPurpose, rolePreset: string, extras: readonly string[] | null): boolean {
+  return effectivePermissions(rolePreset as RolePreset, extras).has(PURPOSE_PERMISSION[purpose]);
 }
 
 function denied(): ApiError {

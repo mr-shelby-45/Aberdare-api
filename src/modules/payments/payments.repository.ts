@@ -81,6 +81,13 @@ export class PaymentsRepository {
     return rows[0]?.id ?? null;
   }
 
+  /** Phase E5, sale.void: every RECORDED payment of the sale becomes REVERSED (its code stays used). */
+  async reverseForSale(saleId: string): Promise<number> {
+    return currentTx().$executeRaw`
+      UPDATE payment SET status = 'REVERSED'
+       WHERE business_id = ${currentBusinessId()}::uuid AND sale_id = ${saleId}::uuid AND status = 'RECORDED'`;
+  }
+
   /** Payments of these sales (Phase E4 reads). */
   async forSales(saleIds: string[]): Promise<PaymentReadRow[]> {
     if (saleIds.length === 0) return [];

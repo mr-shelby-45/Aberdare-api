@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { currentBusinessId, currentTx } from '../../database/tenant.js';
 
-export type ApprovalPurpose = 'STOCK_CONVERT';
+export const APPROVAL_PURPOSES = ['STOCK_CONVERT', 'SALE_VOID'] as const;
+export type ApprovalPurpose = (typeof APPROVAL_PURPOSES)[number];
 
 // approval SQL (docs/phase-c-design.md sections 3 and 6), on the current
 // tenant transaction. app_user may update only consumed_at and
