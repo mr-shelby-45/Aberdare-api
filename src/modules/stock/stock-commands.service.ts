@@ -4,6 +4,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { LocationsService } from '../locations/locations.service.js';
 import { ProductsService } from '../products/products.service.js';
 import type { AdjustStockDto } from './dto/adjust-stock.dto.js';
+import type { ConvertStockDto } from './dto/convert-stock.dto.js';
 import type { CountLineDto, CountStockDto } from './dto/count-stock.dto.js';
 import type { ReceiveLineDto, ReceiveStockDto } from './dto/receive-stock.dto.js';
 import { type InvalidLine, StockError, type StockLineReason } from './stock.error.js';
@@ -145,6 +146,37 @@ export class StockCommandsService {
       actorMembershipId: actor.membershipId,
     });
     return { lines, flagged: lines.some((l) => l.quantityAfter < 0) };
+  }
+
+  /**
+   * stock.convert for a member with stock.convert (C4): the creator is the
+   * approver. Archived locations and pack types are allowed. The pack type
+   * rules, the strict source and the lock order are in StockService.convert.
+   */
+  async convert(
+    dto: ConvertStockDto,
+    actor: StockActor,
+  ): Promise<{ fromAfter: number; toAfter: number; unitsAdded: number; approvedByMembershipId: string }> {
+    const note = cleanText(dto.note);
+    if (!(await this.locations.findById(dto.location_id))) throw locationNotFound();
+    const r = await this.stock.convert(dto.location_id, dto.from_pack_type_id, dto.to_pack_type_id, dto.quantity, movementContext(actor), { note });
+    // Ids and numbers only: never the note.
+    await this.audit.record({
+      action: 'stock.converted',
+      targetType: 'location',
+      targetId: dto.location_id,
+      metadata: {
+        location_id: dto.location_id,
+        from_pack_type_id: dto.from_pack_type_id,
+        to_pack_type_id: dto.to_pack_type_id,
+        quantity: dto.quantity,
+        units_added: r.unitsAdded,
+        approved_by_membership_id: r.approvedByMembershipId,
+        approval_id: null,
+      },
+      actorMembershipId: actor.membershipId,
+    });
+    return r;
   }
 
   /** stock.adjust: archived locations and pack types are allowed, so old stock can be cleaned up. */

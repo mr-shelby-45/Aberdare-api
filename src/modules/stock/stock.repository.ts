@@ -121,6 +121,8 @@ export class StockRepository {
     inMovementId: string;
     createdByMembershipId: string;
     approvedByMembershipId: string;
+    // The approval an attendant used (C5); null when the member had stock.convert.
+    approvalId?: string | null;
   }): Promise<string> {
     const row = await currentTx().stockConversion.create({
       data: { businessId: currentBusinessId(), ...conversion },

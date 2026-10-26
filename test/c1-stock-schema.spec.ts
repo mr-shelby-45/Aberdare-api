@@ -259,7 +259,7 @@ describe('C1: stock schema, triggers and integrity', { timeout: 120_000 }, () =>
     for (const s of [a, b]) {
       await tenants().run(s.biz, () => stock.receive(s.loc, s.piece, 10, ctx(s)));
       await tenants().run(s.biz, () => stock.receive(s.loc, s.carton, 2, ctx(s)));
-      await tenants().run(s.biz, () => stock.convertOne(s.loc, s.carton, s.piece, ctx(s)));
+      await tenants().run(s.biz, () => stock.convert(s.loc, s.carton, s.piece, 1, ctx(s)));
     }
     expect(await tenants().run(a.biz, () => integrity.check())).toEqual([]);
     expect(await tenants().run(b.biz, () => integrity.check())).toEqual([]);

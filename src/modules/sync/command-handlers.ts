@@ -5,13 +5,14 @@ import { RemoveBarcodeHandler } from '../products/commands/remove-barcode.handle
 import { UpdateProductHandler } from '../products/commands/update-product.handler.js';
 import { UpsertPackTypeHandler } from '../products/commands/upsert-pack-type.handler.js';
 import { AdjustStockHandler } from '../stock/commands/adjust-stock.handler.js';
+import { ConvertStockHandler } from '../stock/commands/convert-stock.handler.js';
 import { CountStockHandler } from '../stock/commands/count-stock.handler.js';
 import { ReceiveStockHandler } from '../stock/commands/receive-stock.handler.js';
 import type { CommandHandler } from './command-handler.js';
 
 // The command types POST /v1/sync/commands accepts: the five catalogue
 // commands (Phase B) and the stock commands built so far (Phase C2: receive
-// and adjust; C3: count).
+// and adjust; C3: count; C4: convert).
 @Injectable()
 export class CommandHandlers {
   readonly all: readonly CommandHandler<object>[];
@@ -25,7 +26,8 @@ export class CommandHandlers {
     receiveStock: ReceiveStockHandler,
     adjustStock: AdjustStockHandler,
     countStock: CountStockHandler,
+    convertStock: ConvertStockHandler,
   ) {
-    this.all = [createProduct, updateProduct, upsertPackType, addBarcode, removeBarcode, receiveStock, adjustStock, countStock];
+    this.all = [createProduct, updateProduct, upsertPackType, addBarcode, removeBarcode, receiveStock, adjustStock, countStock, convertStock];
   }
 }

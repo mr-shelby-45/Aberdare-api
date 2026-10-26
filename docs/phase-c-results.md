@@ -86,3 +86,21 @@ Filled in step by step. The full summary (see `docs/phase-c-design.md` section 1
 
 **Things to know:**
 1. Timing tests of the password hasher fail when the machine is overloaded (see the first full run). They are not weakened; a full run that takes several times longer than usual is rerun.
+
+## C4: Convert for managers and owners (passed)
+
+**Result:** new 8, Phase C cumulative 37 (C1 to C3 and `test/c4-stock-convert.spec.ts`), all passing in the gate run. Both concurrency tests (C4 test 4: 20 conversions against 5 cartons with 20 piece sales at once; case-to-carton and carton-to-piece conversions with sales at once) passed 5 runs in a row. The mechanically changed spike step 2 and C1 files passed once on their own (21 of 21). The full suite passed once: 23 files, 307 of 307 (247.2 s), with lint, type-check, build and the drift check clean.
+
+**Built (approved by Ian on 2026-10-26, with the four recommended answers):** no migration (C1 had the conversion columns).
+- `stock.convert` (`ConvertStockHandler`, `StockCommandsService.convert()`, `StockService.convert()`): `quantity` larger packs (1 to 100,000) become `quantity x ratio` smaller packs of the same product, at one location, in one transaction: strict source decrease, `CONVERT_OUT`, capped target increase, `CONVERT_IN`, one `stock_conversion` row with creator and approver. Larger pack first (the lock order). Reasons: `LOCATION_NOT_FOUND`, `PACK_TYPE_NOT_FOUND`, `PACK_TYPES_NOT_CONVERTIBLE`, `CONVERSION_RATIO_INVALID`, `STOCK_INSUFFICIENT`, `VALIDATION_FAILED` (over the cap, or a malformed payload). Archived locations and pack types are allowed.
+- Answer 1: the dispatcher permission is `stock.view`; the handler requires `stock.convert` itself (C5 adds "or a valid approval").
+- Answer 2: the spike's `convertOne` is replaced; spike step 2 and C1 call `convert(…, 1, …)`, step 2 expects `PACK_TYPES_NOT_CONVERTIBLE` (was `STOCK_CONVERSION_INVALID`) and reads `unitsAdded` (was `toQuantity`). Same refusal, same proofs.
+- Answer 3: `approval_id` is accepted now; a member with `stock.convert` has it ignored and not consumed; an attendant is `PERMISSION_DENIED` until C5.
+- Answer 4: `stock.convert` written into an attendant's extras as the superuser (test setup) is still refused by the live check.
+- Audit `stock.converted` (location, from, to, quantity, units added, approver, `approval_id: null`), never the note.
+
+**Proof the tests catch mistakes:**
+- Mutation 4, no strict guard on the source (the non-strict statement instead): C4 test 3 failed (the conversion was `ACCEPTED` with one carton for two). Reverted; `cmp` identical.
+
+**Things to know:**
+1. The first C4 run failed one test on its own setup (a superuser `INSERT` of a balance row the first conversion had already created); the setup now raises the existing row with a matching movement.

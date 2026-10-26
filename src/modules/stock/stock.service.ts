@@ -24,7 +24,10 @@ export interface ConversionResult {
   conversionId: string;
   outMovementId: string;
   inMovementId: string;
-  toQuantity: number;
+  fromAfter: number;
+  toAfter: number;
+  unitsAdded: number;
+  approvedByMembershipId: string;
 }
 
 // Stock rules. Every method must run inside TenantRunner.run(), and writes the
@@ -184,59 +187,65 @@ export class StockService {
   }
 
   /**
-   * Break bulk: one pack of fromPackType becomes N of toPackType. Strict. The
-   * creator is also the approver here (a manager converting for themselves);
-   * C4 and C5 add the real stock.convert and approvals.
+   * Break bulk (docs/phase-c-design.md section 5): `quantity` packs of the
+   * larger pack type become quantity x ratio of the smaller one, at one
+   * location, in one transaction. Both pack types must be of the same product,
+   * larger to smaller, with an even ratio. The source decrease is strict. The
+   * larger pack is changed first: the lock order of every multi-balance
+   * operation (docs/architecture.md section 6). The approver defaults to the
+   * creator (a manager or owner converting for themselves); C5 passes the
+   * approver and approval of an attendant's conversion.
    */
-  async convertOne(
+  async convert(
     locationId: string,
     fromPackTypeId: string,
     toPackTypeId: string,
+    quantity: number,
     ctx: MovementContext,
+    options: { note?: string | null; approvedByMembershipId?: string; approvalId?: string | null } = {},
   ): Promise<ConversionResult> {
     const actor = ctx.createdByMembershipId;
-    if (!actor) throw new Error('StockService.convertOne: a conversion needs the acting membership');
+    if (!actor) throw new Error('StockService.convert: a conversion needs the acting membership');
+    assertPositiveWholeNumber(quantity);
     // Queries on one transaction run one after another, so no Promise.all.
     const from = await this.repo.findPackType(fromPackTypeId);
     const to = await this.repo.findPackType(toPackTypeId);
-    if (
-      !from ||
-      !to ||
-      from.productId !== to.productId ||
-      from.unitsPerPack <= to.unitsPerPack ||
-      from.unitsPerPack % to.unitsPerPack !== 0
-    ) {
+    if (!from || !to) throw new StockError('PACK_TYPE_NOT_FOUND', 'Pack type not found.');
+    if (from.productId !== to.productId || from.unitsPerPack <= to.unitsPerPack) {
       throw new StockError(
-        'STOCK_CONVERSION_INVALID',
-        'These pack types cannot be converted into each other',
+        'PACK_TYPES_NOT_CONVERTIBLE',
+        'Only a larger pack of a product can be broken into a smaller pack of the same product.',
       );
     }
-    const toQuantity = from.unitsPerPack / to.unitsPerPack;
+    if (from.unitsPerPack % to.unitsPerPack !== 0) {
+      throw new StockError('CONVERSION_RATIO_INVALID', 'The larger pack does not divide evenly into the smaller pack.');
+    }
+    const unitsAdded = quantity * (from.unitsPerPack / to.unitsPerPack);
+    if (unitsAdded > MAX_BALANCE) withinLimit(null);
+    const note = options.note ?? null;
 
-    const left = await this.repo.decreaseIfAvailable(
-      locationId,
-      fromPackTypeId,
-      1,
-    );
-    if (left === null) {
-      throw new StockError('STOCK_INSUFFICIENT', 'No pack left to break');
+    const fromAfter = await this.repo.decreaseIfAvailable(locationId, fromPackTypeId, quantity);
+    if (fromAfter === null) {
+      throw new StockError('STOCK_INSUFFICIENT', 'Not enough packs to break');
     }
     const outMovementId = await this.repo.insertMovement(
-      { locationId, packTypeId: fromPackTypeId, quantityChange: -1, movementType: 'CONVERT_OUT', quantityAfter: left },
+      { locationId, packTypeId: fromPackTypeId, quantityChange: -quantity, movementType: 'CONVERT_OUT', quantityAfter: fromAfter, note },
       ctx,
     );
-    const toAfter = withinLimit(await this.repo.changeBalance(locationId, toPackTypeId, toQuantity));
+    const toAfter = withinLimit(await this.repo.changeBalance(locationId, toPackTypeId, unitsAdded));
     const inMovementId = await this.repo.insertMovement(
-      { locationId, packTypeId: toPackTypeId, quantityChange: toQuantity, movementType: 'CONVERT_IN', quantityAfter: toAfter },
+      { locationId, packTypeId: toPackTypeId, quantityChange: unitsAdded, movementType: 'CONVERT_IN', quantityAfter: toAfter, note },
       ctx,
     );
+    const approvedByMembershipId = options.approvedByMembershipId ?? actor;
     const conversionId = await this.repo.insertConversion({
       outMovementId,
       inMovementId,
       createdByMembershipId: actor,
-      approvedByMembershipId: actor,
+      approvedByMembershipId,
+      approvalId: options.approvalId ?? null,
     });
-    return { conversionId, outMovementId, inMovementId, toQuantity };
+    return { conversionId, outMovementId, inMovementId, fromAfter, toAfter, unitsAdded, approvedByMembershipId };
   }
 }
 

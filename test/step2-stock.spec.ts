@@ -173,7 +173,7 @@ describe('step 2: atomic stock updates under concurrency', () => {
       await Promise.allSettled(
         Array.from({ length: 20 }, () =>
           tenants.run(shop.biz, () =>
-            stock.convertOne(shop.loc, shop.carton, shop.piece, ctx(shop)),
+            stock.convert(shop.loc, shop.carton, shop.piece, 1, ctx(shop)),
           ),
         ),
       ),
@@ -239,7 +239,7 @@ describe('step 2: atomic stock updates under concurrency', () => {
     );
     await expect(
       tenants.run(shop.biz, () =>
-        stock.convertOne(shop.loc, shop.carton, shop.piece, ctx(shop)),
+        stock.convert(shop.loc, shop.carton, shop.piece, 1, ctx(shop)),
       ),
     ).rejects.toThrow('crash before linking');
 
@@ -252,9 +252,9 @@ describe('step 2: atomic stock updates under concurrency', () => {
     await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.carton, 2, ctx(shop)));
 
     const result = await tenants.run(shop.biz, () =>
-      stock.convertOne(shop.loc, shop.carton, shop.piece, ctx(shop)),
+      stock.convert(shop.loc, shop.carton, shop.piece, 1, ctx(shop)),
     );
-    expect(result.toQuantity).toBe(24);
+    expect(result.unitsAdded).toBe(24); // toQuantity before C4
 
     const conversion = await tenants.run(shop.biz, () =>
       currentTx().stockConversion.findUniqueOrThrow({
@@ -397,8 +397,8 @@ describe('step 2: atomic stock updates under concurrency', () => {
       const shop = await seedShop();
       await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.piece, 48, ctx(shop)));
       await expect(
-        tenants.run(shop.biz, () => stock.convertOne(shop.loc, shop.piece, shop.carton, ctx(shop))),
-      ).rejects.toMatchObject({ code: 'STOCK_CONVERSION_INVALID' });
+        tenants.run(shop.biz, () => stock.convert(shop.loc, shop.piece, shop.carton, 1, ctx(shop))),
+      ).rejects.toMatchObject({ code: 'PACK_TYPES_NOT_CONVERTIBLE' }); // STOCK_CONVERSION_INVALID before C4
       expect(await ledger(shop, shop.piece)).toEqual({ balance: 48, sum: 48, rows: 1 });
     });
   });
