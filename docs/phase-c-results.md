@@ -67,3 +67,22 @@ Filled in step by step. The full summary (see `docs/phase-c-design.md` section 1
 
 **Open for later steps:**
 - `stock.count` (C3), `stock.convert` (C4), approvals (C5), hardening (C6).
+
+## C3: Count (passed)
+
+**Result:** new 8, Phase C cumulative 29 (C1, C2 and `test/c3-stock-count.spec.ts`), all passing in the gate run. The concurrency test (C3 test 3: 10 counts over two pools and 20 sale-mode decreases at once) passed 5 runs in a row. The first full-suite run failed 3 tests (296 of 299) during a machine slowdown: it took 1085 s instead of about 220 s, and only password-hashing timing tests failed (two hit Vitest's 5 s limit, one timing ratio was 0.37 against 0.5); C3 touches no hashing code. Rerun unchanged, the full suite passed: 22 files, 299 of 299 (287.0 s). Lint, type-check, build and the drift check were clean.
+
+**Built (approved by Ian on 2026-10-26, with the four recommended answers):** no migration (C1 had the count columns and checks).
+- `stock.count` (`CountStockHandler`, `StockCommandsService.count()`, `StockService.count()`): per line `counted minus expected`, the phone's expected number, with the non-strict statement. All lines are checked first; a bad line rejects the whole count with every bad line listed (`DUPLICATE_LINE`, `PACK_TYPE_NOT_FOUND`, `QUANTITY_INVALID`). Archived locations and pack types may be counted. Lines are applied in the shared lock order (`inLockOrder()`, now used by receive too).
+- Answer 1: a zero-delta line writes no movement, but is in the result (`quantity_after` by a plain read) and in the audit row.
+- Answer 2: counted 0 to 2,000,000,000; expected and the delta within -2,000,000,000..2,000,000,000.
+- Answer 3: the balance statement got a floor: `WHERE stock_balance.quantity::bigint + EXCLUDED.quantity BETWEEN -2000000000 AND 2000000000` (bigint so the sum cannot overflow before the compare). This is the one change to C2 code; the C2 cap test still passes.
+- Answer 4: `FLAGGED / NEGATIVE_AFTER_COUNT` when any counted pool ends below zero, including a zero-delta line that was already negative. A flagged count is saved and a retry gets the same answer.
+- Audit `stock.counted` with lines of `{ pack_type_id, expected, counted, delta }`, never the note.
+- Test helpers for C3 on: `test/helpers/stock-api.ts`. The C2 file keeps its own copy (unchanged).
+
+**Proof the tests catch mistakes:**
+- Mutation 3, the count sets the balance to the counted number (read the balance, then change it to `counted`): C3 test 2 failed (the sales between the count and its arrival were lost). Reverted; `cmp` identical.
+
+**Things to know:**
+1. Timing tests of the password hasher fail when the machine is overloaded (see the first full run). They are not weakened; a full run that takes several times longer than usual is rerun.

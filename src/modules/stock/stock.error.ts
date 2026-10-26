@@ -2,7 +2,7 @@ export type StockErrorCode =
   | 'STOCK_INSUFFICIENT'
   | 'STOCK_QUANTITY_INVALID'
   | 'STOCK_CONVERSION_INVALID'
-  // A balance would go above MAX_BALANCE, or text the database cannot hold
+  // A balance would leave -MAX_BALANCE..MAX_BALANCE, or text the database cannot hold
   // (docs/phase-c-design.md section 4).
   | 'VALIDATION_FAILED'
   // Phase C2 command reasons (docs/phase-c-design.md section 5).

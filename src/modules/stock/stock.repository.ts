@@ -26,9 +26,12 @@ export interface MovementRow {
   unitCost?: string | null;
   note?: string | null;
   reference?: string | null;
+  // COUNT only, both: quantity_change = counted - expected (a database check).
+  expectedQuantity?: number | null;
+  countedQuantity?: number | null;
 }
 
-// The largest balance a pool may hold (docs/phase-c-design.md section 4): an
+// The largest balance a pool may hold, either way (docs/phase-c-design.md section 4; floor since C3): an
 // INTEGER guard with room to spare.
 export const MAX_BALANCE = 2_000_000_000;
 
@@ -63,9 +66,11 @@ export class StockRepository {
   /**
    * Non-strict change (positive or negative), creating the balance row if it
    * does not exist yet. One atomic statement. Returns the new quantity, or
-   * null if it would go above MAX_BALANCE (then nothing changed). The cap is
-   * part of the statement (decided in C2), so it holds under concurrency too.
-   * Lines are at most 1,000,000, so the sum in the check cannot overflow.
+   * null if it would leave -MAX_BALANCE..MAX_BALANCE (then nothing changed).
+   * The limits are part of the statement (cap C2, floor C3), so they hold
+   * under concurrency too. The check adds as bigint: a count delta can be up
+   * to 2,000,000,000, and the sum must not overflow before it is compared.
+   * In ON CONFLICT DO UPDATE the WHERE is checked before SET is computed.
    */
   async changeBalance(
     locationId: string,
@@ -77,7 +82,8 @@ export class StockRepository {
       VALUES (${currentBusinessId()}::uuid, ${locationId}::uuid, ${packTypeId}::uuid, ${delta}::int)
       ON CONFLICT (business_id, location_id, pack_type_id)
       DO UPDATE SET quantity = stock_balance.quantity + EXCLUDED.quantity, updated_at = now()
-       WHERE stock_balance.quantity + EXCLUDED.quantity <= ${MAX_BALANCE}::int
+       WHERE stock_balance.quantity::bigint + EXCLUDED.quantity
+             BETWEEN ${-MAX_BALANCE}::bigint AND ${MAX_BALANCE}::bigint
       RETURNING quantity`;
     return rows[0]?.quantity ?? null;
   }
@@ -99,6 +105,8 @@ export class StockRepository {
         unitCost: movement.unitCost ?? null,
         note: movement.note ?? null,
         reference: movement.reference ?? null,
+        expectedQuantity: movement.expectedQuantity ?? null,
+        countedQuantity: movement.countedQuantity ?? null,
         occurredAt: ctx.occurredAt,
         createdByMembershipId: ctx.createdByMembershipId,
         syncCommandId: ctx.syncCommandId,

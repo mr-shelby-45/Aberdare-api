@@ -127,6 +127,45 @@ export class StockService {
     return { quantity };
   }
 
+  /**
+   * One line of a count (docs/phase-c-design.md section 5): applies
+   * counted minus expected, the phone's expected number, never the server
+   * balance, with the non-strict statement. Sales processed between the count
+   * and its arrival are therefore kept. A zero delta writes nothing; its
+   * quantity is a plain read with no write after it (decided in C3).
+   */
+  async count(
+    locationId: string,
+    packTypeId: string,
+    expected: number,
+    counted: number,
+    note: string | null,
+    ctx: MovementContext,
+  ): Promise<StockChangeResult & { delta: number }> {
+    const delta = counted - expected;
+    if (!Number.isSafeInteger(delta)) {
+      throw new StockError('STOCK_QUANTITY_INVALID', 'Counts must be whole numbers');
+    }
+    if (delta === 0) {
+      return { quantity: await this.repo.balanceOf(locationId, packTypeId), delta };
+    }
+    const quantity = withinLimit(await this.repo.changeBalance(locationId, packTypeId, delta));
+    await this.repo.insertMovement(
+      {
+        locationId,
+        packTypeId,
+        quantityChange: delta,
+        movementType: 'COUNT',
+        quantityAfter: quantity,
+        expectedQuantity: expected,
+        countedQuantity: counted,
+        note,
+      },
+      ctx,
+    );
+    return { quantity, delta };
+  }
+
   /** For sale.create from sync: always records the sale, flags an oversell. */
   async decreaseForSale(
     locationId: string,
@@ -201,10 +240,11 @@ export class StockService {
   }
 }
 
-/** The new balance, or VALIDATION_FAILED when the capped statement changed nothing. */
+/** The new balance, or VALIDATION_FAILED when the limited statement changed nothing. */
 function withinLimit(quantity: number | null): number {
+  const limit = MAX_BALANCE.toLocaleString('en-US');
   if (quantity === null) {
-    throw new StockError('VALIDATION_FAILED', `A stock balance cannot go above ${MAX_BALANCE.toLocaleString('en-US')}`);
+    throw new StockError('VALIDATION_FAILED', `A stock balance must stay between -${limit} and ${limit}`);
   }
   return quantity;
 }

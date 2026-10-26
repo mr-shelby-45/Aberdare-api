@@ -4,9 +4,10 @@ import { AuditService } from '../audit/audit.service.js';
 import { LocationsService } from '../locations/locations.service.js';
 import { ProductsService } from '../products/products.service.js';
 import type { AdjustStockDto } from './dto/adjust-stock.dto.js';
+import type { CountLineDto, CountStockDto } from './dto/count-stock.dto.js';
 import type { ReceiveLineDto, ReceiveStockDto } from './dto/receive-stock.dto.js';
 import { type InvalidLine, StockError, type StockLineReason } from './stock.error.js';
-import type { AdjustReason, MovementContext } from './stock.repository.js';
+import { type AdjustReason, MAX_BALANCE, type MovementContext } from './stock.repository.js';
 import { StockService } from './stock.service.js';
 
 const MAX_LINE_QUANTITY = 1_000_000;
@@ -72,12 +73,8 @@ export class StockCommandsService {
     }
 
     const ctx = movementContext(actor);
-    const lockOrder = [...dto.lines].sort((a, b) => {
-      const byUnits = packs.get(b.pack_type_id)!.unitsPerPack - packs.get(a.pack_type_id)!.unitsPerPack;
-      return byUnits !== 0 ? byUnits : a.pack_type_id < b.pack_type_id ? -1 : 1;
-    });
     const after = new Map<string, number>();
-    for (const line of lockOrder) {
+    for (const line of inLockOrder(dto.lines, packs)) {
       const unitCost = line.unit_cost == null ? null : normalizeMoney(line.unit_cost);
       const { quantity } = await this.stock.receive(dto.location_id, line.pack_type_id, line.quantity, ctx, { unitCost, note, reference });
       after.set(line.pack_type_id, quantity);
@@ -96,6 +93,58 @@ export class StockCommandsService {
       actorMembershipId: actor.membershipId,
     });
     return dto.lines.map((l) => ({ packTypeId: l.pack_type_id, quantityAfter: after.get(l.pack_type_id)! }));
+  }
+
+  /**
+   * stock.count: all or nothing like receive. Each line applies counted
+   * minus expected (StockService.count). Archived locations and pack types
+   * are allowed. flagged is true when any counted pool ends below zero,
+   * including a zero-delta line that was already negative (decided in C3).
+   */
+  async count(
+    dto: CountStockDto,
+    actor: StockActor,
+  ): Promise<{ lines: { packTypeId: string; delta: number; quantityAfter: number }[]; flagged: boolean }> {
+    const note = cleanText(dto.note);
+    if (!(await this.locations.findById(dto.location_id))) throw locationNotFound();
+
+    const packs = await this.products.packTypesForStock([...new Set(dto.lines.map((l) => l.pack_type_id))]);
+    const invalid: InvalidLine[] = [];
+    const seen = new Set<string>();
+    dto.lines.forEach((line, i) => {
+      const reason = countLineProblem(line, seen, packs);
+      seen.add(line.pack_type_id);
+      if (reason) invalid.push({ line: i + 1, reason });
+    });
+    if (invalid.length > 0) {
+      throw new StockError('INVALID_LINES', 'Some lines of this count are not valid. Nothing was saved.', invalid);
+    }
+
+    const ctx = movementContext(actor);
+    const after = new Map<string, { delta: number; quantity: number }>();
+    for (const line of inLockOrder(dto.lines, packs)) {
+      const r = await this.stock.count(dto.location_id, line.pack_type_id, line.expected_quantity, line.counted_quantity, note, ctx);
+      after.set(line.pack_type_id, { delta: r.delta, quantity: r.quantity });
+    }
+    const lines = dto.lines.map((l) => ({ packTypeId: l.pack_type_id, delta: after.get(l.pack_type_id)!.delta, quantityAfter: after.get(l.pack_type_id)!.quantity }));
+
+    // Ids and quantities only: never the note.
+    await this.audit.record({
+      action: 'stock.counted',
+      targetType: 'location',
+      targetId: dto.location_id,
+      metadata: {
+        location_id: dto.location_id,
+        lines: dto.lines.map((l) => ({
+          pack_type_id: l.pack_type_id,
+          expected: l.expected_quantity,
+          counted: l.counted_quantity,
+          delta: l.counted_quantity - l.expected_quantity,
+        })),
+      },
+      actorMembershipId: actor.membershipId,
+    });
+    return { lines, flagged: lines.some((l) => l.quantityAfter < 0) };
   }
 
   /** stock.adjust: archived locations and pack types are allowed, so old stock can be cleaned up. */
@@ -162,6 +211,36 @@ function lineProblem(
   }
   if (line.unit_cost != null && !MONEY_PATTERN.test(line.unit_cost)) return 'COST_INVALID';
   return null;
+}
+
+/**
+ * The first problem of one count line, or null: a repeated pack type, the
+ * pack type, then the numbers (decided in C3: counted 0 to MAX_BALANCE,
+ * expected and the delta within -MAX_BALANCE..MAX_BALANCE, whole numbers).
+ * Archived pack types are allowed.
+ */
+function countLineProblem(
+  line: CountLineDto,
+  seen: ReadonlySet<string>,
+  packs: ReadonlyMap<string, unknown>,
+): StockLineReason | null {
+  if (seen.has(line.pack_type_id)) return 'DUPLICATE_LINE';
+  if (!packs.has(line.pack_type_id)) return 'PACK_TYPE_NOT_FOUND';
+  const { expected_quantity: expected, counted_quantity: counted } = line;
+  const inRange = (n: number) => Number.isSafeInteger(n) && Math.abs(n) <= MAX_BALANCE;
+  if (!inRange(expected) || !inRange(counted) || counted < 0 || !inRange(counted - expected)) return 'QUANTITY_INVALID';
+  return null;
+}
+
+/**
+ * Lines in the lock order of every multi-balance operation: larger pack
+ * first, then by pack type id (docs/architecture.md section 6).
+ */
+function inLockOrder<T extends { pack_type_id: string }>(lines: T[], packs: ReadonlyMap<string, { unitsPerPack: number }>): T[] {
+  return [...lines].sort((a, b) => {
+    const byUnits = packs.get(b.pack_type_id)!.unitsPerPack - packs.get(a.pack_type_id)!.unitsPerPack;
+    return byUnits !== 0 ? byUnits : a.pack_type_id < b.pack_type_id ? -1 : 1;
+  });
 }
 
 /** Trimmed text, or null when absent or blank. Control characters are refused. */

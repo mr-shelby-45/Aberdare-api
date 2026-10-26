@@ -3,6 +3,7 @@ import { AuditModule } from '../audit/audit.module.js';
 import { LocationsModule } from '../locations/locations.module.js';
 import { ProductsModule } from '../products/products.module.js';
 import { AdjustStockHandler } from './commands/adjust-stock.handler.js';
+import { CountStockHandler } from './commands/count-stock.handler.js';
 import { ReceiveStockHandler } from './commands/receive-stock.handler.js';
 import { StockCommandsService } from './stock-commands.service.js';
 import { StockModule } from './stock.module.js';
@@ -13,7 +14,7 @@ import { StockModule } from './stock.module.js';
 // which would make a cycle. The sync module imports the handlers.
 @Module({
   imports: [StockModule, ProductsModule, LocationsModule, AuditModule],
-  providers: [StockCommandsService, ReceiveStockHandler, AdjustStockHandler],
-  exports: [ReceiveStockHandler, AdjustStockHandler],
+  providers: [StockCommandsService, ReceiveStockHandler, AdjustStockHandler, CountStockHandler],
+  exports: [ReceiveStockHandler, AdjustStockHandler, CountStockHandler],
 })
 export class StockCommandsModule {}
