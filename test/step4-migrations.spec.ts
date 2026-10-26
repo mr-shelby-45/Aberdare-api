@@ -85,9 +85,13 @@ describe('step 4: migrations keep hand-written SQL', () => {
         'location',
         'membership',
         'pack_type',
+        'payment',
         'product',
         'product_barcode',
         'refresh_token',
+        'sale', // Phase E1: sale, sale_counter, sale_item, payment
+        'sale_counter',
+        'sale_item',
         'stock_balance',
         'stock_conversion',
         'stock_movement',
@@ -114,8 +118,11 @@ describe('step 4: migrations keep hand-written SQL', () => {
       expect(found.triggers).toEqual([
         { tgname: 'location_change_log', tbl: 'location' },
         { tgname: 'pack_type_change_log', tbl: 'pack_type' },
+        { tgname: 'payment_change_log', tbl: 'payment' },
         { tgname: 'product_barcode_change_log', tbl: 'product_barcode' },
         { tgname: 'product_change_log', tbl: 'product' },
+        { tgname: 'sale_change_log', tbl: 'sale' }, // Phase E1: sale, sale_item, payment
+        { tgname: 'sale_item_change_log', tbl: 'sale_item' },
         { tgname: 'stock_balance_change_log', tbl: 'stock_balance' },
       ]);
       expect(found.functions).toEqual([{ proname: 'log_product_barcode_change' }, { proname: 'log_product_change' }]);
@@ -144,8 +151,13 @@ describe('step 4: migrations keep hand-written SQL', () => {
         'location_one_default_per_business',
         'membership_one_owner_per_business',
         'pack_type_one_base_unit_per_product',
+        'payment_mpesa_code_unique',
         'product_name_trgm_idx',
       ]);
+      // Phase E1: one original payment per M-Pesa code per business.
+      expect(byName.get('payment_mpesa_code_unique')).toMatch(
+        /CREATE UNIQUE INDEX .* \(business_id, mpesa_code\) WHERE \(\(mpesa_code IS NOT NULL\) AND \(duplicate_of_payment_id IS NULL\)\)/,
+      );
       expect(byName.get('pack_type_one_base_unit_per_product')).toMatch(
         /CREATE UNIQUE INDEX .* WHERE \(units_per_pack = 1\)/,
       );

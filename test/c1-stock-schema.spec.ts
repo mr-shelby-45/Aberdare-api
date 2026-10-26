@@ -186,7 +186,8 @@ describe('C1: stock schema, triggers and integrity', { timeout: 120_000 }, () =>
     await expect(approval({ requesterMembershipId: b.member })).rejects.toThrow(/approval_business_id_requester_membership_id_fkey/);
     await expect(approval({ approverMembershipId: b.member })).rejects.toThrow(/approval_business_id_approver_membership_id_fkey/);
     await expect(approval({ consumedAt: AT, consumedBySyncCommandId: bCommand })).rejects.toThrow(/approval_business_id_consumed_by_sync_command_id_fkey/);
-    await expect(approval({ purpose: 'SALE_VOID' })).rejects.toThrow(/approval_purpose_known/);
+    // An unknown purpose (SALE_VOID is a known one since E1).
+    await expect(approval({ purpose: 'REFUND' })).rejects.toThrow(/approval_purpose_known/);
     await expect(approval({ validUntil: AT })).rejects.toThrow(/approval_valid_after_created/);
     await expect(approval({ consumedAt: AT })).rejects.toThrow(/approval_consumed_together/);
     await approval({});

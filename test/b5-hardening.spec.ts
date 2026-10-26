@@ -455,10 +455,14 @@ describe('B5: hardening', { timeout: 120_000 }, () => {
       membership: 'SELECT,INSERT,UPDATE',
       otp_challenge: '-',
       pack_type: 'SELECT,INSERT,UPDATE',
+      payment: 'SELECT,INSERT', // plus UPDATE of status only (checked below; Phase E1)
       person: '-', // a few columns only (checked below)
       product: 'SELECT,INSERT,UPDATE',
       product_barcode: 'SELECT,INSERT,DELETE',
       refresh_token: 'SELECT,INSERT,UPDATE',
+      sale: 'SELECT,INSERT', // plus UPDATE of status, paid_total, balance_due and the void columns (checked below; Phase E1)
+      sale_counter: 'SELECT,INSERT', // plus UPDATE of last_number (checked below; Phase E1)
+      sale_item: 'SELECT,INSERT', // append-only (Phase E1)
       stock_balance: 'SELECT,INSERT,UPDATE',
       stock_conversion: 'SELECT,INSERT',
       stock_movement: 'SELECT,INSERT',
@@ -471,7 +475,7 @@ describe('B5: hardening', { timeout: 120_000 }, () => {
           await c.query<{ table_name: string; privilege_type: string; columns: string }>(
             `SELECT table_name, privilege_type, string_agg(column_name, ',' ORDER BY column_name) AS columns
                FROM information_schema.column_privileges
-              WHERE grantee = 'app_user' AND table_schema = 'public' AND table_name IN ('approval', 'business', 'device', 'person')
+              WHERE grantee = 'app_user' AND table_schema = 'public' AND table_name IN ('approval', 'business', 'device', 'payment', 'person', 'sale', 'sale_counter')
               GROUP BY 1, 2 ORDER BY 1, 2`,
           )
         ).rows,
@@ -502,7 +506,40 @@ describe('B5: hardening', { timeout: 120_000 }, () => {
         columns: 'business_id,created_at,id,is_shared,last_seen_at,last_sync_at,name,platform,push_token,registered_by_membership_id,secret_hash,status',
       },
       { table_name: 'device', privilege_type: 'UPDATE', columns: 'is_shared,last_seen_at,last_sync_at,name,status' },
+      // Phase E1: payments are only ever reversed (status).
+      {
+        table_name: 'payment',
+        privilege_type: 'INSERT',
+        columns: 'amount,business_id,created_at,created_by_membership_id,duplicate_of_payment_id,id,method,mpesa_code,occurred_at,sale_id,status,verified',
+      },
+      {
+        table_name: 'payment',
+        privilege_type: 'SELECT',
+        columns: 'amount,business_id,created_at,created_by_membership_id,duplicate_of_payment_id,id,method,mpesa_code,occurred_at,sale_id,status,verified',
+      },
+      { table_name: 'payment', privilege_type: 'UPDATE', columns: 'status' },
       { table_name: 'person', privilege_type: 'SELECT', columns: 'created_at,email,email_verified_at,id,phone,phone_verified_at' },
+      // Phase E1: a sale changes only by payments and the void; the counter only by its number.
+      {
+        table_name: 'sale',
+        privilege_type: 'INSERT',
+        columns:
+          'balance_due,business_id,created_at,created_by_membership_id,device_id,id,local_ref,location_id,note,occurred_at,paid_total,received_at,sale_number,status,total,total_mismatch,void_approval_id,void_approved_by_membership_id,void_note,void_reason,voided_at,voided_by_membership_id',
+      },
+      {
+        table_name: 'sale',
+        privilege_type: 'SELECT',
+        columns:
+          'balance_due,business_id,created_at,created_by_membership_id,device_id,id,local_ref,location_id,note,occurred_at,paid_total,received_at,sale_number,status,total,total_mismatch,void_approval_id,void_approved_by_membership_id,void_note,void_reason,voided_at,voided_by_membership_id',
+      },
+      {
+        table_name: 'sale',
+        privilege_type: 'UPDATE',
+        columns: 'balance_due,paid_total,status,void_approval_id,void_approved_by_membership_id,void_note,void_reason,voided_at,voided_by_membership_id',
+      },
+      { table_name: 'sale_counter', privilege_type: 'INSERT', columns: 'business_id,last_number' },
+      { table_name: 'sale_counter', privilege_type: 'SELECT', columns: 'business_id,last_number' },
+      { table_name: 'sale_counter', privilege_type: 'UPDATE', columns: 'last_number' },
     ]);
     // Nothing is granted to PUBLIC on any table.
     const publicGrants = await asAdmin(

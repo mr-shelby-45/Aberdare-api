@@ -32,6 +32,11 @@ model Business {
   auditLogs         AuditLog[]
   productBarcodes   ProductBarcode[]
   approvals         Approval[]
+  // Phase E.
+  sales             Sale[]
+  saleItems         SaleItem[]
+  payments          Payment[]
+  saleCounter       SaleCounter?
 
   @@map("business")
 }
@@ -88,6 +93,7 @@ model Location {
   business   Business       @relation(fields: [businessId], references: [id])
   balances   StockBalance[]
   movements  StockMovement[]
+  sales      Sale[]
 
   @@unique([businessId, id])
   @@map("location")
@@ -114,6 +120,7 @@ model PackType {
   balances     StockBalance[]
   movements    StockMovement[]
   barcodes     ProductBarcode[]
+  saleItems    SaleItem[]
 
   @@unique([businessId, id])
   // Target of product_barcode's key, so a barcode cannot point at another
@@ -152,7 +159,7 @@ model StockMovement {
   packTypeId     String           @map("pack_type_id") @db.Uuid
   quantityChange Int              @map("quantity_change")
   // Phase C (docs/phase-c-design.md section 3). Checks in *_c1_stock_movement_checks.
-  // RECEIVE, ADJUST, COUNT, CONVERT_OUT, CONVERT_IN or SALE.
+  // RECEIVE, ADJUST, COUNT, CONVERT_OUT, CONVERT_IN, SALE or SALE_VOID (Phase E).
   movementType   String           @map("movement_type")
   // The balance right after this movement, from RETURNING on the balance statement.
   quantityAfter  Int              @map("quantity_after")
@@ -170,12 +177,15 @@ model StockMovement {
   // COUNT only, both: quantity_change = counted - expected.
   expectedQuantity Int?           @map("expected_quantity")
   countedQuantity  Int?           @map("counted_quantity")
+  // Phase E: the sale of a SALE or SALE_VOID movement (checks in *_e1_sales_checks).
+  saleId         String?          @map("sale_id") @db.Uuid
   createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
   business       Business         @relation(fields: [businessId], references: [id])
   location       Location         @relation(fields: [businessId, locationId], references: [businessId, id])
   packType       PackType         @relation(fields: [businessId, packTypeId], references: [businessId, id])
   createdBy      Membership?      @relation("MovementCreatedBy", fields: [businessId, createdByMembershipId], references: [businessId, id])
   syncCommand    SyncCommand?     @relation(fields: [businessId, syncCommandId], references: [businessId, id])
+  sale           Sale?            @relation(fields: [businessId, saleId], references: [businessId, id])
   conversionOut  StockConversion? @relation("ConversionOut")
   conversionIn   StockConversion? @relation("ConversionIn")
 
@@ -403,6 +413,11 @@ model Membership {
   conversionsApproved   StockConversion[] @relation("ConversionApprovedBy")
   approvalsRequested    Approval[]        @relation("ApprovalRequester")
   approvalsGiven        Approval[]        @relation("ApprovalApprover")
+  // Phase E.
+  salesCreated          Sale[]            @relation("SaleCreatedBy")
+  salesVoided           Sale[]            @relation("SaleVoidedBy")
+  saleVoidsApproved     Sale[]            @relation("SaleVoidApprovedBy")
+  paymentsCreated       Payment[]         @relation("PaymentCreatedBy")
 
   @@unique([businessId, id])
   @@unique([businessId, personId])
@@ -432,6 +447,7 @@ model Device {
   memberLinks              DeviceMembership[]
   refreshTokens            RefreshToken[]
   approvals                Approval[]
+  sales                    Sale[]
 
   @@unique([businessId, id])
   @@map("device")
@@ -550,7 +566,7 @@ model AuditLog {
 model Approval {
   id                      String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   businessId              String       @map("business_id") @db.Uuid
-  // STOCK_CONVERT for now.
+  // STOCK_CONVERT or SALE_VOID (Phase E).
   purpose                 String
   requesterMembershipId   String       @map("requester_membership_id") @db.Uuid
   approverMembershipId    String       @map("approver_membership_id") @db.Uuid
@@ -567,7 +583,133 @@ model Approval {
   device                  Device       @relation(fields: [businessId, deviceId], references: [businessId, id])
   consumedBy              SyncCommand? @relation(fields: [businessId, consumedBySyncCommandId], references: [businessId, id])
   conversion              StockConversion?
+  voidedSale              Sale?
 
   @@unique([businessId, id])
   @@map("approval")
+}
+
+// Phase E (docs/phase-e-design.md section 3): a sale made on a phone. The id is
+// the phone's UUID. Money is NUMERIC(14,2), read as text. Checks, grants, RLS
+// and the "a voided sale is final" policy are in the hand-written *_e1_*
+// migrations. app_user may update only status, paid_total, balance_due and the
+// void columns.
+model Sale {
+  id                         String     @id @db.Uuid
+  businessId                 String     @map("business_id") @db.Uuid
+  // Per business, from sale_counter, assigned after the stock statements.
+  saleNumber                 Int        @map("sale_number")
+  // The phone's own receipt reference (at most 30 characters, not unique).
+  localRef                   String     @map("local_ref")
+  locationId                 String     @map("location_id") @db.Uuid
+  deviceId                   String     @map("device_id") @db.Uuid
+  createdByMembershipId      String     @map("created_by_membership_id") @db.Uuid
+  // Phone time; received_at is the server Clock.
+  occurredAt                 DateTime   @map("occurred_at") @db.Timestamptz(6)
+  receivedAt                 DateTime   @map("received_at") @db.Timestamptz(6)
+  // COMPLETED or VOIDED.
+  status                     String
+  total                      Decimal    @db.Decimal(14, 2)
+  paidTotal                  Decimal    @default(0) @map("paid_total") @db.Decimal(14, 2)
+  // The greater of total minus paid_total and zero.
+  balanceDue                 Decimal    @map("balance_due") @db.Decimal(14, 2)
+  totalMismatch              Boolean    @default(false) @map("total_mismatch")
+  note                       String?
+  // Void: all null until voided (void_note and void_approval_id may stay null).
+  voidedAt                   DateTime?  @map("voided_at") @db.Timestamptz(6)
+  voidedByMembershipId       String?    @map("voided_by_membership_id") @db.Uuid
+  // MISTAKE, CUSTOMER_CANCELLED, WRONG_PRICE or OTHER.
+  voidReason                 String?    @map("void_reason")
+  voidNote                   String?    @map("void_note")
+  // The approval an attendant used; null when the voider held sales.void.
+  voidApprovalId             String?    @map("void_approval_id") @db.Uuid
+  // The voider themselves when they held sales.void.
+  voidApprovedByMembershipId String?    @map("void_approved_by_membership_id") @db.Uuid
+  createdAt                  DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  business                   Business   @relation(fields: [businessId], references: [id])
+  location                   Location   @relation(fields: [businessId, locationId], references: [businessId, id])
+  device                     Device     @relation(fields: [businessId, deviceId], references: [businessId, id])
+  createdBy                  Membership @relation("SaleCreatedBy", fields: [businessId, createdByMembershipId], references: [businessId, id])
+  voidedBy                   Membership? @relation("SaleVoidedBy", fields: [businessId, voidedByMembershipId], references: [businessId, id])
+  voidApprovedBy             Membership? @relation("SaleVoidApprovedBy", fields: [businessId, voidApprovedByMembershipId], references: [businessId, id])
+  voidApproval               Approval?  @relation(fields: [businessId, voidApprovalId], references: [businessId, id])
+  items                      SaleItem[]
+  payments                   Payment[]
+  movements                  StockMovement[]
+
+  @@unique([businessId, id])
+  @@unique([businessId, saleNumber])
+  // An approval voids at most one sale.
+  @@unique([businessId, voidApprovalId])
+  @@map("sale")
+}
+
+// Phase E: one line of a sale, append-only. Names and prices as they were at
+// sale time, so a receipt survives renames and price changes.
+model SaleItem {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId   String   @map("business_id") @db.Uuid
+  saleId       String   @map("sale_id") @db.Uuid
+  // 1-based, unique per sale.
+  lineNo       Int      @map("line_no")
+  packTypeId   String   @map("pack_type_id") @db.Uuid
+  productName  String   @map("product_name")
+  packTypeName String   @map("pack_type_name")
+  // 1 to 100,000.
+  quantity     Int
+  // The price charged; the list and cost prices of the pack type at that moment.
+  unitPrice    Decimal  @map("unit_price") @db.Decimal(14, 2)
+  listPrice    Decimal  @map("list_price") @db.Decimal(14, 2)
+  costPrice    Decimal? @map("cost_price") @db.Decimal(14, 2)
+  // unit_price x quantity.
+  lineTotal    Decimal  @map("line_total") @db.Decimal(14, 2)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  business     Business @relation(fields: [businessId], references: [id])
+  sale         Sale     @relation(fields: [businessId, saleId], references: [businessId, id])
+  packType     PackType @relation(fields: [businessId, packTypeId], references: [businessId, id])
+
+  @@unique([businessId, id])
+  @@unique([businessId, saleId, lineNo])
+  @@map("sale_item")
+}
+
+// Phase E: a payment of a sale (CASH, or MPESA with a code typed in, never
+// verified in Phase E). Reversed only by a void. One original per M-Pesa code
+// per business: the hand-written partial unique index payment_mpesa_code_unique.
+model Payment {
+  id                    String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId            String     @map("business_id") @db.Uuid
+  saleId                String     @map("sale_id") @db.Uuid
+  // CASH or MPESA.
+  method                String
+  amount                Decimal    @db.Decimal(14, 2)
+  // Exactly when method is MPESA; stored upper-case.
+  mpesaCode             String?    @map("mpesa_code")
+  verified              Boolean    @default(false)
+  // Set when the code was already used by another payment of this business.
+  duplicateOfPaymentId  String?    @map("duplicate_of_payment_id") @db.Uuid
+  // RECORDED or REVERSED.
+  status                String
+  occurredAt            DateTime   @map("occurred_at") @db.Timestamptz(6)
+  createdByMembershipId String     @map("created_by_membership_id") @db.Uuid
+  createdAt             DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  business              Business   @relation(fields: [businessId], references: [id])
+  sale                  Sale       @relation(fields: [businessId, saleId], references: [businessId, id])
+  createdBy             Membership @relation("PaymentCreatedBy", fields: [businessId, createdByMembershipId], references: [businessId, id])
+  duplicateOf           Payment?   @relation("PaymentDuplicateOf", fields: [businessId, duplicateOfPaymentId], references: [businessId, id])
+  duplicates            Payment[]  @relation("PaymentDuplicateOf")
+
+  @@unique([businessId, id])
+  @@index([businessId, saleId])
+  @@map("payment")
+}
+
+// Phase E: the last sale_number of a business, one row per business.
+// Incremented by one atomic upsert after a sale's stock statements.
+model SaleCounter {
+  businessId String   @id @map("business_id") @db.Uuid
+  lastNumber Int      @map("last_number")
+  business   Business @relation(fields: [businessId], references: [id])
+
+  @@map("sale_counter")
 }

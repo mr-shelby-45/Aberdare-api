@@ -347,13 +347,14 @@ describe('step 2: atomic stock updates under concurrency', () => {
       );
 
       // Every column the row needs (Phase C1) is valid, so the targeted check
-      // is the only rule broken. SALE has no sign rule of its own, so a zero
-      // change can only trip the non-zero check.
+      // is the only rule broken. ADJUST with reason CORRECTION has no sign
+      // rule, so a zero change can only trip the non-zero check. (Until E1
+      // this row was a SALE; SALE must now be negative, decided in E1.)
       await expect(
         tenants.run(shop.biz, () =>
           currentTx().$executeRaw`
-            INSERT INTO stock_movement (business_id, location_id, pack_type_id, quantity_change, movement_type, quantity_after, occurred_at)
-            VALUES (${shop.biz}::uuid, ${shop.loc}::uuid, ${shop.piece}::uuid, 0, 'SALE', 1, ${AT}::timestamptz)`,
+            INSERT INTO stock_movement (business_id, location_id, pack_type_id, quantity_change, movement_type, reason, quantity_after, occurred_at)
+            VALUES (${shop.biz}::uuid, ${shop.loc}::uuid, ${shop.piece}::uuid, 0, 'ADJUST', 'CORRECTION', 1, ${AT}::timestamptz)`,
         ),
       ).rejects.toThrow(/stock_movement_quantity_change_nonzero/);
 
