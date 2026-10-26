@@ -62,6 +62,29 @@ export class SalesRepository {
     });
   }
 
+  /** Who created the sale and its status, or null when this business has no such sale. */
+  async findForPayment(saleId: string): Promise<{ createdByMembershipId: string; status: string } | null> {
+    return currentTx().sale.findUnique({ where: { id: saleId }, select: { createdByMembershipId: true, status: true } });
+  }
+
+  /**
+   * Adds an amount to a completed sale's paid_total and recomputes its
+   * balance_due, in one conditional statement: it takes the sale's row lock,
+   * so concurrent attaches add up exactly and a concurrent void (E5) is
+   * ordered before or after it. Null when the sale is not COMPLETED any more
+   * (the voided_is_final policy also makes a voided sale match nothing).
+   */
+  async addPaid(saleId: string, amount: string): Promise<{ total: string; paidTotal: string; balanceDue: string } | null> {
+    const rows = await currentTx().$queryRaw<{ total: string; paid_total: string; balance_due: string }[]>`
+      UPDATE sale
+         SET paid_total = paid_total + ${amount}::numeric,
+             balance_due = GREATEST(total - (paid_total + ${amount}::numeric), 0)
+       WHERE id = ${saleId}::uuid AND business_id = ${currentBusinessId()}::uuid AND status = 'COMPLETED'
+      RETURNING total::text, paid_total::text, balance_due::text`;
+    const r = rows[0];
+    return r ? { total: r.total, paidTotal: r.paid_total, balanceDue: r.balance_due } : null;
+  }
+
   async insertItems(saleId: string, items: SaleItemRow[]): Promise<void> {
     await currentTx().saleItem.createMany({
       data: items.map((i) => ({ businessId: currentBusinessId(), saleId, ...i })),

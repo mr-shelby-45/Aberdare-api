@@ -1,12 +1,14 @@
 import { Injectable } from '@nestjs/common';
 import { MAX_CENTS, fromCents, toCents } from '../../common/money/cents.js';
-import { uniqueViolationConstraint } from '../../database/db-errors.js';
+import { isNumericOverflow, uniqueViolationConstraint } from '../../database/db-errors.js';
 import { AuditService } from '../audit/audit.service.js';
 import { LocationsService } from '../locations/locations.service.js';
+import { PaymentsService, type ValidPayment, paymentsTotal } from '../payments/payments.service.js';
 import type { PackTypeForSale } from '../products/pack-types.repository.js';
 import { ProductsService } from '../products/products.service.js';
 import { inLockOrder } from '../stock/lock-order.js';
 import { StockService } from '../stock/stock.service.js';
+import type { AttachPaymentDto } from './dto/attach-payment.dto.js';
 import type { CreateSaleDto, SaleLineDto } from './dto/create-sale.dto.js';
 import { type InvalidSaleLine, type SaleLineReason, SalesError } from './sales.error.js';
 import { SalesRepository } from './sales.repository.js';
@@ -18,8 +20,8 @@ const MAX_LINE_QUANTITY = 100_000;
 const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 
 /** Flags in the order that picks the command's reason (docs/phase-e-design.md section 4). */
-export type SaleFlag = 'TOTAL_MISMATCH' | 'STOCK_NEGATIVE';
-const FLAG_ORDER: SaleFlag[] = ['TOTAL_MISMATCH', 'STOCK_NEGATIVE'];
+export type SaleFlag = 'TOTAL_MISMATCH' | 'STOCK_NEGATIVE' | 'DUPLICATE_MPESA_CODE' | 'OVERPAYMENT';
+const FLAG_ORDER: SaleFlag[] = ['TOTAL_MISMATCH', 'STOCK_NEGATIVE', 'DUPLICATE_MPESA_CODE', 'OVERPAYMENT'];
 
 /** Who sold, where from, when, and which command. */
 export interface SaleActor {
@@ -28,6 +30,19 @@ export interface SaleActor {
   occurredAt: Date;
   receivedAt: Date;
   syncCommandId: string;
+}
+
+/** Who attaches payments: attendants (no sales.void) only to their own sales. */
+export interface PaymentActor {
+  membershipId: string;
+  seesAllSales: boolean;
+  occurredAt: Date;
+}
+
+export interface PaymentsAttached {
+  paidTotal: string;
+  balanceDue: string;
+  flags: SaleFlag[];
 }
 
 export interface SaleCreated {
@@ -52,6 +67,7 @@ export class SalesService {
     private readonly products: ProductsService,
     private readonly locations: LocationsService,
     private readonly audit: AuditService,
+    private readonly payments: PaymentsService,
   ) {}
 
   /**
@@ -81,6 +97,7 @@ export class SalesService {
     if (invalid.length > 0) {
       throw new SalesError('INVALID_LINES', 'Some lines of this sale are not valid. Nothing was saved.', invalid);
     }
+    const payments = this.validPayments(dto.payments ?? []);
     if (await this.repo.exists(dto.sale_id)) {
       throw new SalesError('SALE_ALREADY_EXISTS', 'This sale was already recorded.');
     }
@@ -96,6 +113,10 @@ export class SalesService {
     if (totalCents > MAX_CENTS) throw tooLarge();
     const total = fromCents(totalCents);
     const totalMismatch = dto.total !== undefined && toCents(dto.total) !== totalCents;
+    const paidCents = paymentsTotal(payments);
+    if (paidCents > MAX_CENTS) throw tooLarge();
+    const paidTotal = fromCents(paidCents);
+    const balanceDue = fromCents(paidCents >= totalCents ? 0n : totalCents - paidCents);
 
     // Stock: the sale-mode statement per line, larger pack first.
     const ordered = inLockOrder(
@@ -120,8 +141,8 @@ export class SalesService {
         occurredAt: actor.occurredAt,
         receivedAt: actor.receivedAt,
         total,
-        paidTotal: '0.00',
-        balanceDue: total,
+        paidTotal,
+        balanceDue,
         totalMismatch,
         note,
       }),
@@ -147,20 +168,85 @@ export class SalesService {
       { occurredAt: actor.occurredAt, createdByMembershipId: actor.membershipId, syncCommandId: actor.syncCommandId },
     );
 
-    const raised = new Set<SaleFlag>();
-    if (totalMismatch) raised.add('TOTAL_MISMATCH');
-    if (after.some((q) => q < 0)) raised.add('STOCK_NEGATIVE');
-    const flags = FLAG_ORDER.filter((f) => raised.has(f));
+    const { duplicates } = await this.payments.record(dto.sale_id, payments, { occurredAt: actor.occurredAt, createdByMembershipId: actor.membershipId });
 
-    // Ids, numbers, a total and flags: never the note, names or prices.
+    const flags = inFlagOrder({
+      TOTAL_MISMATCH: totalMismatch,
+      STOCK_NEGATIVE: after.some((q) => q < 0),
+      DUPLICATE_MPESA_CODE: duplicates > 0,
+      OVERPAYMENT: paidCents > totalCents,
+    });
+
+    // Ids, numbers, totals and flags: never the note, names, prices, codes or single amounts.
+    // Payments inside sale.create are part of this row, not a payment.attached row (design section 9).
     await this.audit.record({
       action: 'sale.created',
       targetType: 'sale',
       targetId: dto.sale_id,
-      metadata: { sale_id: dto.sale_id, sale_number: saleNumber, location_id: dto.location_id, total, line_count: lines.length, flags },
+      metadata: {
+        sale_id: dto.sale_id,
+        sale_number: saleNumber,
+        location_id: dto.location_id,
+        total,
+        line_count: lines.length,
+        payment_count: payments.length,
+        paid_total: paidTotal,
+        flags,
+      },
       actorMembershipId: actor.membershipId,
     });
-    return { saleId: dto.sale_id, saleNumber, total, paidTotal: '0.00', balanceDue: total, flags };
+    return { saleId: dto.sale_id, saleNumber, total, paidTotal, balanceDue, flags };
+  }
+
+  /**
+   * payment.attach. The sale is read first only to choose the answer (another
+   * member's sale is SALE_NOT_FOUND for an attendant, the same as a missing
+   * one). Then one conditional UPDATE adds the amount and takes the sale's row
+   * lock before any payment row is written, then the payments, then the audit.
+   */
+  async attachPayments(dto: AttachPaymentDto, actor: PaymentActor): Promise<PaymentsAttached> {
+    const payments = this.validPayments(dto.payments);
+    const sale = await this.repo.findForPayment(dto.sale_id);
+    if (!sale || (!actor.seesAllSales && sale.createdByMembershipId !== actor.membershipId)) {
+      throw new SalesError('SALE_NOT_FOUND', 'Sale not found.');
+    }
+    if (sale.status !== 'COMPLETED') throw voided();
+
+    const amountCents = paymentsTotal(payments);
+    if (amountCents > MAX_CENTS) throw tooLarge();
+    const amountTotal = fromCents(amountCents);
+    let paid: { total: string; paidTotal: string; balanceDue: string } | null;
+    try {
+      paid = await this.repo.addPaid(dto.sale_id, amountTotal);
+    } catch (err) {
+      // The sale's paid_total would leave NUMERIC(14,2).
+      if (isNumericOverflow(err)) throw tooLarge();
+      throw err;
+    }
+    // A void committed between the read and the update.
+    if (!paid) throw voided();
+
+    const { duplicates } = await this.payments.record(dto.sale_id, payments, { occurredAt: actor.occurredAt, createdByMembershipId: actor.membershipId });
+    const flags = inFlagOrder({
+      DUPLICATE_MPESA_CODE: duplicates > 0,
+      OVERPAYMENT: toCents(paid.paidTotal)! > toCents(paid.total)!,
+    });
+    await this.audit.record({
+      action: 'payment.attached',
+      targetType: 'sale',
+      targetId: dto.sale_id,
+      metadata: { sale_id: dto.sale_id, payment_count: payments.length, amount_total: amountTotal, flags },
+      actorMembershipId: actor.membershipId,
+    });
+    return { paidTotal: paid.paidTotal, balanceDue: paid.balanceDue, flags };
+  }
+
+  private validPayments(payments: Parameters<PaymentsService['validate']>[0]): ValidPayment[] {
+    const { valid, invalid } = this.payments.validate(payments);
+    if (invalid.length > 0) {
+      throw new SalesError('INVALID_PAYMENTS', 'Some payments are not valid. Nothing was saved.', undefined, invalid);
+    }
+    return valid;
   }
 }
 
@@ -178,6 +264,15 @@ function cleanText(value: string | null | undefined): string | null {
   if (CONTROL_CHARS.test(value)) throw new SalesError('VALIDATION_FAILED', 'The text contains characters that are not allowed.');
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+/** The flags that apply, in the design's order (the first is the command's reason). */
+function inFlagOrder(raised: Partial<Record<SaleFlag, boolean>>): SaleFlag[] {
+  return FLAG_ORDER.filter((f) => raised[f] === true);
+}
+
+function voided(): SalesError {
+  return new SalesError('SALE_VOIDED', 'This sale was voided. Payments cannot be added.');
 }
 
 function tooLarge(): SalesError {

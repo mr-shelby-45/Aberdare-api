@@ -54,3 +54,30 @@ Filled in step by step. The full summary (see `docs/phase-e-design.md` section 1
 1. Test 6 and test 2 at first assumed a sale without stock is `ACCEPTED`; it is `FLAGGED / STOCK_NEGATIVE` (correct behaviour). Test 2 now receives stock first; test 6 expects `FLAGGED`.
 2. Sales of one pool are serialised by its balance row lock, held until commit. A concurrency test of anything taken after the stock statements (the counter) must use different pools, or it does not test the race.
 3. Test 8's "no `sales.create`" case calls `SyncService.processCommands()` with a hand-built actor, because every role preset has `sales.create`.
+
+## E3: Payments (passed)
+
+**Result:** new 10, Phase E cumulative 28 (`test/e3-payments.spec.ts` plus the E1 and E2 files), all passing in the gate run. The four race tests (20 concurrent sales with one code, attaches waiting for an uncommitted original, 20 concurrent attaches with one new code, concurrent attaches to one sale) passed 5 runs in a row. The full suite passed: 34 files, 383 of 383 (579.3 s). Lint, type-check, build and the drift check were clean. No schema change and no migration.
+
+**Built (approved by Ian on 2026-10-26, with the eight recommended answers):**
+- `PaymentsModule` (`src/modules/payments/`, answer 1): a data module for the `payment` table only. `PaymentsService.validate()` lists every bad payment (`METHOD_INVALID`, `AMOUNT_INVALID`, `MPESA_CODE_MISSING`, `MPESA_CODE_NOT_ALLOWED`, `MPESA_CODE_INVALID`); `record()` saves them and counts duplicates.
+- Payments inside `sale.create`: 0 to 10, `payments.confirm` through `extraPermissions()`, lines checked before payments (`INVALID_LINES` wins), `paid_total` and `balance_due` written with the sale.
+- `payment.attach` (`AttachPaymentHandler`, `SalesService.attachPayments()`): the sale is read only to choose the answer (`SALE_NOT_FOUND` for unknown, another business's, and for members without `sales.void` another member's sale, answer 4; `SALE_VOIDED`), then one conditional `UPDATE sale SET paid_total = paid_total + x, balance_due = GREATEST(...) WHERE ... status = 'COMPLETED'` takes the row lock before any payment is written.
+- Duplicate codes (answer 2): `INSERT ... ON CONFLICT` on `payment_mpesa_code_unique` `DO NOTHING`, then the original is read and the payment saved as its duplicate. Duplicates count toward `paid_total` (answer 3).
+- `OVERPAYMENT` whenever `paid_total` ends above the total (answer 5). Codes are trimmed and upper-cased, then 8 to 12 letters and digits, still `TODO(verify)` (answer 6). A `paid_total` beyond `NUMERIC(14,2)` (SQLSTATE 22003, `isNumericOverflow()`) is `VALIDATION_FAILED` (answer 7).
+- Audit: `sale.created` gains `payment_count` and `paid_total`; `payment.attached` has `sale_id`, `payment_count`, `amount_total`, `flags`. No codes, no single amounts.
+
+**Mutations (each reverted and checked with `cmp`; no `MUTATION` marker left):**
+- Design 5, a reused code rejects the sale: all four test 3 cases failed.
+- Design 11, `balance_due` not updated for payments: test 1 failed. The E1 check `sale_balance_due` also refuses such a row, so the sale fails outright instead of being saved wrong.
+- Extra a, duplicate detection by "read, then insert" without `ON CONFLICT`: both attach race tests failed (unique violations made attaches fail).
+- Extra b, `paid_total` read, added in JavaScript and written back: the one-sale attach race test failed (lost updates).
+
+**Earlier tests changed by E3 (mechanical; no assertion weakened):**
+- E2 test 5: its example of a refused payments list was one cash payment ("payments come in E3"). It is now 11 payments (over the limit of 10), still `VALIDATION_FAILED`.
+- E2 test 10: the exact `sale.created` metadata gains `payment_count: 0` and `paid_total: '0.00'` (design section 9).
+
+**Things to know:**
+1. Sales of one business queue on the `sale_counter` row, so concurrent `sale.create` commands with one code never really race on the code index. The real races are attaches (no counter); E3's race tests use them, with a held-open transaction and a wait for lock waiters to force the overlap (`lockWaiters()` in `test/e3-payments.spec.ts`).
+2. Test 5 (no `payments.confirm`) calls `SyncService.processCommands()` with a hand-built actor: every preset has `payments.confirm` and extras only add.
+3. My first draft of test 2 sent 12 payments in one command, over the limit; it now uses two commands.

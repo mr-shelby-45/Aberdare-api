@@ -47,3 +47,8 @@ export function uniqueViolationConstraint(err: unknown): string | undefined {
 export function isForeignKeyViolation(err: unknown): boolean {
   return postgresErrorCode(err) === '23503';
 }
+
+/** True when a value did not fit its numeric column (for example a NUMERIC(14,2) sum above 999,999,999,999.99). */
+export function isNumericOverflow(err: unknown): boolean {
+  return postgresErrorCode(err) === '22003';
+}

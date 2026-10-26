@@ -278,7 +278,7 @@ describe('E2: sale.create', { timeout: 240_000 }, () => {
       { lines: [line(w.maize.piece, 1, '1')], local_ref: 'r'.repeat(31) },
       { lines: [line(w.maize.piece, 1, '1')], local_ref: '   ' },
       { lines: [line(w.maize.piece, 1, '1')], business_id: b.owner.businessId },
-      { lines: [line(w.maize.piece, 1, '1')], payments: [{ method: 'CASH', amount: '1' }] }, // payments come in E3
+      { lines: [line(w.maize.piece, 1, '1')], payments: Array.from({ length: 11 }, () => ({ method: 'CASH', amount: '1' })) }, // more than 10 payments (until E3: any payment)
       { lines: [line(w.maize.piece, 100_000, '999999999999.99')] }, // a line above NUMERIC(14,2)
     ]) {
       expect(await api.sendOne(w.attendant.token, sale(w, [], payload)), JSON.stringify(payload).slice(0, 60)).toMatchObject({ status: 'REJECTED', reason: 'VALIDATION_FAILED' });
@@ -386,7 +386,8 @@ describe('E2: sale.create', { timeout: 240_000 }, () => {
         action: 'sale.created',
         target_id: saleId,
         actor_membership_id: w.attendant.membershipId,
-        metadata: { sale_id: saleId, sale_number: 1, location_id: w.loc, total: '355.54', line_count: 1, flags: [] },
+        // payment_count and paid_total since E3 (design section 9).
+        metadata: { sale_id: saleId, sale_number: 1, location_id: w.loc, total: '355.54', line_count: 1, payment_count: 0, paid_total: '0.00', flags: [] },
       },
     ]);
     const text = JSON.stringify(audit);

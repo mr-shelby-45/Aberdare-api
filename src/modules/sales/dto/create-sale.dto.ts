@@ -13,6 +13,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { MONEY_PATTERN } from '../../../common/validation/money.js';
+import { PaymentDto } from '../../payments/dto/payment.dto.js';
 
 // One line of a sale. Only the shape is checked here; a bad value is reported
 // per line by SalesService (QUANTITY_INVALID, PRICE_INVALID), so the phone
@@ -31,8 +32,8 @@ export class SaleLineDto {
   unit_price!: string;
 }
 
-// sale.create (docs/phase-e-design.md section 5). Payments arrive in E3:
-// until then only an absent or empty payments list is accepted (decided in E2).
+// sale.create (docs/phase-e-design.md section 5): 1 to 100 lines, 0 to 10
+// payments (Phase E3; payments need payments.confirm as well).
 export class CreateSaleDto {
   @IsUUID()
   sale_id!: string;
@@ -65,6 +66,8 @@ export class CreateSaleDto {
 
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(0)
-  payments?: unknown[];
+  @ArrayMaxSize(10)
+  @ValidateNested({ each: true })
+  @Type(() => PaymentDto)
+  payments?: PaymentDto[];
 }
