@@ -5,6 +5,8 @@ export interface CommandContext {
   actor: SyncActor;
   // When the phone says it happened (already checked: not more than 24 hours ahead).
   occurredAt: Date;
+  // The claimed sync_command row (Phase C: movements point at it).
+  syncCommandId: string;
 }
 
 // One command type from the phone (docs/architecture.md section 5). A handler

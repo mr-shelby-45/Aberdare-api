@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Clock } from '../../common/time/clock.js';
 import { validateDto } from '../../common/validation/validate-dto.js';
-import { isForeignKeyViolation } from '../../database/db-errors.js';
+import { errorCodeForLog, isForeignKeyViolation } from '../../database/db-errors.js';
 import { TenantRunner, withSavepoint } from '../../database/tenant.js';
 import { CatalogueHandlers } from './catalogue-handlers.js';
 import type { CommandHandler } from './command-handler.js';
@@ -74,11 +74,11 @@ export class SyncService {
 
     try {
       return await this.tenants.run(actor.businessId, async () => {
-        const claimed = await this.repo.claim(commandId, envelope.type, occurredAt, receivedAt);
-        if (!claimed) {
+        const syncCommandId = await this.repo.claim(commandId, envelope.type, occurredAt, receivedAt);
+        if (!syncCommandId) {
           return { commandId, ...(await this.repo.storedOutcome(commandId)) };
         }
-        const outcome = await this.decide(actor, envelope, occurredAt, receivedAt);
+        const outcome = await this.decide(actor, envelope, occurredAt, receivedAt, syncCommandId);
         await this.repo.complete(commandId, outcome);
         return { commandId, ...outcome };
       });
@@ -90,7 +90,7 @@ export class SyncService {
         status: 'FAILED',
         code: 'INTERNAL_ERROR',
         message: 'The command could not be processed. It will be retried.',
-        failure: { type: envelope.type, errorName: err instanceof Error ? err.name : 'UnknownError' },
+        failure: { type: envelope.type, errorName: err instanceof Error ? err.name : 'UnknownError', errorCode: errorCodeForLog(err) },
       };
     }
   }
@@ -100,6 +100,7 @@ export class SyncService {
     envelope: SyncCommandDto,
     occurredAt: Date,
     receivedAt: Date,
+    syncCommandId: string,
   ): Promise<CommandOutcome> {
     const handler = this.handlers.get(envelope.type);
     if (!handler) {
@@ -121,7 +122,7 @@ export class SyncService {
       }
     }
     try {
-      return await withSavepoint(() => handler.handle(payload, { actor, occurredAt }));
+      return await withSavepoint(() => handler.handle(payload, { actor, occurredAt, syncCommandId }));
     } catch (err) {
       // The savepoint has already undone whatever the handler wrote.
       if (err instanceof CommandRejectedError) {

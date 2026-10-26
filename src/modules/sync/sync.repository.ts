@@ -6,19 +6,19 @@ import type { CommandOutcome } from './command-outcome.js';
 @Injectable()
 export class SyncRepository {
   /**
-   * Claims a command as the very first write of its transaction. True means
-   * this transaction owns it. False means it already exists: a concurrent
-   * duplicate waits here on the unique index until the first transaction
-   * commits (then false) or rolls back (then true).
+   * Claims a command as the very first write of its transaction. The new
+   * row's id means this transaction owns it. null means it already exists: a
+   * concurrent duplicate waits here on the unique index until the first
+   * transaction commits (then null) or rolls back (then an id).
    */
-  async claim(commandId: string, type: string, occurredAt: Date, receivedAt: Date): Promise<boolean> {
+  async claim(commandId: string, type: string, occurredAt: Date, receivedAt: Date): Promise<string | null> {
     const rows = await currentTx().$queryRaw<{ id: string }[]>`
       INSERT INTO sync_command (business_id, command_id, type, status, occurred_at, received_at)
       VALUES (${currentBusinessId()}::uuid, ${commandId}::uuid, ${type}, 'PROCESSING',
               ${occurredAt}::timestamptz, ${receivedAt}::timestamptz)
       ON CONFLICT (business_id, command_id) DO NOTHING
       RETURNING id`;
-    return rows.length === 1;
+    return rows[0]?.id ?? null;
   }
 
   /** The stored outcome of a command that was already processed. */

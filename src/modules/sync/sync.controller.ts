@@ -24,7 +24,10 @@ export class SyncController {
     for (const r of results) {
       if (r.failure) {
         // Ids and types only: payloads hold prices, names and barcodes.
-        request.log.error({ commandId: r.commandId, commandType: r.failure.type, errorName: r.failure.errorName }, 'sync command failed');
+        request.log.error(
+          { commandId: r.commandId, commandType: r.failure.type, errorName: r.failure.errorName, errorCode: r.failure.errorCode },
+          'sync command failed',
+        );
       }
     }
     return { results: results.map(toJson) };

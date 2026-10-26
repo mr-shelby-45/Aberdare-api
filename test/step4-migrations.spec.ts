@@ -77,6 +77,7 @@ describe('step 4: migrations keep hand-written SQL', () => {
       );
       const nullif = "(business_id = (NULLIF(current_setting('app.business_id'::text, true), ''::text))::uuid)";
       expect(rows.map((r) => r.tbl)).toEqual([
+        'approval',
         'audit_log',
         'change_log',
         'device',
@@ -115,6 +116,7 @@ describe('step 4: migrations keep hand-written SQL', () => {
         { tgname: 'pack_type_change_log', tbl: 'pack_type' },
         { tgname: 'product_barcode_change_log', tbl: 'product_barcode' },
         { tgname: 'product_change_log', tbl: 'product' },
+        { tgname: 'stock_balance_change_log', tbl: 'stock_balance' },
       ]);
       expect(found.functions).toEqual([{ proname: 'log_product_barcode_change' }, { proname: 'log_product_change' }]);
       expect(found.extensions).toEqual([{ extname: 'pg_trgm' }]);

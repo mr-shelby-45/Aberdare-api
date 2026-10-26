@@ -17,7 +17,7 @@ export interface CommandResult extends Omit<CommandOutcome, 'status'> {
   commandId: string | null;
   status: CommandOutcome['status'] | 'FAILED';
   // FAILED only, for the server log; never sent to the phone.
-  failure?: { type: string; errorName: string };
+  failure?: { type: string; errorName: string; errorCode?: string };
 }
 
 // The identity the commands are processed for. All of it comes from the

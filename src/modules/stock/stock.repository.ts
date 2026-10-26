@@ -1,6 +1,27 @@
 import { Injectable } from '@nestjs/common';
 import { currentBusinessId, currentTx } from '../../database/tenant.js';
 
+export type MovementType = 'RECEIVE' | 'ADJUST' | 'COUNT' | 'CONVERT_OUT' | 'CONVERT_IN' | 'SALE';
+export type AdjustReason = 'DAMAGED' | 'EXPIRED' | 'LOST' | 'FOUND' | 'SUPPLIER_RETURN' | 'CORRECTION' | 'OTHER';
+
+/** Who and when, for every movement (docs/phase-c-design.md section 3). */
+export interface MovementContext {
+  // Phone time.
+  occurredAt: Date;
+  createdByMembershipId: string | null;
+  // The sync_command row (its id, not the phone's command_id).
+  syncCommandId: string | null;
+}
+
+export interface MovementRow {
+  locationId: string;
+  packTypeId: string;
+  quantityChange: number;
+  movementType: MovementType;
+  quantityAfter: number;
+  reason?: AdjustReason | null;
+}
+
 // All stock SQL. Every method runs on the current tenant transaction.
 // The business_id filters below are in addition to RLS, never instead of it
 // (CLAUDE.md rule 6).
@@ -47,30 +68,37 @@ export class StockRepository {
     return rows[0].quantity;
   }
 
-  /** Appends a ledger row. Returns its id. */
-  async insertMovement(
-    locationId: string,
-    packTypeId: string,
-    quantityChange: number,
-  ): Promise<string> {
+  /**
+   * Appends a ledger row. Returns its id. quantityAfter is the balance the
+   * balance statement just returned, in the same transaction.
+   */
+  async insertMovement(movement: MovementRow, ctx: MovementContext): Promise<string> {
     const row = await currentTx().stockMovement.create({
       data: {
         businessId: currentBusinessId(),
-        locationId,
-        packTypeId,
-        quantityChange,
+        locationId: movement.locationId,
+        packTypeId: movement.packTypeId,
+        quantityChange: movement.quantityChange,
+        movementType: movement.movementType,
+        quantityAfter: movement.quantityAfter,
+        reason: movement.reason ?? null,
+        occurredAt: ctx.occurredAt,
+        createdByMembershipId: ctx.createdByMembershipId,
+        syncCommandId: ctx.syncCommandId,
       },
       select: { id: true },
     });
     return row.id;
   }
 
-  async insertConversion(
-    outMovementId: string,
-    inMovementId: string,
-  ): Promise<string> {
+  async insertConversion(conversion: {
+    outMovementId: string;
+    inMovementId: string;
+    createdByMembershipId: string;
+    approvedByMembershipId: string;
+  }): Promise<string> {
     const row = await currentTx().stockConversion.create({
-      data: { businessId: currentBusinessId(), outMovementId, inMovementId },
+      data: { businessId: currentBusinessId(), ...conversion },
       select: { id: true },
     });
     return row.id;
@@ -105,6 +133,37 @@ export class StockRepository {
       _sum: { quantityChange: true },
     });
     return agg._sum.quantityChange ?? 0;
+  }
+
+  /**
+   * Every pool whose cached balance differs from the sum of its movements,
+   * including a balance with no movements and movements with no balance
+   * (docs/phase-c-design.md section 3). Only this business's rows: RLS, plus
+   * the explicit filter. Sums are read as text, so a large total never
+   * passes through a JavaScript number before it is checked.
+   */
+  async integrityMismatches(): Promise<{ locationId: string; packTypeId: string; balance: string | null; ledgerSum: string | null }[]> {
+    const business = currentBusinessId();
+    const rows = await currentTx().$queryRaw<
+      { location_id: string; pack_type_id: string; balance: string | null; ledger_sum: string | null }[]
+    >`
+      WITH b AS (
+        SELECT location_id, pack_type_id, quantity::bigint AS quantity
+          FROM stock_balance WHERE business_id = ${business}::uuid
+      ), m AS (
+        SELECT location_id, pack_type_id, sum(quantity_change)::bigint AS total
+          FROM stock_movement WHERE business_id = ${business}::uuid
+         GROUP BY location_id, pack_type_id
+      )
+      SELECT coalesce(b.location_id, m.location_id) AS location_id,
+             coalesce(b.pack_type_id, m.pack_type_id) AS pack_type_id,
+             b.quantity::text AS balance,
+             m.total::text AS ledger_sum
+        FROM b FULL OUTER JOIN m
+          ON b.location_id = m.location_id AND b.pack_type_id = m.pack_type_id
+       WHERE b.quantity IS NULL OR m.total IS NULL OR b.quantity <> m.total
+       ORDER BY 1, 2`;
+    return rows.map((r) => ({ locationId: r.location_id, packTypeId: r.pack_type_id, balance: r.balance, ledgerSum: r.ledger_sum }));
   }
 
   /** Whether any ledger row exists for this pack type, at any location. */

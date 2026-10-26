@@ -444,6 +444,7 @@ describe('B5: hardening', { timeout: 120_000 }, () => {
     // The exact list: a new table, or a changed grant, must be added here on purpose.
     expect(actual).toEqual({
       _prisma_migrations: '-',
+      approval: 'SELECT,INSERT', // plus UPDATE of the two consumption columns only (checked below; Phase C1)
       audit_log: 'SELECT,INSERT',
       business: 'SELECT', // plus INSERT of id, name, type only (checked below)
       change_log: 'SELECT,INSERT',
@@ -469,12 +470,23 @@ describe('B5: hardening', { timeout: 120_000 }, () => {
           await c.query<{ table_name: string; privilege_type: string; columns: string }>(
             `SELECT table_name, privilege_type, string_agg(column_name, ',' ORDER BY column_name) AS columns
                FROM information_schema.column_privileges
-              WHERE grantee = 'app_user' AND table_schema = 'public' AND table_name IN ('business', 'person')
+              WHERE grantee = 'app_user' AND table_schema = 'public' AND table_name IN ('approval', 'business', 'person')
               GROUP BY 1, 2 ORDER BY 1, 2`,
           )
         ).rows,
     );
     expect(columns).toEqual([
+      {
+        table_name: 'approval',
+        privilege_type: 'INSERT',
+        columns: 'approver_membership_id,business_id,consumed_at,consumed_by_sync_command_id,created_at,device_id,id,purpose,requester_membership_id,valid_until',
+      },
+      {
+        table_name: 'approval',
+        privilege_type: 'SELECT',
+        columns: 'approver_membership_id,business_id,consumed_at,consumed_by_sync_command_id,created_at,device_id,id,purpose,requester_membership_id,valid_until',
+      },
+      { table_name: 'approval', privilege_type: 'UPDATE', columns: 'consumed_at,consumed_by_sync_command_id' },
       { table_name: 'business', privilege_type: 'INSERT', columns: 'id,name,type' },
       { table_name: 'business', privilege_type: 'SELECT', columns: 'created_at,id,name,type,updated_at' },
       { table_name: 'person', privilege_type: 'SELECT', columns: 'created_at,email,email_verified_at,id,phone,phone_verified_at' },

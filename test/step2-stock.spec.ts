@@ -1,6 +1,6 @@
 import { PrismaService } from '../src/database/prisma.service.js';
 import { TenantRunner, currentTx } from '../src/database/tenant.js';
-import { StockRepository } from '../src/modules/stock/stock.repository.js';
+import { type MovementContext, StockRepository } from '../src/modules/stock/stock.repository.js';
 import { StockService } from '../src/modules/stock/stock.service.js';
 import { resetTables } from './helpers/db.js';
 import { prismaWithPool } from './helpers/prisma.js';
@@ -36,6 +36,11 @@ describe('step 2: atomic stock updates under concurrency', () => {
 
   const seedShop = (name?: string): Promise<Shop> => seedShopWith(tenants, name);
 
+  // Phase C1: every movement names its time and creator. A fixed phone time;
+  // these spike tests do not depend on it.
+  const AT = new Date('2026-10-26T08:00:00.000Z');
+  const ctx = (s: Shop): MovementContext => ({ occurredAt: AT, createdByMembershipId: s.member, syncCommandId: null });
+
   /** Balance, ledger sum and ledger row count for one pool, read as the tenant. */
   async function ledger(shop: Shop, packTypeId: string) {
     return tenants.run(shop.biz, async () => ({
@@ -59,13 +64,13 @@ describe('step 2: atomic stock updates under concurrency', () => {
 
   async function strictScenario(): Promise<void> {
     const shop = await seedShop();
-    await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.piece, 10));
+    await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.piece, 10, ctx(shop)));
 
     const { ok, failed } = settle(
       await Promise.allSettled(
         Array.from({ length: 50 }, () =>
           tenants.run(shop.biz, () =>
-            stock.decreaseStrict(shop.loc, shop.piece, 1),
+            stock.decreaseStrict(shop.loc, shop.piece, 1, ctx(shop)),
           ),
         ),
       ),
@@ -89,13 +94,13 @@ describe('step 2: atomic stock updates under concurrency', () => {
 
   async function saleScenario(): Promise<void> {
     const shop = await seedShop();
-    await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.piece, 10));
+    await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.piece, 10, ctx(shop)));
 
     const { ok, failed } = settle(
       await Promise.allSettled(
         Array.from({ length: 50 }, () =>
           tenants.run(shop.biz, () =>
-            stock.decreaseForSale(shop.loc, shop.piece, 1),
+            stock.decreaseForSale(shop.loc, shop.piece, 1, ctx(shop)),
           ),
         ),
       ),
@@ -118,7 +123,7 @@ describe('step 2: atomic stock updates under concurrency', () => {
     const shop = await seedShop();
     const start = 30;
     await tenants.run(shop.biz, () =>
-      stock.receive(shop.loc, shop.piece, start),
+      stock.receive(shop.loc, shop.piece, start, ctx(shop)),
     );
 
     const sizes = [1, 2, 5];
@@ -131,10 +136,10 @@ describe('step 2: atomic stock updates under concurrency', () => {
       ops.map((op) =>
         tenants.run(shop.biz, () => {
           if (op.kind === 'strict')
-            return stock.decreaseStrict(shop.loc, shop.piece, op.qty);
+            return stock.decreaseStrict(shop.loc, shop.piece, op.qty, ctx(shop));
           if (op.kind === 'sale')
-            return stock.decreaseForSale(shop.loc, shop.piece, op.qty);
-          return stock.receive(shop.loc, shop.piece, op.qty);
+            return stock.decreaseForSale(shop.loc, shop.piece, op.qty, ctx(shop));
+          return stock.receive(shop.loc, shop.piece, op.qty, ctx(shop));
         }),
       ),
     );
@@ -162,13 +167,13 @@ describe('step 2: atomic stock updates under concurrency', () => {
 
   async function conversionScenario(): Promise<void> {
     const shop = await seedShop();
-    await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.carton, 5));
+    await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.carton, 5, ctx(shop)));
 
     const { ok, failed } = settle(
       await Promise.allSettled(
         Array.from({ length: 20 }, () =>
           tenants.run(shop.biz, () =>
-            stock.convertOne(shop.loc, shop.carton, shop.piece),
+            stock.convertOne(shop.loc, shop.carton, shop.piece, ctx(shop)),
           ),
         ),
       ),
@@ -206,13 +211,13 @@ describe('step 2: atomic stock updates under concurrency', () => {
 
   it('4. a failure halfway leaves neither a movement nor a balance change', async () => {
     const shop = await seedShop();
-    await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.piece, 10));
+    await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.piece, 10, ctx(shop)));
 
     // a) Error after the balance update and movement insert, before commit.
     let seenInside: number | undefined;
     await expect(
       tenants.run(shop.biz, async () => {
-        await stock.decreaseStrict(shop.loc, shop.piece, 3);
+        await stock.decreaseStrict(shop.loc, shop.piece, 3, ctx(shop));
         seenInside = await repo.balanceOf(shop.loc, shop.piece);
         throw new Error('crash before commit');
       }),
@@ -224,17 +229,17 @@ describe('step 2: atomic stock updates under concurrency', () => {
       new Error('crash between balance and ledger'),
     );
     await expect(
-      tenants.run(shop.biz, () => stock.decreaseForSale(shop.loc, shop.piece, 4)),
+      tenants.run(shop.biz, () => stock.decreaseForSale(shop.loc, shop.piece, 4, ctx(shop))),
     ).rejects.toThrow('crash between balance and ledger');
 
     // c) A conversion that fails at its very last write.
-    await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.carton, 1));
+    await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.carton, 1, ctx(shop)));
     vi.spyOn(repo, 'insertConversion').mockRejectedValueOnce(
       new Error('crash before linking'),
     );
     await expect(
       tenants.run(shop.biz, () =>
-        stock.convertOne(shop.loc, shop.carton, shop.piece),
+        stock.convertOne(shop.loc, shop.carton, shop.piece, ctx(shop)),
       ),
     ).rejects.toThrow('crash before linking');
 
@@ -244,10 +249,10 @@ describe('step 2: atomic stock updates under concurrency', () => {
 
   it('5. break bulk: one conversion writes two linked movements; 20 concurrent against 5 cartons -> 5 succeed', async () => {
     const shop = await seedShop();
-    await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.carton, 2));
+    await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.carton, 2, ctx(shop)));
 
     const result = await tenants.run(shop.biz, () =>
-      stock.convertOne(shop.loc, shop.carton, shop.piece),
+      stock.convertOne(shop.loc, shop.carton, shop.piece, ctx(shop)),
     );
     expect(result.toQuantity).toBe(24);
 
@@ -294,7 +299,7 @@ describe('step 2: atomic stock updates under concurrency', () => {
 
     it('app_user cannot UPDATE or DELETE ledger rows, or DELETE balances', async () => {
       const shop = await seedShop();
-      await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.piece, 5));
+      await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.piece, 5, ctx(shop)));
       for (const [sql, table] of [
         ['UPDATE stock_movement SET quantity_change = 99', 'stock_movement'],
         ['DELETE FROM stock_movement', 'stock_movement'],
@@ -314,10 +319,10 @@ describe('step 2: atomic stock updates under concurrency', () => {
       const a = await seedShop('Shop A');
       const b = await seedShop('Shop B');
       await expect(
-        tenants.run(a.biz, () => stock.receive(b.loc, a.piece, 5)),
+        tenants.run(a.biz, () => stock.receive(b.loc, a.piece, 5, ctx(a))),
       ).rejects.toThrow(/foreign key/i);
       await expect(
-        tenants.run(a.biz, () => stock.receive(a.loc, b.piece, 5)),
+        tenants.run(a.biz, () => stock.receive(a.loc, b.piece, 5, ctx(a))),
       ).rejects.toThrow(/foreign key/i);
       expect(await ledger(b, b.piece)).toEqual({ balance: 0, sum: 0, rows: 0 });
     });
@@ -325,7 +330,7 @@ describe('step 2: atomic stock updates under concurrency', () => {
     it("a business cannot see another business's stock", async () => {
       const a = await seedShop('Shop A');
       const b = await seedShop('Shop B');
-      await tenants.run(a.biz, () => stock.receive(a.loc, a.piece, 7));
+      await tenants.run(a.biz, () => stock.receive(a.loc, a.piece, 7, ctx(a)));
       const seenByB = await tenants.run(b.biz, async () => ({
         balance: await repo.balanceOf(a.loc, a.piece),
         movements: await currentTx().stockMovement.count(),
@@ -336,24 +341,27 @@ describe('step 2: atomic stock updates under concurrency', () => {
 
     it('check constraints: no zero movements, no self-linked conversion, no zero-size pack', async () => {
       const shop = await seedShop();
-      await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.piece, 1));
+      await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.piece, 1, ctx(shop)));
       const [{ id }] = await tenants.run(shop.biz, () =>
         currentTx().$queryRaw<{ id: string }[]>`SELECT id FROM stock_movement LIMIT 1`,
       );
 
+      // Every column the row needs (Phase C1) is valid, so the targeted check
+      // is the only rule broken. SALE has no sign rule of its own, so a zero
+      // change can only trip the non-zero check.
       await expect(
         tenants.run(shop.biz, () =>
           currentTx().$executeRaw`
-            INSERT INTO stock_movement (business_id, location_id, pack_type_id, quantity_change)
-            VALUES (${shop.biz}::uuid, ${shop.loc}::uuid, ${shop.piece}::uuid, 0)`,
+            INSERT INTO stock_movement (business_id, location_id, pack_type_id, quantity_change, movement_type, quantity_after, occurred_at)
+            VALUES (${shop.biz}::uuid, ${shop.loc}::uuid, ${shop.piece}::uuid, 0, 'SALE', 1, ${AT}::timestamptz)`,
         ),
       ).rejects.toThrow(/stock_movement_quantity_change_nonzero/);
 
       await expect(
         tenants.run(shop.biz, () =>
           currentTx().$executeRaw`
-            INSERT INTO stock_conversion (business_id, out_movement_id, in_movement_id)
-            VALUES (${shop.biz}::uuid, ${id}::uuid, ${id}::uuid)`,
+            INSERT INTO stock_conversion (business_id, out_movement_id, in_movement_id, created_by_membership_id, approved_by_membership_id)
+            VALUES (${shop.biz}::uuid, ${id}::uuid, ${id}::uuid, ${shop.member}::uuid, ${shop.member}::uuid)`,
         ),
       ).rejects.toThrow(/stock_conversion_movements_differ/);
 
@@ -369,10 +377,10 @@ describe('step 2: atomic stock updates under concurrency', () => {
       const shop = await seedShop();
       for (const qty of [0, -1, 1.5, Number.NaN]) {
         await expect(
-          tenants.run(shop.biz, () => stock.decreaseForSale(shop.loc, shop.piece, qty)),
+          tenants.run(shop.biz, () => stock.decreaseForSale(shop.loc, shop.piece, qty, ctx(shop))),
         ).rejects.toMatchObject({ code: 'STOCK_QUANTITY_INVALID' });
         await expect(
-          tenants.run(shop.biz, () => stock.receive(shop.loc, shop.piece, qty)),
+          tenants.run(shop.biz, () => stock.receive(shop.loc, shop.piece, qty, ctx(shop))),
         ).rejects.toMatchObject({ code: 'STOCK_QUANTITY_INVALID' });
       }
       expect(await ledger(shop, shop.piece)).toEqual({ balance: 0, sum: 0, rows: 0 });
@@ -381,15 +389,15 @@ describe('step 2: atomic stock updates under concurrency', () => {
     it('a strict decrease on a pool with no balance row fails with STOCK_INSUFFICIENT', async () => {
       const shop = await seedShop();
       await expect(
-        tenants.run(shop.biz, () => stock.decreaseStrict(shop.loc, shop.piece, 1)),
+        tenants.run(shop.biz, () => stock.decreaseStrict(shop.loc, shop.piece, 1, ctx(shop))),
       ).rejects.toMatchObject({ code: 'STOCK_INSUFFICIENT' });
     });
 
     it('converting pieces up into cartons is refused', async () => {
       const shop = await seedShop();
-      await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.piece, 48));
+      await tenants.run(shop.biz, () => stock.receive(shop.loc, shop.piece, 48, ctx(shop)));
       await expect(
-        tenants.run(shop.biz, () => stock.convertOne(shop.loc, shop.piece, shop.carton)),
+        tenants.run(shop.biz, () => stock.convertOne(shop.loc, shop.piece, shop.carton, ctx(shop))),
       ).rejects.toMatchObject({ code: 'STOCK_CONVERSION_INVALID' });
       expect(await ledger(shop, shop.piece)).toEqual({ balance: 48, sum: 48, rows: 1 });
     });

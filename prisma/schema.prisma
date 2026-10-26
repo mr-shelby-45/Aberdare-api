@@ -31,6 +31,7 @@ model Business {
   refreshTokens     RefreshToken[]
   auditLogs         AuditLog[]
   productBarcodes   ProductBarcode[]
+  approvals         Approval[]
 
   @@map("business")
 }
@@ -150,10 +151,31 @@ model StockMovement {
   locationId     String           @map("location_id") @db.Uuid
   packTypeId     String           @map("pack_type_id") @db.Uuid
   quantityChange Int              @map("quantity_change")
+  // Phase C (docs/phase-c-design.md section 3). Checks in *_c1_stock_movement_checks.
+  // RECEIVE, ADJUST, COUNT, CONVERT_OUT, CONVERT_IN or SALE.
+  movementType   String           @map("movement_type")
+  // The balance right after this movement, from RETURNING on the balance statement.
+  quantityAfter  Int              @map("quantity_after")
+  // Phone time.
+  occurredAt     DateTime         @map("occurred_at") @db.Timestamptz(6)
+  createdByMembershipId String?   @map("created_by_membership_id") @db.Uuid
+  // Also groups the lines of one delivery or count.
+  syncCommandId  String?          @map("sync_command_id") @db.Uuid
+  // RECEIVE only; never changes pack_type.cost_price.
+  unitCost       Decimal?         @map("unit_cost") @db.Decimal(14, 2)
+  // ADJUST only, and required there.
+  reason         String?
+  note           String?
+  reference      String?
+  // COUNT only, both: quantity_change = counted - expected.
+  expectedQuantity Int?           @map("expected_quantity")
+  countedQuantity  Int?           @map("counted_quantity")
   createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
   business       Business         @relation(fields: [businessId], references: [id])
   location       Location         @relation(fields: [businessId, locationId], references: [businessId, id])
   packType       PackType         @relation(fields: [businessId, packTypeId], references: [businessId, id])
+  createdBy      Membership?      @relation("MovementCreatedBy", fields: [businessId, createdByMembershipId], references: [businessId, id])
+  syncCommand    SyncCommand?     @relation(fields: [businessId, syncCommandId], references: [businessId, id])
   conversionOut  StockConversion? @relation("ConversionOut")
   conversionIn   StockConversion? @relation("ConversionIn")
 
@@ -168,14 +190,24 @@ model StockConversion {
   businessId    String        @map("business_id") @db.Uuid
   outMovementId String        @map("out_movement_id") @db.Uuid
   inMovementId  String        @map("in_movement_id") @db.Uuid
+  // Phase C: a manager or owner converting for themselves is their own approver.
+  createdByMembershipId  String     @map("created_by_membership_id") @db.Uuid
+  approvedByMembershipId String     @map("approved_by_membership_id") @db.Uuid
+  // The approval an attendant used; NULL when the member had stock.convert.
+  approvalId    String?       @map("approval_id") @db.Uuid
   createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
   business      Business      @relation(fields: [businessId], references: [id])
   outMovement   StockMovement @relation("ConversionOut", fields: [businessId, outMovementId], references: [businessId, id])
   inMovement    StockMovement @relation("ConversionIn", fields: [businessId, inMovementId], references: [businessId, id])
+  createdBy     Membership    @relation("ConversionCreatedBy", fields: [businessId, createdByMembershipId], references: [businessId, id])
+  approvedBy    Membership    @relation("ConversionApprovedBy", fields: [businessId, approvedByMembershipId], references: [businessId, id])
+  approval      Approval?     @relation(fields: [businessId, approvalId], references: [businessId, id])
 
   // Each movement belongs to at most one conversion.
   @@unique([businessId, outMovementId])
   @@unique([businessId, inMovementId])
+  // An approval is used by at most one conversion.
+  @@unique([businessId, approvalId])
   @@map("stock_conversion")
 }
 
@@ -208,7 +240,11 @@ model SyncCommand {
   receivedAt DateTime          @map("received_at") @db.Timestamptz(6)
   createdAt  DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
   business   Business          @relation(fields: [businessId], references: [id])
+  movements  StockMovement[]
+  approvalsConsumed Approval[]
 
+  // Target for composite foreign keys (Phase C).
+  @@unique([businessId, id])
   @@unique([businessId, commandId])
   @@map("sync_command")
 }
@@ -327,6 +363,9 @@ model Membership {
   tempPinHash           String?           @map("temp_pin_hash")
   tempPinExpiresAt      DateTime?         @map("temp_pin_expires_at") @db.Timestamptz(6)
   tempPinFailedCount    Int               @default(0) @map("temp_pin_failed_count")
+  // Phase C: approval PIN attempts, separate from the login counters above.
+  approvalFailedCount   Int               @default(0) @map("approval_failed_count")
+  approvalLockedUntil   DateTime?         @map("approval_locked_until") @db.Timestamptz(6)
   // NULL for the owner membership created at signup.
   createdByMembershipId String?           @map("created_by_membership_id") @db.Uuid
   createdAt             DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
@@ -339,6 +378,11 @@ model Membership {
   refreshTokens         RefreshToken[]
   auditEntries          AuditLog[]
   barcodesCreated       ProductBarcode[]
+  movementsCreated      StockMovement[]   @relation("MovementCreatedBy")
+  conversionsCreated    StockConversion[] @relation("ConversionCreatedBy")
+  conversionsApproved   StockConversion[] @relation("ConversionApprovedBy")
+  approvalsRequested    Approval[]        @relation("ApprovalRequester")
+  approvalsGiven        Approval[]        @relation("ApprovalApprover")
 
   @@unique([businessId, id])
   @@unique([businessId, personId])
@@ -367,6 +411,7 @@ model Device {
   registeredBy             Membership         @relation(fields: [businessId, registeredByMembershipId], references: [businessId, id])
   memberLinks              DeviceMembership[]
   refreshTokens            RefreshToken[]
+  approvals                Approval[]
 
   @@unique([businessId, id])
   @@map("device")
@@ -475,4 +520,34 @@ model AuditLog {
 
   @@index([businessId, occurredAt])
   @@map("audit_log")
+}
+
+// Phase C (docs/phase-c-design.md sections 3 and 6): a short-lived permission
+// minted online with an approver's PIN, bound to the requester and device,
+// consumed once by one atomic UPDATE. Generic, so Phase E can reuse it.
+// app_user: SELECT, INSERT, and UPDATE of consumed_at and
+// consumed_by_sync_command_id only. No DELETE.
+model Approval {
+  id                      String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId              String       @map("business_id") @db.Uuid
+  // STOCK_CONVERT for now.
+  purpose                 String
+  requesterMembershipId   String       @map("requester_membership_id") @db.Uuid
+  approverMembershipId    String       @map("approver_membership_id") @db.Uuid
+  deviceId                String       @map("device_id") @db.Uuid
+  // Set from the Clock on mint (the consumption statement compares phone time with it).
+  createdAt               DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  // createdAt plus 15 minutes, from the Clock.
+  validUntil              DateTime     @map("valid_until") @db.Timestamptz(6)
+  consumedAt              DateTime?    @map("consumed_at") @db.Timestamptz(6)
+  consumedBySyncCommandId String?      @map("consumed_by_sync_command_id") @db.Uuid
+  business                Business     @relation(fields: [businessId], references: [id])
+  requester               Membership   @relation("ApprovalRequester", fields: [businessId, requesterMembershipId], references: [businessId, id])
+  approver                Membership   @relation("ApprovalApprover", fields: [businessId, approverMembershipId], references: [businessId, id])
+  device                  Device       @relation(fields: [businessId, deviceId], references: [businessId, id])
+  consumedBy              SyncCommand? @relation(fields: [businessId, consumedBySyncCommandId], references: [businessId, id])
+  conversion              StockConversion?
+
+  @@unique([businessId, id])
+  @@map("approval")
 }

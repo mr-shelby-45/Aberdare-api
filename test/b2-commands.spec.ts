@@ -504,7 +504,7 @@ describe('B2: command endpoint and catalogue commands', { timeout: 120_000 }, ()
       async (c) => (await c.query<{ id: string }>('SELECT id FROM location WHERE business_id = $1', [o.businessId])).rows[0].id,
     );
     const stock = new StockService(new StockRepository());
-    await t.app.get(TenantRunner, { strict: false }).run(o.businessId, () => stock.receive(locationId, p.carton, 3));
+    await t.app.get(TenantRunner, { strict: false }).run(o.businessId, () => stock.receive(locationId, p.carton, 3, { occurredAt: t.clock.now(), createdByMembershipId: o.membershipId, syncCommandId: null }));
 
     expect(await sendOne(o.token, carton(24))).toMatchObject({ status: 'REJECTED', reason: 'UNITS_LOCKED' });
     // Everything else can still change.

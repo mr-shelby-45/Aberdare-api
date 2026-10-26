@@ -11,6 +11,20 @@ function postgresErrorCode(err: unknown): string | undefined {
   return typeof code === 'string' ? code : undefined;
 }
 
+/**
+ * The error code worth logging (Phase C1 housekeeping): the Postgres SQLSTATE
+ * when there is one (for example "23505"), otherwise the error's own string
+ * code (Prisma's "P2028" when no transaction could be started). Logged as
+ * errorCode, because the field name "code" is redacted to protect one-time
+ * codes.
+ */
+export function errorCodeForLog(err: unknown): string | undefined {
+  const sqlState = postgresErrorCode(err);
+  if (sqlState) return sqlState;
+  const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined;
+  return typeof code === 'string' ? code : undefined;
+}
+
 /** True when an insert or update hit a unique constraint. */
 export function isUniqueViolation(err: unknown): boolean {
   return postgresErrorCode(err) === '23505';

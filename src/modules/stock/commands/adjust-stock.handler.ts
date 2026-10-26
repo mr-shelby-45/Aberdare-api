@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { CommandHandler } from '../../sync/command-handler.js';
+import type { CommandContext, CommandHandler } from '../../sync/command-handler.js';
 import type { CommandOutcome } from '../../sync/command-outcome.js';
 import { CommandRejectedError } from '../../sync/command-rejected.error.js';
 import { StockQuantityChangeDto } from '../dto/stock-quantity-change.dto.js';
@@ -18,12 +18,14 @@ export class AdjustStockHandler
 
   constructor(private readonly stock: StockService) {}
 
-  async handle(payload: StockQuantityChangeDto): Promise<CommandOutcome> {
+  async handle(payload: StockQuantityChangeDto, ctx: CommandContext): Promise<CommandOutcome> {
+    const movement = { occurredAt: ctx.occurredAt, createdByMembershipId: ctx.actor.membershipId, syncCommandId: ctx.syncCommandId };
     try {
       const { quantity } = await this.stock.decreaseStrict(
         payload.locationId,
         payload.packTypeId,
         payload.quantity,
+        movement,
       );
       return { status: 'ACCEPTED', data: { quantity } };
     } catch (err) {

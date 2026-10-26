@@ -28,12 +28,9 @@ describe('step 3: idempotent commands', () => {
   /** A manager: may receive and adjust stock. */
   const manager = (s: Shop): SyncActor => ({
     businessId: s.biz,
-    membershipId: MEMBER,
+    membershipId: s.member,
     permissions: new Set(['stock.receive', 'stock.adjust']),
   });
-
-  // The acting membership; the stock handlers do not use it.
-  const MEMBER = randomUUID();
 
   // Any valid ISO time; the spike tests do not depend on it.
   const OCCURRED = '2026-10-24T08:00:00.000Z';
@@ -148,7 +145,7 @@ describe('step 3: idempotent commands', () => {
     // An actor who may receive stock but not adjust it.
     const receiver: SyncActor = {
       businessId: shop.biz,
-      membershipId: MEMBER,
+      membershipId: shop.member,
       permissions: new Set(['stock.receive']),
     };
     const batch = [receive(shop, 1), adjust(shop, 3), receive(shop, 2)];
@@ -166,7 +163,7 @@ describe('step 3: idempotent commands', () => {
     await sync.processCommands(manager(shop), [receive(shop, 10)]);
     const noAdjust: SyncActor = {
       businessId: shop.biz,
-      membershipId: MEMBER,
+      membershipId: shop.member,
       permissions: new Set(['stock.receive']),
     };
     const cmd = adjust(shop, 3);

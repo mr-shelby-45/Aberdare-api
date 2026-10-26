@@ -5,6 +5,7 @@ import {
   HttpException,
 } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
+import { errorCodeForLog } from '../../database/db-errors.js';
 import { ApiError } from './api.error.js';
 
 const CODES: Record<number, { code: string; message: string }> = {
@@ -72,14 +73,14 @@ function clientStatus(exception: unknown): number | undefined {
 
 // For the log only. The message is left out on purpose: error messages (from
 // Prisma, for example) can contain the values that were being written, such
-// as a phone number or a PIN (CLAUDE.md rule 12). Name, code and stack frames
-// are enough to find the failing line.
+// as a phone number or a PIN (CLAUDE.md rule 12). Name, error code and stack
+// frames are enough to find the failing line. The code is logged as errorCode
+// (Phase C1): the field name "code" is redacted, which once hid Prisma's codes.
 function safeSummary(exception: unknown): Record<string, unknown> {
   if (!(exception instanceof Error)) return { type: typeof exception };
-  const code = (exception as { code?: unknown }).code;
   return {
     name: exception.name,
-    code: typeof code === 'string' ? code : undefined,
+    errorCode: errorCodeForLog(exception),
     frames: (exception.stack ?? '').split('\n').slice(1, 11).map((line) => line.trim()),
   };
 }
