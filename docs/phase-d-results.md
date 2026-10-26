@@ -1,6 +1,81 @@
 # Phase D results
 
-Filled in step by step. The full summary (see `docs/phase-d-design.md` section 13) is written when D4 is finished. Only Ian marks the phase done, in `CLAUDE.md` section 2.
+**Status: all four steps (D1 to D4) passed. Waiting for Ian's review.** Only Ian marks Phase D done, in CLAUDE.md section 2. The manual walkthrough for Ian is `docs/phase-d-walkthrough.md`.
+
+**Final suite (end of phase, 3 runs in a row):** 3 runs done, all passed, on the working tree this commit records. Run 1: 31 files, 355 of 355 (355.3 s). Run 2: 31 files, 355 of 355 (351.2 s). Run 3: 31 files, 355 of 355 (355.8 s). Lint, type-check, build and the drift check were clean before the runs. Earlier failed runs during Phase D are recorded in their step sections below, as observed.
+
+## Summary
+
+| Step | What it built | New tests | Phase D cumulative | Workarounds and notable changes |
+|---|---|---|---|---|
+| D1 | `change_log.txid`, the finished-transactions query, the changes cursor, the prune and its horizon, device column grants, the device stamp | 7 | 7 | Reused the A1 `device.last_sync_at`; replaced `app_user`'s table-wide device UPDATE with five columns; owner-only policies for the prune (FORCE RLS binds the owner); one full run failed the A3 timing check under load, rerun clean |
+| D2 | `GET /v1/sync/snapshot`, the `SyncTables` list | 9 | 16 | Each table reads through its own module's service (no cross-module exception); a held-open transaction needed to show the start-cursor order |
+| D3 | `GET /v1/sync/changes` | 9 | 25 | Collapsed changes at the first appearance; `limit` counts log rows; mutation 1 also run in a sharper form; mutation 7 can only fail closed |
+| D4 | Randomized sync check (3 seeds), log check, walkthrough document and test | 5 | 30 | A held-open transaction in every seed run forces an out-of-order commit; random renames avoid its row |
+
+New tests count `it` cases as Vitest reports them; the D4 randomized check is one case per seed (three).
+
+## Final patterns
+
+| Concern | Pattern | Where |
+|---|---|---|
+| Finished transactions only | `SELECT ... FROM change_log WHERE business_id = $b AND txid < pg_snapshot_xmin(pg_current_snapshot()) AND (txid, id) > ($txid::xid8, $id::bigint) ORDER BY txid, id LIMIT $n`. Every transaction below xmin has finished and any later writer gets a higher txid, so nothing appears behind a returned position | `ChangeLogRepository.finishedAfter` |
+| Positions | `(txid, id)` as decimal text, compared in SQL; never JavaScript numbers; never `changed_at` | `change-log.repository.ts` |
+| Start cursor | `(pg_snapshot_xmin(pg_current_snapshot()), 0)`, taken before any snapshot row is read, in the same request transaction | `ChangeLogRepository.startPosition`, `SnapshotService.page` |
+| Changes cursor | Shared `SignedCursor`, kind `sync-changes`: `{ business_id, txid, id, costs }`. Not genuine or another business's: `422`. Cost visibility changed or older than the horizon: `410 SNAPSHOT_REQUIRED`. Not tied to a device | `ChangesCursor`, `ChangeFeedService.open` |
+| Snapshot | No `table` and no `cursor` starts (start cursor, then `location`); keyset by id per table with a page cursor bound to business and table; tables in a fixed order; each request its own short transaction | `SnapshotService`, `SyncTables` |
+| Changes | Read `limit + 1` finished log rows (`limit` counts log rows); skip tables the reader cannot see; collapse each record at its first appearance; read the state now (`SyncTables.byIds`); missing = delete (`key: { barcode }` for barcodes) | `ChangesService` |
+| Table list | One `SyncTables` entry per table (permission, `page`, `byIds`), each through the owning module's service; one shape function per table for both reads | `src/modules/sync/sync-tables.ts` |
+| Prune | `change_log_prune(p_before)`: `SECURITY DEFINER`, owner-only read and delete policies, EXECUTE for `app_user` only; moves the one-row horizon to the newest removed position; the Clock minus `changeLogRetentionDays` (30) from code | migration `*_d1_change_log_prune`, `ChangeLogMaintenance`, `ChangeFeedService.prune` |
+| Device stamp | `UPDATE device SET last_sync_at = $now WHERE ... AND (last_sync_at IS NULL OR last_sync_at < $now - 5 minutes)`, after the data is read, in the request's transaction; no log or audit row | `DevicesService.stampSync` |
+
+## Proof the tests catch mistakes
+
+Each design mutation was applied temporarily, the named test was shown failing (or, for 7, shown failing closed), and the change was reverted (checked byte for byte with `cmp`).
+
+| Design mutation | Test that failed | What it caught |
+|---|---|---|
+| 1. Order and filter by id only, without the finished-transactions condition | D1 test 3, D3 test 8 | rows returned while T1 was open; with only the condition removed, T1's change was lost for good |
+| 2. Take `start_cursor` after the first rows are read | D2 test 2 (held-open case) | the change committed between the read and the cursor was lost |
+| 3. `cost_price` in changes without `costs.view` | D3 test 4 | the attendant received the cost |
+| 4. `costs` not bound into the cursor | D3 test 4 | the promoted manager's old cursor was accepted |
+| 5. Prune inside the retention window | D1 test 6 | 10 rows removed instead of 4 |
+| 6. State from the log instead of the record now | D3 test 6 | a barcode added and removed came back as an upsert |
+| 7. Remove the business filter protection | D3 tests 1 and 7 | without the explicit filter RLS still isolates (tests pass, as intended); without the tenant setting the read failed closed (own changes missing, nothing leaked) |
+| 8. Skip the live device check | D2 test 7, D3 test 9 | a revoked device read a snapshot page and changes |
+| 9. Stamp without the 5-minute condition | D1 test 5a | a second stamp after 4 minutes wrote |
+| 10. No business id in the cursor | D1 test 5 | business A's cursor was accepted by business B |
+
+## Versions
+
+Unchanged. No library was added in Phase D.
+
+## Things to know
+
+1. Only a genuinely held-open transaction shows the gap problem; plain tests pass with or without the finished-transactions condition. Every gap or order test here holds one open on a raw `app_user` connection.
+2. Devices have only `ACTIVE` and `REVOKED`; "a revoked or suspended device" is tested as a revoked device or a suspended member.
+3. No preset lacks `stock.view`; the empty `stock_balance` case is tested through `SnapshotService.page()` with a reader built directly.
+4. Access tokens expire when tests move the fake clock; staff log in again by PIN, a second device for one member comes from the owner's password login.
+5. The A3 password-login timing check fails when the machine is overloaded (seen in C3 and D1); such a run is repeated, never loosened.
+6. The D4 randomized check prints its seed in the test name; `D4_SEED=<n> pnpm exec vitest run test/d4-hardening.spec.ts -t randomized` replays one.
+
+## Open risks
+
+1. Idle-in-transaction connections hold back `pg_snapshot_xmin`, so `changes` returns nothing newer than the oldest open transaction until it ends (design open item 3: an idle-in-transaction timeout in Phase H).
+2. The prune is not scheduled (Phase F); `change_log` grows until it is.
+3. Mutation 7 can only fail closed: without a BYPASSRLS role the app cannot leak, which is the design; a role with BYPASSRLS must never be given to the app.
+4. `last_sync_at` is written but shown nowhere yet (design open item 6).
+5. Snapshot size for very large catalogues on slow connections is unmeasured (design open item 7).
+6. Overload still answers 500 instead of 503 (spike open risk 4, unchanged).
+
+## Changes to the other documents
+
+- `CLAUDE.md`: the phase row for D (D1, commit `400065e`); section 8 notes for the change feed, devices, snapshot and changes (D1 to D3). The status line was not touched.
+- `docs/architecture.md`: section 5 (the finished-transactions rule, cursor, 410, snapshot, changes, devices, retention, and "as built" notes for D2 and D3), section 12 (`change_log.txid`, `change_log_horizon`), section 13 (the two endpoints), section 16 (open items 42 to 48).
+- `docs/phase-d-design.md`: Ian's edits (device stamp, business id in the cursor, device checks), committed with the D1 doc updates.
+- `docs/phase-d-walkthrough.md`: new (D4).
+
+# Step details
 
 ## D1: Migration, cursor, finished-transactions query, prune, device stamp (passed)
 
@@ -82,3 +157,17 @@ Filled in step by step. The full summary (see `docs/phase-d-design.md` section 1
 1. The promotion case uses the staff PATCH (`extra_permissions: ['costs.view']`) and back; both cursors issued under the other visibility get `410`.
 2. A second device for one member comes from the owner's password login (staff have no password); test 9 revokes the first device through the second.
 3. Three first-run problems were in my tests: the cost check had to look for the quoted value (`"150.00"`, since a random id can contain `150`); the suspend call used the owner's token from the device the test had just revoked; and an edit put a comment inside an expression.
+
+## D4: Hardening and handover (passed)
+
+**Result:** new 5, Phase D cumulative 30 (all five Phase D files), all passing in the gate run. The randomized sync check (seeds 11, 22 and 33) passed 5 runs in a row (15 of 15 seed runs). The walkthrough passed as a test, and once over real HTTP against the built API (`node dist/main`, port 3100) on the test database: 21 of 21 checks, and no cursor or cost in the API's 114 log lines.
+
+**Built (approved by Ian on 2026-10-26, with the five recommended answers):** tests and documents only, no production code.
+- `test/d4-hardening.spec.ts`, test 1: two businesses (piece, carton, case; two locations; a barcode; opening stock), 150 random operations in waves of 10 through the real API (product create, rename, price and cost change, archive and restore, barcode add and remove, location create and rename, receive, adjust, count, convert, sale-mode decreases) while one phone per business runs at the same time: the attendant in business A (no costs) and the owner in business B (costs) (answer 2). Each phone snapshots in pages of 7, then polls `changes` with a random `limit` (3, 50 or 500), replaces its cursor only after a whole page, pauses a few random milliseconds, and sometimes starts over with a fresh snapshot. A transaction held open from wave 3 to wave 9 renames business A's default location, so every run has an out-of-order commit (answer 1). Checked: every operation ended as accepted, flagged, or an expected stock rejection; no phone request failed; after a final drain each phone's copy equals a fresh snapshot row for row; the held-open change arrived.
+- Test 2, logs: marker product name, barcode and cost; paged snapshots, changes, a `410` and a `422`; no marker, no cursor value, no `rows`, `changes`, `cost_price`, `cursor=`, `start_cursor` or `next_cursor` in any log line; the sync request lines carry only the route patterns.
+- `docs/phase-d-walkthrough.md` and `test/d4-walkthrough.spec.ts` (test 3): the six steps of design section 12, with the manager's own snapshot in step 2 for the step 5 cursor (answer 3) and one paged table (pack types, `limit=1`) (answer 4).
+- Grants: no new test; the D1 inventories pin them (answer 5).
+- This results file (test 4).
+
+**Things to know:**
+1. A location rename sent while the held-open transaction holds that row would wait on its lock and stall the wave forever; the random renames leave business A's default location alone.
