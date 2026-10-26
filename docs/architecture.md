@@ -139,8 +139,9 @@ Command types and required permission:
 
 | Command | Permission |
 |---|---|
-| sale.create | sales.create |
-| payment.attach | payments.confirm |
+| sale.create | sales.create (plus payments.confirm when it carries payments) (Phase E) |
+| payment.attach | payments.confirm (Phase E) |
+| sale.void | sales.void, or a valid `SALE_VOID` approval (an attendant) (Phase E) |
 | stock.receive | stock.receive |
 | stock.adjust | stock.adjust |
 | stock.convert | stock.convert (manager or owner), or an attendant with a valid approval (Phase C) |
@@ -163,6 +164,14 @@ As designed for Phase C (`docs/phase-c-design.md` section 5): the four stock com
 - `stock.convert` `{ location_id, from_pack_type_id, to_pack_type_id, quantity, note?, approval_id? }`: larger pack to smaller pack of the same product, an even ratio; needs `stock.convert`, or a valid approval (an attendant). Result `{ from_after, to_after, units_added, approved_by_membership_id }`.
 - **Invalid lines:** a command with `lines` that has bad lines is `REJECTED / INVALID_LINES` with `result: { invalid_lines: [{ line (1-based), reason }] }` listing every bad line, and nothing is saved. The corrected delivery is a new command with a new id.
 - As built in C2 (decided with Ian): a malformed command is `VALIDATION_FAILED` as a whole (0 or more than 50 lines, an id that is not a UUID, a quantity that is not a JSON number, a cost that is not a string, unknown fields); a bad value is a line reason (`QUANTITY_INVALID` for 0, negative, fractional or over 1,000,000; `COST_INVALID`; `DUPLICATE_LINE` for the second and later use of a pack type; `PACK_TYPE_NOT_FOUND`; `PACK_TYPE_ARCHIVED`, also when the pack type's product is archived). A line gets its first problem in that order: duplicate, pack type, quantity, cost. `unit_cost` present on any line (even `null`) needs `costs.view`, as for `cost_price`. A command's lines are applied in the lock order of section 6 and reported in the payload's order. The stock commands live in `StockCommandsModule` (`src/modules/stock/`), which sits above the stock, products and locations modules, because `ProductsModule` already imports `StockModule`.
+
+As designed for Phase E (`docs/phase-e-design.md` sections 4 and 5):
+- **Never refuse a real sale.** A sale is rejected only for invalid or unauthorised input. Short stock, a price below list, a wrong phone total, a reused M-Pesa code, an archived product or location: all saved, and flagged where listed.
+- `sale.create` `{ sale_id, local_ref, location_id, note?, total?, lines: [{ pack_type_id, quantity, unit_price }], payments?: [{ method, amount, mpesa_code? }] }`: 1 to 100 lines, 0 to 10 payments. The server computes every line total and the sale total with exact decimals and stores the list price, cost price and names of each pack type as they are at that moment. Stock goes down in sale mode, one `SALE` movement per line with the `sale_id`, in the shared lock order; `sale_number` comes from the business's `sale_counter` row, taken after the stock statements (no gaps on rollback, never `max() + 1`). Result `{ sale_id, sale_number, total, paid_total, balance_due, flags }`.
+- **Flags** (`FLAGGED` saves everything; the reason is the first that applies): `TOTAL_MISMATCH`, `STOCK_NEGATIVE`, `DUPLICATE_MPESA_CODE`, `OVERPAYMENT`; `result.flags` lists all of them. Bad lines and bad payments are reported like Phase C's invalid lines (`INVALID_LINES`, `INVALID_PAYMENTS`), nothing saved. A second command with the same `sale_id` is `SALE_ALREADY_EXISTS`.
+- `payment.attach` `{ sale_id, payments }`: the same payment rules; only a `COMPLETED` sale; attendants only on their own sales (`SALE_NOT_FOUND` otherwise, as for a missing sale). Result `{ paid_total, balance_due, flags }`.
+- `sale.void` `{ sale_id, reason, note?, approval_id? }`: whole sale only; one conditional `UPDATE ... WHERE status = 'COMPLETED'`; payments become `REVERSED`; one `SALE_VOID` movement per item returns the stock to the sale's location; a failed void leaves the approval unused. A voided sale can never change again. Result `{ sale_id, voided_at, approved_by_membership_id }`.
+- **Sync:** `sale`, `sale_item` and `payment` join the synced tables after `stock_balance`. The snapshot holds the last 30 days of sales; `changes` has no age limit, so a void of an old sale still arrives. Members without `sales.void` receive only their own sales and those sales' items and payments; `cost_price` on items needs `costs.view`.
 
 **Reads**:
 - `GET /v1/sync/snapshot`: full data for the business (products, barcodes, pack types, stock, recent sales), paged. Used on first login and after reinstall.
@@ -251,6 +260,8 @@ As built in B3 (decided with Ian): `barcode.add` uses `INSERT ... ON CONFLICT (b
 ## 8. M-Pesa payments
 
 **DECIDED approach, details need verification against the official Daraja docs.**
+
+As designed for Phase E (`docs/phase-e-design.md` sections 2 to 4): level 1 only. Payments are `CASH` or `MPESA` with a code typed in, stored upper-case and always `verified = false`; split payments are allowed; less than the total leaves a `balance_due`, more is saved and flagged `OVERPAYMENT`. A code already used in the business is saved as a payment marked `duplicate_of_payment_id` and flags the sale (one original per code per business, by a partial unique index); a voided sale's reversed payments keep their code. The code format check (letters and digits, 8 to 12 characters) is a placeholder: `TODO(verify)` the real format with Safaricom. Daraja callbacks, `mpesa_transaction`, verification and reconciliation (levels 2 and 3 below) move to a later **Phase M**, which needs the Safaricom account, confirmed IP ranges and the real field names.
 
 Every business must use its own Safaricom till number. Verification comes in levels:
 1. **Manual match** (first version): the attendant enters or confirms the M-Pesa message details. The payment is saved as `unverified`.
@@ -359,9 +370,10 @@ Table list (exact columns are designed during the build and reviewed by Ian befo
 | stock_balance | cached balance per business, location, pack type; may be negative; logged in `change_log` (Phase C) |
 | stock_conversion | links the two ledger rows of a break-bulk; creator, approver and the approval used (Phase C) |
 | approval | a short-lived permission minted with an approver's PIN: purpose, requester, approver, device, valid until, consumed at and by which command. Generic, so Phase E can reuse it (Phase C) |
-| sale, sale_item | a sale and its lines |
-| payment | payment attached to a sale, verified flag, method |
-| mpesa_transaction | raw M-Pesa notifications, unique on trans_id |
+| sale, sale_item | a sale (the phone's UUID, `sale_number` per business, `local_ref`, location, device, creator, phone and server times, `COMPLETED` or `VOIDED`, `total`, `paid_total`, `balance_due`, a mismatch flag, the void fields) and its append-only lines (names, quantity, unit, list and cost price at sale time, line total) (Phase E) |
+| payment | `CASH` or `MPESA` (code stored upper-case), amount, `verified` (always false until Phase M), `duplicate_of_payment_id`, `RECORDED` or `REVERSED` (Phase E) |
+| sale_counter | the last `sale_number` per business, one row each (Phase E) |
+| mpesa_transaction | raw M-Pesa notifications, unique on trans_id (Phase M) |
 | order_inbox, order_inbox_item | orders from a website |
 | sync_command | every received command: UUID unique, result, status, `occurred_at` (phone) and `received_at` (server) |
 | change_log | what changed, for `sync/changes`; each row carries its transaction id (`txid`, Phase D) |
@@ -377,6 +389,7 @@ Hand-written SQL migrations are required for: RLS policies, the change-log trigg
 As built in the spike (columns approved by Ian per step):
 - Tables that exist: `business` (no RLS yet), `product` (with `sku`), `location`, `pack_type`, `stock_balance`, `stock_movement`, `stock_conversion`, `sync_command`, `change_log`. Columns were kept to what each spike step needed; the rest of each table (prices, categories, `reason` on movements, `approved_by` on conversions and so on) is added with the feature that uses it.
 - Exceptions to the standard columns: append-only tables (`stock_movement`, `stock_conversion`, `sync_command`, `change_log`) have no `updated_at`. `change_log.id` is a `BIGSERIAL`, not a UUID, because it is the sync cursor and must grow.
+- Phase E1: `sale`, `sale_item`, `payment` and `sale_counter` (forced RLS, `shop_only`, composite keys, no DELETE for `app_user`; `sale` updatable only in `status`, `paid_total`, `balance_due` and the void columns, and a restrictive `voided_is_final` policy makes a voided sale final; `sale_item` append-only; `payment` updatable only in `status`; the partial unique index `payment_mpesa_code_unique`). `stock_movement` gains `sale_id` and the `SALE_VOID` type (`SALE` must decrease, `SALE_VOID` must increase and needs a `sale_id`); `approval.purpose` accepts `SALE_VOID`. `sale`, `sale_item` and `payment` are logged in `change_log` for insert and update.
 - `change_log` (`id`, `business_id`, `table_name`, `row_id`, `operation`, `changed_at`; `row_key` since B1; `txid xid8 NOT NULL DEFAULT pg_current_xact_id()` since D1, indexed with `(business_id, txid, id)`) is written only by triggers (`SECURITY INVOKER`). Phase D1 adds `change_log_horizon` (one row: the newest position removed by `change_log_prune()`), readable by `app_user`, written only by that function.
 - Special indexes: GIN trigram `product_name_trgm_idx` (declared in `schema.prisma` too, so Prisma does not drop it) and the partial unique `pack_type_one_base_unit_per_product` (one pack type with `units_per_pack = 1` per product).
 - Every reference between tenant tables is a composite foreign key (section 3).
@@ -406,9 +419,10 @@ All under `/v1`, JSON, access token required unless stated.
 - **staff** (`staff.manage`): `POST /staff` (returns the temporary PIN once), `GET /staff`, `PATCH /staff/:id`, `POST /staff/:id/reset-pin`, `POST /staff/:id/suspend`, `POST /staff/:id/reactivate`, `DELETE /staff/:id` (status `REMOVED`, never a hard delete)
 - **devices** (`devices.manage`): `GET /devices`, `PATCH /devices/:id` (name, shared flag), `DELETE /devices/:id` (revoke), `POST /devices/:id/members`, `DELETE /devices/:id/members/:membershipId`
 - **stock** (Phase C, `stock.view`, any active member; writes are sync commands only): `GET /stock?location_id=&product_id=&include_zero=&include_archived=&limit=&cursor=` (balances; zero rows hidden by default, negative rows shown), `GET /stock/movements?location_id=&pack_type_id=&product_id=&type=&from=&to=&limit=&cursor=` (newest first; the `unit_cost` key absent without `costs.view`), `GET /stock/approvers` (active members with `stock.convert`, names only), `POST /stock/approvals` (`{ approver_membership_id, approver_pin, purpose }`, 201 `{ approval_id, valid_until }`; every refusal is the same `403 APPROVAL_DENIED`; 10 per minute per IP)
-- **reads**: `/sales`, `/payments/pending`, `/orders`, `/reports/*`, `/audit-log`, `/notifications`, `/subscription`
+- **sales** (Phase E; writes are sync commands only): `GET /sales?from=&to=&location_id=&status=&created_by=&limit=&cursor=` (newest first; members without `sales.void` see only their own sales, and `created_by` is ignored for them), `GET /sales/:id` (items, payments, void details; `cost_price` only with `costs.view`; another member's sale is `404` for an attendant). Approvals keep their Phase C routes: `GET /stock/approvers?purpose=` (default `STOCK_CONVERT`, or `SALE_VOID`) and `POST /stock/approvals` with `purpose: "SALE_VOID"`; moving them to a neutral prefix was not worth the break
+- **reads**: `/payments/pending`, `/orders`, `/reports/*`, `/audit-log`, `/notifications`, `/subscription`
 - **sync**: `POST /sync/commands` (Phase B), `GET /sync/snapshot?table=&cursor=&limit=` (Phase D, any active member; `start_cursor` on the first page; cost fields only with `costs.view`, balances only with `stock.view`), `GET /sync/changes?cursor=&limit=` (Phase D; `410 SNAPSHOT_REQUIRED` for a cursor older than the retained history or issued under another cost visibility)
-- **manager actions**: `POST /sales/:id/void`, `POST /payments/:id/approve`
+- **manager actions**: voids are the `sale.void` sync command (Phase E), not a REST route; `POST /payments/:id/approve` (Phase M)
 - **orders**: `PATCH /orders/:id`; `POST /orders-inbox/key` (create or regenerate the shop key)
 - **subscription**: `POST /subscription/pay`
 - **public inbound** (shop key, not token): `POST /inbound/v1/orders`
@@ -426,7 +440,7 @@ All under `/v1`, JSON, access token required unless stated.
 | sales.void, payments.approve, reports.view | no | yes | yes |
 | costs.view, staff.manage, devices.manage, subscription.manage, shopkey.manage, locations.manage | no | no | yes |
 
-Reading locations and the catalogue needs no permission beyond an active membership. `costs.view` covers reading and writing cost prices. `locations.manage` is new in Phase B (owner preset only, grantable like the others).
+`sales.void` voids a sale and lets a member see every sale of the business; without it a member sees only their own sales (Phase E). `payments.approve` is not used until Phase M. Reading locations and the catalogue needs no permission beyond an active membership. `costs.view` covers reading and writing cost prices. `locations.manage` is new in Phase B (owner preset only, grantable like the others).
 
 Permissions are **read live from the database on every request**, never stored in the token (Phase A decision). Inside the tenant transaction, the `TenantInterceptor` loads the membership and device, refuses unless both are `ACTIVE`, computes effective permissions (role preset plus `extra_permissions`) and checks the route's `@RequirePermission(...)`. Sync commands check the same effective permissions in the command dispatcher. Suspending someone or changing a permission therefore takes effect on the very next request. The check never lives in a Nest guard, because guards run before the tenant transaction exists. `stock.convert` can never be an extra permission on an attendant (rejected on write, ignored on read). The owner cannot be suspended, removed or demoted.
 
@@ -511,3 +525,16 @@ Found in the Phase D design (`docs/phase-d-design.md` section 15):
 46. Sales, orders and subscription state join the snapshot in later phases (one entry in the table list each).
 47. Showing `last_sync_at` to the owner (devices list endpoint) and warning about stale phones: Phase F or G.
 48. Snapshot size for a very large catalogue (tens of thousands of products) on a slow connection: measure with the Flutter app, then consider compression.
+
+Found in the Phase E design (`docs/phase-e-design.md` section 17):
+
+49. Phase M: Daraja C2B callbacks, `mpesa_transaction`, verification, unmatched payments, reconciliation; needs the Safaricom account, confirmed IP ranges and the real field names. `payments.approve` is unused until then.
+50. The real M-Pesa code format (the 8 to 12 letters and digits rule is a placeholder).
+51. Customer accounts and credit sales for wholesalers (`balance_due` exists, but there is no customer behind it).
+52. Partial returns and refunds (today only whole-sale voids).
+53. Discount rules and reports of below-list prices (Phase G); the data is recorded.
+54. Receipt printing and the exact receipt content (phone side).
+55. Tax and eTIMS (unverified, later).
+56. Per-business `sale_number` is serialised by the counter row: measure with a busy wholesaler on several phones; if it hurts, revisit.
+57. Notifying the approver and the owner when a PIN approves a void (Phase F).
+58. Sale-mode stock for sales made while offline for days can swing balances; counts (Phase C) are the correction tool.

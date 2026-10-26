@@ -26,7 +26,8 @@ The spike proved the risky foundations. Real features are now built in the order
 | B. Catalogue | locations, products, pack types, barcodes, search, and `POST /sync/commands` with the catalogue commands |
 | C. Stock | receive, adjust, count, convert, approvals, stock reads |
 | D. Sync | snapshot and changes reads |
-| E. Sales and payments | `sale.create`, payment attach, void and approve, manual M-Pesa matching, then Daraja |
+| E. Sales and payments | sales, manual payments, voids, sales in sync |
+| M. Daraja | Daraja C2B callbacks and M-Pesa verification (after E, needs Safaricom setup) |
 | F. Worker | pg-boss, notifications, SMS and push integrations |
 | G. Business features | subscriptions, website orders slot, reports, audit log, error events |
 | H. Launch work | hosting, Linux container, load test, Sentry |
