@@ -265,8 +265,9 @@ export class SalesService {
    * sale.void (docs/phase-e-design.md section 5; order decided in E5): the
    * permission rule, then the sale (another member's is SALE_NOT_FOUND for a
    * member without sales.void, even with an approval), then the approval, then
-   * one conditional UPDATE, the payments reversed, the stock put back in the
-   * lock order, and the audit row. All in the command's savepoint: any
+   * one conditional UPDATE, the stock put back in the lock order, the
+   * payments reversed (after the stock since E6), and the audit row. All in
+   * the command's savepoint: any
    * failure undoes everything, including the use of the approval.
    */
   async void(dto: VoidSaleDto, actor: VoidActor): Promise<SaleVoided> {
@@ -310,7 +311,11 @@ export class SalesService {
     // A concurrent void committed between the read and the update.
     if (!voided) throw alreadyVoided();
 
-    await this.payments.reverseForSale(dto.sale_id);
+    // Lock order: the sale row, then the stock pools (in the shared order),
+    // then the payments. Payments must come last (found by the E6 workload): a
+    // reversed payment holding a code makes a concurrent sale that reuses the
+    // code wait for this void; if this void still needed a pool that sale
+    // holds, the two would deadlock (40P01).
     const lines = await this.repo.lines(dto.sale_id);
     const packs = await this.products.packTypesForSale([...new Set(lines.map((l) => l.packTypeId))]);
     const ordered = inLockOrder(lines.map((l) => ({ ...l, pack_type_id: l.packTypeId })), packs);
@@ -325,6 +330,7 @@ export class SalesService {
       if (err instanceof StockError) throw new SalesError('VALIDATION_FAILED', err.message);
       throw err;
     }
+    await this.payments.reverseForSale(dto.sale_id);
 
     // Ids, the number and the reason enum: never the note.
     await this.audit.record({

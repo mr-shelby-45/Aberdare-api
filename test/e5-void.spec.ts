@@ -335,6 +335,44 @@ describe('E5: void and approvals', { timeout: 240_000 }, () => {
     }
   });
 
+  it('7. race (found by E6): a void and a sale reusing the voided sale\'s M-Pesa code on the same pool never deadlock (forced interleaving)', async () => {
+    const w = await api.world();
+    await stockUp(w);
+    const s = await sell(w, w.manager, { packs: [{ pack: w.maize.piece, qty: 1 }], payments: [{ method: 'MPESA', amount: '100', mpesa_code: 'RACECODE77' }] });
+    const reuse = api.command('sale.create', {
+      sale_id: randomUUID(),
+      local_ref: 'R',
+      location_id: w.loc,
+      lines: [{ pack_type_id: w.maize.piece, quantity: 1, unit_price: '100' }],
+      payments: [{ method: 'MPESA', amount: '100', mpesa_code: 'RACECODE77' }],
+    });
+    // Hold the sale counter: the new sale takes its stock pool, then waits at the counter.
+    const held = new pg.Client({ connectionString: process.env.TEST_ADMIN_DATABASE_URL });
+    await held.connect();
+    let done = false;
+    let results: Awaited<ReturnType<typeof api.sendOne>>[] = [];
+    try {
+      await held.query('BEGIN');
+      await held.query('SELECT 1 FROM sale_counter WHERE business_id = $1 FOR UPDATE', [w.owner.businessId]);
+      const sale = api.sendOne(w.attendant.token, reuse);
+      await lockWaiters(1);
+      // The void now waits for that same pool (and, in the old order, has already reversed the payment with the code).
+      const voided = api.sendOne(w.manager.token, voidCmd(s));
+      await lockWaiters(2);
+      await held.query('COMMIT');
+      done = true;
+      results = await Promise.all([sale, voided]);
+    } finally {
+      if (!done) await held.query('ROLLBACK');
+      await held.end();
+    }
+    const [sale, voided] = results;
+    expect(voided).toMatchObject({ status: 'ACCEPTED' });
+    expect(sale).toMatchObject({ status: 'FLAGGED', result: { flags: expect.arrayContaining(['DUPLICATE_MPESA_CODE']) } });
+    expect(await paymentStatuses(s)).toEqual(['REVERSED']);
+    expect(await api.integrity(w.owner.businessId)).toEqual([]);
+  });
+
   // ---------------------------------------------------------------- 8. archived and location
   it('8. stock returns for archived pack types, at the sale\'s own location', async () => {
     const w = await api.world();

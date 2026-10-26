@@ -1,6 +1,94 @@
 # Phase E results
 
-Filled in step by step. The full summary (see `docs/phase-e-design.md` section 15) is written when E6 is finished. Only Ian marks the phase done, in `CLAUDE.md` section 2.
+**Status: all six steps (E1 to E6) passed. Waiting for Ian's review.** Only Ian marks Phase E done, in CLAUDE.md section 2. The manual walkthrough for Ian is `docs/phase-e-walkthrough.md`.
+
+**Final suite (end of phase, 3 runs in a row):** 3 runs done, all passed, on the working tree this commit records. Run 1: 38 files, 410 of 410 (450.5 s). Run 2: 38 files, 410 of 410 (721.4 s). Run 3: 38 files, 410 of 410 (719.3 s). Lint, type-check, build and the drift check were clean before the runs. Earlier failed runs during Phase E are recorded in their step sections below, as observed.
+
+## Summary
+
+| Step | What it built | New tests | Phase E cumulative | Workarounds and notable changes |
+|---|---|---|---|---|
+| E1 | `sale`, `sale_item`, `payment`, `sale_counter`, their checks, grants, RLS and `voided_is_final`, the duplicate-code index, change-log triggers, `SALE`/`SALE_VOID` movement rules, the `SALE_VOID` approval purpose | 6 | 6 | Spike step 2's zero `SALE` row became an `ADJUST`; C1 test 3's unknown purpose example became `REFUND` (missed in the survey, caught by the first full run) |
+| E2 | `sale.create`: exact cent totals, sale-mode stock in the lock order, the counter after the stock, item snapshots, `SALE` movements with `sale_id`, flags, audit | 12 | 18 | Two `StockService` methods split the stock work around the sale insert; mutation 4's first catch was only the counter check, so test 4 now spreads sales over 10 pools |
+| E3 | Payments in `sale.create`, `payment.attach`, duplicate codes, overpayment | 10 | 28 | No schema change; race tests use attaches (sales queue on the counter) with a held-open transaction |
+| E4 | Two read indexes, `GET /v1/sales`, `GET /v1/sales/:id`, sales in snapshot and changes with the attendant visibility rule | 7 | 35 | The changes cursor binds `all_sales` (old cursors refused once); hidden sale rows are skipped, never delete markers; Phase D tests updated mechanically |
+| E5 | `sale.void`, the `SALE_VOID` approval purpose, approvers by purpose | 11 | 46 | Mutation 6a needed the `voided_is_final` policy dropped (test database only) to fail: two guards stop a double void |
+| E6 | Randomized sales workload (3 seeds), logs, audit coverage, grants, walkthrough document and test; the void lock-order fix and its forced regression test | 9 | 55 | The workload found a deadlock in `sale.void` (payments reversed before the stock); fixed with Ian's approval |
+
+New tests count `it` cases as Vitest reports them; the E6 workload is one case per seed (three). E6's nine are seven in `test/e6-hardening.spec.ts`, one in `test/e6-walkthrough.spec.ts`, and the regression test added to `test/e5-void.spec.ts`.
+
+## Final patterns
+
+| Concern | Pattern | Where |
+|---|---|---|
+| Sale write order | Every check first; then the sale-mode balance statement per line in the lock order (`changeBalance(-q)`, never refuses); then the counter; then the sale and its items; then the `SALE` movements (they need the sale row); then the payments; then the audit row. One transaction (the command's savepoint) | `SalesService.create`, `StockService.saleDecreases`, `recordSaleMovements` |
+| Numbering | `INSERT INTO sale_counter ... ON CONFLICT (business_id) DO UPDATE SET last_number = sale_counter.last_number + 1 RETURNING last_number`, after every stock statement; a rollback leaves no gap; never `max() + 1` | `SalesRepository.nextSaleNumber` |
+| Money | Whole cents in a `BigInt` (`toCents`, `fromCents`), never a JavaScript number; NUMERIC(14,2) limits checked in code (`MAX_CENTS`) and by SQLSTATE 22003 for running sums | `src/common/money/cents.ts`, `isNumericOverflow()` |
+| Flags | `FLAGGED` saves everything; reasons in the order `TOTAL_MISMATCH`, `STOCK_NEGATIVE`, `DUPLICATE_MPESA_CODE`, `OVERPAYMENT`; the first is the command's reason, all are in `result.flags` | `SalesService` (`inFlagOrder`) |
+| Duplicate codes | `INSERT ... ON CONFLICT (business_id, mpesa_code) WHERE mpesa_code IS NOT NULL AND duplicate_of_payment_id IS NULL DO NOTHING RETURNING id`; no row: read the original and insert as its duplicate. Codes trimmed and upper-cased | `PaymentsRepository.insertOriginal`, `PaymentsService.record` |
+| Attach | Read the sale only to choose the answer; one conditional `UPDATE sale SET paid_total = paid_total + x, balance_due = GREATEST(...) WHERE ... status = 'COMPLETED'` takes the row lock before any payment is written | `SalesService.attachPayments`, `SalesRepository.addPaid` |
+| Void | Permission rule, the sale, the approval, then one conditional `UPDATE sale ... WHERE status = 'COMPLETED'` (zero rows: already voided), then `SALE_VOID` movements in the lock order, then payments `REVERSED`, then the audit row. Lock order: sale row, stock pools, payments. The restrictive `voided_is_final` policy is a second guard | `SalesService.void`, `SalesRepository.markVoided`, migration `*_e1_sales_rls` |
+| Approvals by purpose | `STOCK_CONVERT` and `SALE_VOID`, each mapped to its permission (eligibility, `APPROVAL_NOT_NEEDED`, live re-check); one consume statement with the purpose in its `WHERE`; counters shared per approver | `approvals.service.ts` (`use(purpose, ...)`), `ApprovalsRepository.consume` |
+| Visibility | A member without `sales.void` sees only their own sales in reads, snapshot and changes; another member's sale is the same `404 SALE_NOT_FOUND` as a missing one; sale-table rows not found in changes are skipped, never delete markers; the changes cursor binds `costs` and `all_sales` | `SalesReadsService`, `SyncTables` (`deletes: false`), `ChangesCursor` |
+
+## Proof the tests catch mistakes
+
+Each design mutation was applied temporarily, the named test was shown failing, and the change was reverted (checked byte for byte with `cmp`; the dropped policy by an md5 of `pg_policies`).
+
+| Mutation | Test that failed | What it caught |
+|---|---|---|
+| 1. Total calculated with JavaScript floating point | E2 test 2 | 120.67999... instead of 120.68 |
+| 2. Phone total trusted without the mismatch flag | E2 test 2 | no `TOTAL_MISMATCH` |
+| 3. Strict stock decrease on sales | E2 test 3 (both cases) | real sales refused |
+| 4. `sale_number` from `max() + 1` | E2 test 4 | duplicate numbers made sales fail (after test 4 was reworked to spread sales over 10 pools) |
+| 5. A reused M-Pesa code rejects the sale | E3 test 3 (all four cases) | sales lost |
+| 6a. Void without `status = 'COMPLETED'` | E5 test 2 (race), with the `voided_is_final` policy dropped in `aberdare_test` | more than one void accepted; with the policy in place the test passed (the policy alone holds) |
+| 6b. Void without restoring stock | E5 test 1 | balances not restored |
+| 7. An attendant voids without an approval | E5 test 3 (both cases) | the void accepted |
+| 8. The approval purpose not checked | E5 test 4 | a `STOCK_CONVERT` approval voided a sale |
+| 9. An attendant sees other members' sales | E4 test 1 (reads), E4 test 5 (changes) | other members' sales listed and synced |
+| 10. `cost_price` on items without `costs.view` | E4 test 2 (reads), E4 test 5 (changes) | the key present |
+| 11. A payment total that does not update `balance_due` | E3 test 1 | also refused by the E1 check `sale_balance_due` |
+| Extra (E3): duplicate detection by "read, then insert" | E3 attach race tests | unique violations made attaches fail |
+| Extra (E3): `paid_total` read, added in JavaScript, written back | E3 one-sale attach race | lost updates |
+| Extra (E4): hidden sale rows sent as delete markers | E4 test 5 | delete markers reached the attendant |
+| Extra (E4): the cursor does not compare `all_sales` | E4 test 6 | no 410 after `sales.void` changed |
+| Extra (E5): payments left `RECORDED` on a void | E5 test 1 | payments not reversed |
+| Extra (E6): the void's old order (payments before the stock) | E5 forced-deadlock test | the void `FAILED` with `40P01` |
+
+## Versions
+
+Unchanged. No library was added in Phase E (`package.json` and `pnpm-lock.yaml` are as at the end of Phase D).
+
+## Things to know
+
+1. A sale-mode statement holds its balance row lock until commit, and every `sale.create` of a business queues on `sale_counter`. A race test of anything after those locks must use different pools or `payment.attach`, and should force the overlap with a held-open transaction and a wait for lock waiters (`lockWaiters()` in the E3 and E5 tests).
+2. Two layers stop a double void (the conditional `UPDATE` and the `voided_is_final` policy). A mutation test of one needs the other removed, only ever in `aberdare_test`, with an md5 check of `pg_policies` after re-creating it.
+3. `paid_total` keeps its value on a void (E5 answer 3); E6 checks that it equals the sum of all the sale's payments, with only `RECORDED` payments on a completed sale and only `REVERSED` ones on a voided sale. The design's wording ("the sum of its non-reversed payments") was changed to this with Ian's approval (E6 answer 2).
+4. Changes collapse repeats of a record only within one page, and while any transaction is held open nothing committed after it is handed out (Phase D rules); E4's first drafts assumed otherwise.
+5. The E6 workload prints its seed in the test name; `E6_SEED=<n> pnpm exec vitest run test/e6-hardening.spec.ts -t randomized` replays one. A `FAILED` command puts its log line (with the SQLSTATE) in the failure message. A deadlock depends on timing, so a replay can pass: repeat the run instead.
+6. Phones never send payment ids; payments get server ids and reach phones through sync.
+
+## Open risks
+
+1. The M-Pesa code format (8 to 12 letters and digits) is a placeholder, marked `TODO(verify)` in `payments.service.ts` (design open item 2).
+2. Payments are not verified with Safaricom until Phase M (Daraja callbacks, `mpesa_transaction`, reconciliation; design open item 1).
+3. Every `sale.create` of a business waits for the previous one at `sale_counter` (architecture open item 56): measure with a busy wholesaler on several phones.
+4. The sales snapshot pages by id filtered by date, and payment pages pass the window's visible sale ids (architecture open item 59): measure in Phase H.
+5. Balance due exists, but there is no customer behind it (no credit sales; design open item 3).
+6. A SALE_VOID approval can be held for up to 15 minutes of phone time, stretched by a wrong phone clock to at most 24 hours after minting (as for conversions).
+7. Approvers and owners are not told a PIN approved a void until Phase F (design open item 9).
+8. The "another device" approval checks send the command through the dispatcher with a made-up device id; they do not log in on a second phone (as in C5).
+9. Overload still answers 500 instead of 503 (spike open risk 4, unchanged).
+
+## Changes to the other documents
+
+- `CLAUDE.md`: the phase table rows for E and the new Phase M (E1, commit `ed3d311`); section 8 notes for the sales schema, `sale.create`, payments, sales reads and sync, approval purposes and the void (E1 to E5), and the E6 workload replay and the void lock order (E6). The status line was not touched.
+- `docs/architecture.md`: sections 5, 8, 12, 13, 14 and 16 (E1), "as built" notes for `sale.create`, `payment.attach`, `sale.void` and the sales sync tables (E2 to E6), open item 59 (E4).
+- `docs/phase-d-walkthrough.md`: step 2's last page now continues to the sale tables (E4).
+- `docs/phase-e-walkthrough.md`: new (E6).
+
+# Step details
 
 ## E1: Schema, checks, grants, triggers, doc updates (passed)
 
@@ -115,7 +203,7 @@ Filled in step by step. The full summary (see `docs/phase-e-design.md` section 1
 **Result:** new 11, Phase E cumulative 46 (`test/e5-void.spec.ts` plus the E1 to E4 files), all passing in the gate run, run together with `test/c5-approvals.spec.ts` because the approval code changed (6 files, 56 of 56). The concurrency tests (20 concurrent voids of one sale, 20 voids sharing one approval, an attach racing a void 10 times) passed 5 runs in a row. The full suite passed: 36 files, 401 of 401 (619.1 s). Lint, type-check, build and the drift check were clean. No schema change and no migration.
 
 **Built (approved by Ian on 2026-10-26, with the eight recommended answers):**
-- `sale.void` (`VoidSaleHandler`, `SalesService.void()`): dispatcher permission `sales.create`, the real check inside (answer 4): with `sales.void` the member voids and any `approval_id` is ignored and not used; without it an approval is needed (`PERMISSION_DENIED` without one). Order (answer 5): permission rule, the sale (`SALE_NOT_FOUND` for unknown, another business's, and for members without `sales.void` another member's sale even with an approval, answer 1; `SALE_ALREADY_VOIDED`), the approval (`APPROVAL_INVALID`), one conditional `UPDATE sale ... WHERE status = 'COMPLETED'`, payments `REVERSED` (`PaymentsService.reverseForSale()`), one `SALE_VOID` movement per item at the sale's location in the lock order (`StockService.returnForVoid()`, never refuses; the `MAX_BALANCE` cap is `VALIDATION_FAILED`, answer 8), then the audit row `sale.voided`.
+- `sale.void` (`VoidSaleHandler`, `SalesService.void()`): dispatcher permission `sales.create`, the real check inside (answer 4): with `sales.void` the member voids and any `approval_id` is ignored and not used; without it an approval is needed (`PERMISSION_DENIED` without one). Order (answer 5): permission rule, the sale (`SALE_NOT_FOUND` for unknown, another business's, and for members without `sales.void` another member's sale even with an approval, answer 1; `SALE_ALREADY_VOIDED`), the approval (`APPROVAL_INVALID`), one conditional `UPDATE sale ... WHERE status = 'COMPLETED'`, payments `REVERSED` (`PaymentsService.reverseForSale()`; moved after the stock in E6, see there), one `SALE_VOID` movement per item at the sale's location in the lock order (`StockService.returnForVoid()`, never refuses; the `MAX_BALANCE` cap is `VALIDATION_FAILED`, answer 8), then the audit row `sale.voided`.
 - `voided_at` and the movements' `occurred_at` are the command's `occurred_at` (answer 2). `paid_total` and `balance_due` stay as they were (answer 3).
 - Approvals: `SALE_VOID` purpose (`APPROVAL_PURPOSES`), `GET /v1/stock/approvers?purpose=` (default `STOCK_CONVERT`, unknown `422`, answer 7), `APPROVAL_NOT_NEEDED` and eligibility by the purpose's permission, and `ApprovalsService.use(purpose, ...)` replacing `useForConversion()` (stock convert passes `STOCK_CONVERT`). The lock counters stay per approver, shared by both purposes. The `APPROVAL_NOT_NEEDED` message is now purpose-neutral ("You can do this yourself; no approval is needed.").
 - `MOVEMENT_TYPES` gains `SALE_VOID`, so `GET /v1/stock/movements?type=SALE_VOID` works.
@@ -131,3 +219,26 @@ Filled in step by step. The full summary (see `docs/phase-e-design.md` section 1
 1. Two layers stop a double void: the conditional `UPDATE` and the restrictive `voided_is_final` policy. A test of one alone needs the other removed; dropping a policy is only ever done in `aberdare_test`, with an md5 check of `pg_policies` after re-creating it.
 2. My first draft of test 1 expected `balance_due` 4300.00; every line of the test helper is priced 100.00, so the sale is 600.00 with 300.00 due. The expectation was wrong, not the code.
 3. The race tests hold the row (`sale` or `approval`) `FOR UPDATE` in an open admin transaction and wait for lock waiters, like E3.
+
+## E6: Hardening and handover (passed)
+
+**Result:** new 9, Phase E cumulative 55 (all seven Phase E files), all passing in the gate run. The randomized workload (seeds 404, 505 and 606) passed 5 runs in a row after the fix below (15 of 15 seed runs); before it, it failed 2 of 6 runs. The forced deadlock test passed 5 runs in a row. The walkthrough passed as a test, and once over real HTTP against the built API (`node dist/main`, port 3100) on the test database: 26 of 26 checks, and none of the M-Pesa code, the PIN, a total or a body key in the API's 121 log lines. Lint, type-check, build and the drift check were clean.
+
+**Built (approved by Ian on 2026-10-26, with the six recommended answers):**
+- `test/e6-hardening.spec.ts`:
+  - Test 1, the randomized workload (answer 1): two businesses (piece, carton of 24, case of 48), 200 operations in waves of 20 through the real API: sales (cash, M-Pesa, split, none; about a fifth of codes reused), attaches, manager voids, attendant voids with a fresh approval, receive, count, convert, and reads and snapshots. Checked: no command `FAILED` and only expected outcomes; integrity clean; `sale_number` exactly 1..N; totals equal items; `paid_total` equals all the sale's payments, with only `RECORDED` on completed and only `REVERSED` on voided sales (answer 2); every void returned exactly what was sold; one original per code; consumed `SALE_VOID` approvals equal accepted approved voids; nothing crossed businesses; the attendant's and the manager's snapshots hold exactly the right sales (answer 3). Seeded (mulberry32), replayable with `E6_SEED`.
+  - Test 2, logs: marker text in the product name, `local_ref`, note, void note, M-Pesa code, price and amount; a rejected and a `FAILED` command, a wrong and a right approval PIN, the approved void, the sales reads, snapshot and changes. No marker, code, PIN or approval id in any log line, and none of the keys `lines`, `payments`, `mpesa_code`, `unit_price`, `amount`, `note`, `local_ref`, `approval_id`, `approver_pin`.
+  - Test 3, audit: `sale.created` (with payments, no separate `payment.attached`), `payment.attached`, `approval.granted`, `sale.voided` (twice: approved and direct) and `approval.locked`, each exactly once with the right actor; refused commands write nothing. A crash right after the audit insert of `sale.create`, `payment.attach` and an approved `sale.void` leaves no change anywhere, and the approval stays usable.
+  - Test 4, grants in practice (answer 5): as `app_user`, no DELETE on any sales table; no change to a total, a note, an item or an amount; a payment's status can change; an update of a voided sale matches zero rows.
+- `docs/phase-e-walkthrough.md` and `test/e6-walkthrough.spec.ts` (test 5): the ten steps of design section 14 with the attendant's void approved by the manager's PIN (answer 4). My first draft had eight steps and missed three of the design's points (a wrong phone total, an oversell, a second business); it was rewritten to the ten before the real-API run.
+- This results file (test 6), with the open risks of answer 6.
+
+**The deadlock (found by test 1, fixed with Ian's approval):**
+- Seen: `sale.void` ended `FAILED` with SQLSTATE `40P01` in 2 of 6 runs; a replay of the seed passed (timing). The Postgres log showed the void waiting at `INSERT INTO stock_balance ... ON CONFLICT` and a `sale.create` waiting at `INSERT INTO payment ... ON CONFLICT (business_id, mpesa_code) ...`.
+- Cause: the void reversed the sale's payments (updating the original payment that holds a code) before returning its stock. A sale reusing that code, already holding the same stock pool, waits for the void at the code index (Postgres waits for the transaction that changed the conflicting row); the void then waits for the sale's pool.
+- Fix: in `SalesService.void()` the stock is returned before the payments are reversed. Lock order: the sale row, the stock pools, the payments. Same rows, same transaction.
+- Proof: E5's new forced test holds `sale_counter` so the sale takes its pool and stops, starts the void, then releases the counter. With the fix both succeed (5 runs); with the old order put back the void `FAILED` (reverted, `cmp`).
+
+**Things to know:**
+1. The audit test's last line first compared against `api.auditRows()`, which lists only stock actions; it was removed (the exact list of seven actions above it is the check).
+2. The real-API run used a script in the session scratchpad (not in the repo): it wipes `aberdare_test` (it refuses any other database), runs the ten steps with `fetch`, and checks each answer.
