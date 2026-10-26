@@ -143,7 +143,7 @@ Command types and required permission:
 | payment.attach | payments.confirm |
 | stock.receive | stock.receive |
 | stock.adjust | stock.adjust |
-| stock.convert | stock.convert (manager or owner only) |
+| stock.convert | stock.convert (manager or owner), or an attendant with a valid approval (Phase C) |
 | stock.count | stock.count |
 | product.create, product.update, pack_type.upsert, barcode.add, barcode.remove | products.edit (plus costs.view for any command that sets or changes `cost_price`) |
 | order.update | orders.manage |
@@ -155,6 +155,13 @@ As designed for Phase B (`docs/phase-b-design.md` section 5; `POST /v1/sync/comm
 - **Per-command transactions.** `TenantInterceptor` normally runs the whole request in one tenant transaction, and nested `TenantRunner.run()` is refused. The sync route is marked (for example `@OwnTransactions()`): the interceptor still loads the membership and device in a short tenant transaction, applies the same status checks and builds the effective permissions, then lets the handler run outside any transaction so each command gets its own. The dispatcher checks the permission per command and passes the actor explicitly to `AuditService.record`. This marker is for this route only.
 
 As built in B2 (decided with Ian): the marker is `@OwnTransactions()` (`src/common/auth/own-transactions.decorator.ts`), and a test fails if any other route uses it. Per command the dispatcher checks, in order: envelope (`command_id`, `type`, `occurred_at`, `payload`; a bad one is `REJECTED / VALIDATION_FAILED` with `command_id: null`), unknown type (`UNKNOWN_COMMAND_TYPE`), the type's permission, `occurred_at` more than 24 hours ahead, payload validation, then the payload's extra permissions (`costs.view` whenever `cost_price` is present, including `null`), then the handler in a savepoint. Internally an outcome keeps the spike's `code` and `data`; only the controller renames them to `reason` and `result`. A `FAILED` command is logged as one line with its id, type and error name, never its payload. The endpoint accepts the catalogue handlers listed in `CatalogueHandlers` (`product.create`, `product.update`, `pack_type.upsert`; `barcode.add` and `barcode.remove` join in B3); the spike's stock handlers stay off it until Phase C. Unique violations are mapped to reasons by constraint name (`uniqueViolationConstraint()` in `src/database/db-errors.ts`; Prisma 7 puts the name at `meta.driverAdapterError.cause.constraint.index`). Changes to a product or its pack types lock the product row first, so commands on one product run one after another; a units change also locks the pack type row, so no stock movement can appear between the `UNITS_LOCKED` check and the update. `PACK_LIMIT_REACHED` counts active pack types only. Accepted risk: a `product.create` or `pack_type.upsert` with an id that already exists in another business answers `ALREADY_EXISTS`, revealing that the random id exists somewhere.
+
+As designed for Phase C (`docs/phase-c-design.md` section 5): the four stock commands go through the same endpoint, dispatcher order, `FAILED` logging and `occurred_at` rule, with snake_case payloads, money as strings and phone-generated ids; they replace the spike's minimal receive and adjust handlers.
+- `stock.receive` `{ location_id, reference?, note?, lines: [{ pack_type_id, quantity, unit_cost? }] }`, 1 to 50 lines, no repeated pack type, all or nothing; `unit_cost` also needs `costs.view`. Result `{ lines: [{ pack_type_id, quantity_after }] }`.
+- `stock.adjust` `{ location_id, pack_type_id, quantity_change, reason, note? }`; the sign must fit the reason (`REASON_SIGN_MISMATCH`); a decrease is strict (`STOCK_INSUFFICIENT`). Result `{ quantity_after }`.
+- `stock.count` `{ location_id, note?, lines: [{ pack_type_id, expected_quantity, counted_quantity }] }`: each line applies `counted minus expected` (the phone's expected number, never the server balance); a zero delta writes no movement. A count that leaves any balance negative is `FLAGGED / NEGATIVE_AFTER_COUNT` and still saved: the only `FLAGGED` in Phase C. Result `{ lines: [{ pack_type_id, delta, quantity_after }] }`.
+- `stock.convert` `{ location_id, from_pack_type_id, to_pack_type_id, quantity, note?, approval_id? }`: larger pack to smaller pack of the same product, an even ratio; needs `stock.convert`, or a valid approval (an attendant). Result `{ from_after, to_after, units_added, approved_by_membership_id }`.
+- **Invalid lines:** a command with `lines` that has bad lines is `REJECTED / INVALID_LINES` with `result: { invalid_lines: [{ line (1-based), reason }] }` listing every bad line, and nothing is saved. The corrected delivery is a new command with a new id.
 
 **Reads**:
 - `GET /v1/sync/snapshot`: full data for the business (products, barcodes, pack types, stock, recent sales), paged. Used on first login and after reinstall.
@@ -175,7 +182,7 @@ Ledger plus cached balance:
 
 Pack types: a product can have several pack types (for example `piece`, `carton_of_24`). Each has its own stock pool. Stock received as cartons is sold as cartons. Stock received as pieces is sold as pieces. Loose pieces are never sold at the wholesale price.
 
-Break bulk: when piece stock runs out, a carton can be converted to pieces. This is one recorded event (`stock_conversion`) that links two ledger rows: minus 1 carton, plus N pieces, in one transaction. Requires `stock.convert` (managers and owners). An attendant can trigger a conversion on their phone only if a manager or owner enters their PIN there; the conversion records `approved_by`.
+Break bulk: when piece stock runs out, a carton can be converted to pieces. This is one recorded event (`stock_conversion`) that links two ledger rows: minus 1 carton, plus N pieces, in one transaction. Requires `stock.convert` (managers and owners). An attendant converts only with an approval (Phase C, replacing "a manager enters their PIN on the attendant's phone"): the approver's PIN is checked online (`POST /v1/stock/approvals`), which mints a short-lived approval bound to the requester and device; the convert command then consumes it in one atomic statement. PIN hashes are never on phones. The conversion records `approved_by` (a manager or owner converting for themselves is their own approver).
 
 Atomic decrease, the pattern to use (single statement, no read-then-write):
 
@@ -196,6 +203,13 @@ In both modes the movement insert and the balance update happen in one transacti
 As built in spike step 2: sale-mode decreases and receipts use one atomic upsert, `INSERT INTO stock_balance ... ON CONFLICT (business_id, location_id, pack_type_id) DO UPDATE SET quantity = stock_balance.quantity + EXCLUDED.quantity RETURNING quantity`, so a missing balance row is created in the same statement. Strict decreases use the conditional `UPDATE` above; a missing row means zero rows, so `STOCK_INSUFFICIENT`. Isolation level: READ COMMITTED (the default). `stock_movement` and `stock_conversion` are append-only through grants (app_user has SELECT and INSERT only).
 
 Level of tracking: counts only. Lot numbers and individual box serials are out of scope.
+
+As designed for Phase C (`docs/phase-c-design.md` sections 3, 4 and 6):
+- **Ledger columns:** every movement records `movement_type` (`RECEIVE`, `ADJUST`, `COUNT`, `CONVERT_OUT`, `CONVERT_IN`, `SALE`), `quantity_after` (taken from `RETURNING` on the balance statement), `occurred_at` (phone time), the creating membership and the sync command (which groups the lines of one delivery or count). `unit_cost` only on `RECEIVE` (never changes `cost_price`); `reason` exactly on `ADJUST` (`DAMAGED`, `EXPIRED`, `LOST`, `FOUND`, `SUPPLIER_RETURN`, `CORRECTION`, `OTHER`); `expected_quantity` and `counted_quantity` exactly on `COUNT`. Database checks enforce the signs per type and reason. `stock_balance` may be negative and has no quantity check.
+- **Count rule:** a count applies `counted minus expected`, the phone's expected quantity, with the non-strict statement, so sales processed between the count and its arrival are not lost. Never "set the balance to the counted number".
+- **Lock order for conversions:** always the larger pack first, then the smaller. Conversion only goes larger to smaller, so the order cannot form a cycle; any future operation touching several balances (transfers) must use the same rule.
+- **Approvals:** a generic `approval` row (purpose `STOCK_CONVERT` for now; Phase E may reuse it) is minted online with the approver's PIN, valid 15 minutes, bound to the requester and device, and consumed once by one atomic `UPDATE ... WHERE consumed_at IS NULL AND requester ... AND device ... AND time limits ... RETURNING approver`, then the approver is re-checked live. Approval PIN attempts have their own counter per approver (five wrong lock approvals by that person for 15 minutes); their own login is never affected. Every refusal is the same `403 APPROVAL_DENIED` with the same work, as for the PIN login lock.
+- **Integrity check:** `StockIntegrityService.check()` (tenant scoped) lists every `(location, pack type)` whose balance differs from its ledger sum, including a balance with no movements and movements with no balance. Phase F schedules it per business.
 
 ## 7. Barcodes and search
 
@@ -316,7 +330,7 @@ Table list (exact columns are designed during the build and reviewed by Ian befo
 | business | the tenant: name, type (`RETAIL`, `WHOLESALE`, `WAREHOUSE`), till number, subscription state, settings. RLS on its own `id` from Phase A |
 | location | a shop or warehouse of a business: name, default flag (one per business, created at signup), archived time |
 | person | one human across all businesses: phone (unique, E.164), verified flags, email (unique, nullable), password hash (owners only), login lockout. Not tenant-owned; read through the identity functions (section 3) |
-| membership | a person's role in one business: display name, role preset, extra permissions, status (`INVITED`, `ACTIVE`, `SUSPENDED`, `REMOVED`), PIN hash, temporary PIN hash and expiry, lockout counters. Exactly one `OWNER` per business |
+| membership | a person's role in one business: display name, role preset, extra permissions, status (`INVITED`, `ACTIVE`, `SUSPENDED`, `REMOVED`), PIN hash, temporary PIN hash and expiry, lockout counters, and separate approval counters (`approval_failed_count`, `approval_locked_until`, Phase C). Exactly one `OWNER` per business |
 | device | a registered phone: name, platform, device secret hash, shared flag, status (`ACTIVE`, `REVOKED`), push token (Phase F), last seen and last sync |
 | device_membership | which memberships may sell on a shared device |
 | refresh_token | rotating refresh tokens: membership, device, family, token hash, expiry, used and revoked times |
@@ -324,9 +338,10 @@ Table list (exact columns are designed during the build and reviewed by Ian befo
 | product | name (1 to 120 characters, not unique), SKU (unique per business when present), archived time. No categories and no stock columns (Phase B) |
 | pack_type | piece, carton of N, and so on: name and units per pack (both unique per product, 1 to 10000 units, at most one base unit), sell price and optional cost price (`NUMERIC(14,2)`, never negative), archived time. 1 to 6 per product |
 | product_barcode | barcode (text) to product and pack type, unique per business; composite key to `pack_type (business_id, product_id, id)` so it cannot point at another product's pack type. The only Phase B table where rows are deleted |
-| stock_movement | append-only ledger |
-| stock_balance | cached balance per business, location, pack type |
-| stock_conversion | links the two ledger rows of a break-bulk |
+| stock_movement | append-only ledger: type, change, quantity after, phone time, creator, sync command, and per type a unit cost (receive), reason (adjust) or expected and counted quantities (count); note and reference (Phase C) |
+| stock_balance | cached balance per business, location, pack type; may be negative; logged in `change_log` (Phase C) |
+| stock_conversion | links the two ledger rows of a break-bulk; creator, approver and the approval used (Phase C) |
+| approval | a short-lived permission minted with an approver's PIN: purpose, requester, approver, device, valid until, consumed at and by which command. Generic, so Phase E can reuse it (Phase C) |
 | sale, sale_item | a sale and its lines |
 | payment | payment attached to a sale, verified flag, method |
 | mpesa_transaction | raw M-Pesa notifications, unique on trans_id |
@@ -353,6 +368,8 @@ As designed for Phase B (`docs/phase-b-design.md` section 3): `location` gains `
 
 As built in B1 (decided with Ian): `app_user` lost DELETE on `product` too (spike step 1 had granted it), so no catalogue row except a barcode can be deleted through the API. `change_log` gained `row_key text`: the barcode trigger stores the barcode text there on insert, update and delete, because phones know their barcodes by code (`barcode.add` sends no id) and a deleted row cannot be looked up afterwards. Other tables leave it NULL. `pack_type` and `location` reuse the generic `log_product_change()` trigger function; `product_barcode` has its own (`log_product_barcode_change()`). The unique `(business_id, product_id, units_per_pack)` also blocks a second base unit, so the older partial index `pack_type_one_base_unit_per_product` is now a second guard for the same rule.
 
+As designed for Phase C (`docs/phase-c-design.md` section 3): `stock_movement` gains the ledger columns of section 6 (with composite keys to `membership` and `sync_command`), and stays append-only (`app_user`: SELECT, INSERT). `stock_conversion` gains `created_by_membership_id`, `approved_by_membership_id` and a unique `approval_id`. The new tenant table `approval` gives `app_user` SELECT, INSERT, and UPDATE only of `consumed_at` and `consumed_by_sync_command_id` (no DELETE). `membership` gains `approval_failed_count` and `approval_locked_until`. `stock_balance` gets a `change_log` trigger for insert and update.
+
 ## 13. API endpoints
 
 All under `/v1`, JSON, access token required unless stated.
@@ -371,7 +388,8 @@ All under `/v1`, JSON, access token required unless stated.
 - **catalogue reads** (Phase B, any active member): `GET /products?q=&limit=&cursor=&include_archived=`, `GET /products/:id`, `GET /products/by-barcode/:code`. Catalogue writes are sync commands only, never REST
 - **staff** (`staff.manage`): `POST /staff` (returns the temporary PIN once), `GET /staff`, `PATCH /staff/:id`, `POST /staff/:id/reset-pin`, `POST /staff/:id/suspend`, `POST /staff/:id/reactivate`, `DELETE /staff/:id` (status `REMOVED`, never a hard delete)
 - **devices** (`devices.manage`): `GET /devices`, `PATCH /devices/:id` (name, shared flag), `DELETE /devices/:id` (revoke), `POST /devices/:id/members`, `DELETE /devices/:id/members/:membershipId`
-- **reads**: `/stock`, `/stock/movements`, `/sales`, `/payments/pending`, `/orders`, `/reports/*`, `/audit-log`, `/notifications`, `/subscription`
+- **stock** (Phase C, `stock.view`, any active member; writes are sync commands only): `GET /stock?location_id=&product_id=&include_zero=&include_archived=&limit=&cursor=` (balances; zero rows hidden by default, negative rows shown), `GET /stock/movements?location_id=&pack_type_id=&product_id=&type=&from=&to=&limit=&cursor=` (newest first; the `unit_cost` key absent without `costs.view`), `GET /stock/approvers` (active members with `stock.convert`, names only), `POST /stock/approvals` (`{ approver_membership_id, approver_pin, purpose }`, 201 `{ approval_id, valid_until }`; every refusal is the same `403 APPROVAL_DENIED`; 10 per minute per IP)
+- **reads**: `/sales`, `/payments/pending`, `/orders`, `/reports/*`, `/audit-log`, `/notifications`, `/subscription`
 - **sync**: `POST /sync/commands` (Phase B), `GET /sync/snapshot`, `GET /sync/changes?cursor=` (Phase D)
 - **manager actions**: `POST /sales/:id/void`, `POST /payments/:id/approve`
 - **orders**: `PATCH /orders/:id`; `POST /orders-inbox/key` (create or regenerate the shop key)
@@ -452,4 +470,17 @@ Added with the Phase B design (`docs/phase-b-design.md` section 17):
 Found in Phase B5 (`docs/phase-b-results.md`, "Open risks"):
 
 30. A burst bigger than the connection pool answers `500 INTERNAL_ERROR` for the whole request when Prisma cannot start a transaction within `DATABASE_TX_MAX_WAIT_MS`. It should be `503` with `Retry-After`, so phones and operators can tell overload from a bug. Decide with the production pool size (open item 10).
-31. Log redaction hides harmless error codes: the redaction list includes the field name `code` (for SMS codes), so a logged Prisma error code such as `P2028` shows as `[REDACTED]`. Log error codes under another field name (for example `errorCode`), keeping `code` redacted.
+31. Log redaction hides harmless error codes: the redaction list includes the field name `code` (for SMS codes), so a logged Prisma error code such as `P2028` shows as `[REDACTED]`. Log error codes under another field name (for example `errorCode`), keeping `code` redacted. (Scheduled in Phase C1.)
+
+Added with the Phase C design (`docs/phase-c-design.md` section 17):
+
+32. Transfers between locations (two movements and a lock order, like conversion).
+33. Notifying the approver and the owner (Phase F): "your PIN was used", carton broken, flagged counts.
+34. Scheduling the nightly integrity check per business (Phase F), and what to do with a mismatch.
+35. Stock valuation and cost accounting (average or last cost), and reports of shrinkage and counts (Phase G).
+36. Reorder levels and the low-stock digest (Phase F).
+37. Returns to suppliers as a real document (today they are `ADJUST` with `SUPPLIER_RETURN`).
+38. Lots, serials and expiry dates (not planned).
+39. The 50-line limit and the 15-minute approval window are defaults; measure and revisit.
+40. An approval can be hoarded for 15 minutes of phone time; a phone with a wrong clock can stretch that, up to the server cap of 24 hours.
+41. The approval mechanism is generic; Phase E decides whether voiding a sale reuses it.

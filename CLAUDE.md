@@ -24,7 +24,7 @@ The spike proved the risky foundations. Real features are now built in the order
 |---|---|
 | A. Identity | people, memberships, devices, SMS login codes, PIN login, tokens, shared tablets, per-request tenant interceptor, non-tenant access paths |
 | B. Catalogue | locations, products, pack types, barcodes, search, and `POST /sync/commands` with the catalogue commands |
-| C. Stock | receive, adjust, convert, count handlers and stock reads |
+| C. Stock | receive, adjust, count, convert, approvals, stock reads |
 | D. Sync | `/sync/snapshot`, `/sync/changes` |
 | E. Sales and payments | `sale.create`, payment attach, void and approve, manual M-Pesa matching, then Daraja |
 | F. Worker | pg-boss, notifications, SMS and push integrations |
