@@ -28,3 +28,29 @@ Filled in step by step. The full summary (see `docs/phase-e-design.md` section 1
 1. This database sorts names in byte order (`void_note` before `voided_at`). The first run of the B5 inventory failed only because I had written the column lists in a different order; the contents were identical, and only the order was corrected.
 2. Prisma generated the optional composite foreign keys with `ON DELETE RESTRICT`; nothing is ever deleted from these tables, so it does not matter, but it is not `SET NULL`.
 3. The `voided_is_final` policy makes a second void, an un-void or a payment change on a voided sale match zero rows, without an error. E5's void reports `SALE_ALREADY_VOIDED` by checking whether the sale exists after zero rows, as the design says.
+
+## E2: sale.create (passed)
+
+**Result:** new 12, Phase E cumulative 18 (`test/e2-sale-create.spec.ts` plus the E1 file), all passing in the gate run. The concurrency tests (test 3's 50 sales against a balance of 10, test 4's 30 sales and 20 copies of one command, test 6's two commands with one sale id, test 9's sales with a count and conversions) passed 5 runs in a row; test 4 passed 5 more runs after it was reworked (see below). The full suite passed: 33 files, 373 of 373 (435.6 s). Lint, type-check, build and the drift check were clean.
+
+**Built (approved by Ian on 2026-10-26, with the seven recommended answers):**
+- `SalesModule` (`src/modules/sales/`): `CreateSaleDto`, `SalesError`, `SalesRepository` (exists, the atomic `sale_counter` upsert, sale and item inserts), `SalesService.create()`, and `CreateSaleHandler` (`sale.create`, permission `sales.create`), added to `CommandHandlers`.
+- Write order (answer 1): every check, then the sale-mode balance statements in the lock order, then the counter, then the sale and items, then the `SALE` movements (they need the sale row for `sale_id`), then the audit row; one transaction. Two new `StockService` methods split the stock work around the sale insert: `saleDecreases()` and `recordSaleMovements()`.
+- Money in whole cents as `BigInt` (`src/common/money/cents.ts`, answer 2); a line or total above `NUMERIC(14,2)` is `VALIDATION_FAILED`.
+- `payments` must be absent or `[]` until E3 (answer 3).
+- `SALE_ALREADY_EXISTS` from an early check plus the `sale_pkey` unique violation for two commands at the same moment (answer 4).
+- `inLockOrder()` moved to `src/modules/stock/lock-order.ts`, shared by stock commands and sales (answer 5).
+- `STOCK_NEGATIVE` when any line ends below zero (answer 6); flags in the order `TOTAL_MISMATCH`, `STOCK_NEGATIVE`, and the first one is the command's reason.
+- A malformed phone total is a command-level `VALIDATION_FAILED` (answer 7).
+- `ProductsService.packTypesForSale()` reads names and prices for the snapshots (archived ones too).
+
+**Mutations (each reverted and checked with `cmp`; no `MUTATION` marker left):**
+1. Floating-point total (`Number` sum): test 2 failed.
+2. Phone total trusted, no mismatch flag: test 2 failed.
+3. Strict stock decrease for sales: both test 3 cases failed.
+4. `sale_number` from `max() + 1`: test 4 failed, but at first only on the counter check. All 30 sales sold the same pack type, so the stock row lock queued them one at a time and `max() + 1` never raced. The test now spreads the 30 sales over 10 stock pools; with the mutation it then failed on its first assertion (duplicate numbers made sales fail), and it passes without it.
+
+**Things to know:**
+1. Test 6 and test 2 at first assumed a sale without stock is `ACCEPTED`; it is `FLAGGED / STOCK_NEGATIVE` (correct behaviour). Test 2 now receives stock first; test 6 expects `FLAGGED`.
+2. Sales of one pool are serialised by its balance row lock, held until commit. A concurrency test of anything taken after the stock statements (the counter) must use different pools, or it does not test the race.
+3. Test 8's "no `sales.create`" case calls `SyncService.processCommands()` with a hand-built actor, because every role preset has `sales.create`.

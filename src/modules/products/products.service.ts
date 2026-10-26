@@ -15,7 +15,7 @@ import type { ListProductsQueryDto } from './dto/list-products-query.dto.js';
 import type { RemoveBarcodeDto } from './dto/remove-barcode.dto.js';
 import type { UpdateProductDto } from './dto/update-product.dto.js';
 import type { UpsertPackTypeDto } from './dto/upsert-pack-type.dto.js';
-import { type PackTypeRow, PackTypesRepository } from './pack-types.repository.js';
+import { type PackTypeForSale, type PackTypeRow, PackTypesRepository } from './pack-types.repository.js';
 import type { ProductView } from './product-view.js';
 import { ProductsRepository } from './products.repository.js';
 
@@ -318,6 +318,16 @@ export class ProductsService {
 
   async barcodesPageForSync(afterId: string | null, limit: number) {
     return this.barcodes.pageForSync(afterId, limit);
+  }
+
+  /**
+   * For sale.create (Phase E2): these pack types as they are now, archived
+   * too, with their product's name and their prices (money as canonical
+   * text). Ids of another business are simply missing.
+   */
+  async packTypesForSale(ids: string[]): Promise<Map<string, PackTypeForSale>> {
+    const rows = await this.packTypes.forSale(ids);
+    return new Map(rows.map((r) => [r.id, r]));
   }
 
   // For sync changes (Phase D3): these rows as they are now; missing ones are absent.

@@ -10,6 +10,7 @@ import type { CountLineDto, CountStockDto } from './dto/count-stock.dto.js';
 import type { ReceiveLineDto, ReceiveStockDto } from './dto/receive-stock.dto.js';
 import { type InvalidLine, StockError, type StockLineReason } from './stock.error.js';
 import { type AdjustReason, MAX_BALANCE, type MovementContext } from './stock.repository.js';
+import { inLockOrder } from './lock-order.js';
 import { StockService } from './stock.service.js';
 
 const MAX_LINE_QUANTITY = 1_000_000;
@@ -288,16 +289,6 @@ function countLineProblem(
   return null;
 }
 
-/**
- * Lines in the lock order of every multi-balance operation: larger pack
- * first, then by pack type id (docs/architecture.md section 6).
- */
-function inLockOrder<T extends { pack_type_id: string }>(lines: T[], packs: ReadonlyMap<string, { unitsPerPack: number }>): T[] {
-  return [...lines].sort((a, b) => {
-    const byUnits = packs.get(b.pack_type_id)!.unitsPerPack - packs.get(a.pack_type_id)!.unitsPerPack;
-    return byUnits !== 0 ? byUnits : a.pack_type_id < b.pack_type_id ? -1 : 1;
-  });
-}
 
 /** Trimmed text, or null when absent or blank. Control characters are refused. */
 function cleanText(value: string | null | undefined): string | null {

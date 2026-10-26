@@ -13,6 +13,17 @@ export interface PackTypeRow {
   archivedAt: Date | null;
 }
 
+/** A pack type as a sale records it (Phase E2): names and prices at that moment. */
+export interface PackTypeForSale {
+  id: string;
+  productId: string;
+  productName: string;
+  name: string;
+  unitsPerPack: number;
+  sellPrice: string;
+  costPrice: string | null;
+}
+
 export interface PackTypeWrite {
   name: string;
   unitsPerPack: number;
@@ -157,6 +168,28 @@ export class PackTypesRepository {
       sellPrice: r.sell_price,
       costPrice: r.cost_price,
       archivedAt: r.archived_at,
+    }));
+  }
+
+  /** Phase E2: pack types with their product's name and prices, for a sale's snapshots. */
+  async forSale(ids: string[]): Promise<PackTypeForSale[]> {
+    if (ids.length === 0) return [];
+    const rows = await currentTx().$queryRaw<
+      { id: string; product_id: string; product_name: string; name: string; units_per_pack: number; sell_price: string; cost_price: string | null }[]
+    >`
+      SELECT pt.id, pt.product_id, p.name AS product_name, pt.name, pt.units_per_pack,
+             pt.sell_price::text AS sell_price, pt.cost_price::text AS cost_price
+        FROM pack_type pt
+        JOIN product p ON p.business_id = pt.business_id AND p.id = pt.product_id
+       WHERE pt.id = ANY(${ids}::uuid[]) AND pt.business_id = ${currentBusinessId()}::uuid`;
+    return rows.map((r) => ({
+      id: r.id,
+      productId: r.product_id,
+      productName: r.product_name,
+      name: r.name,
+      unitsPerPack: r.units_per_pack,
+      sellPrice: r.sell_price,
+      costPrice: r.cost_price,
     }));
   }
 }

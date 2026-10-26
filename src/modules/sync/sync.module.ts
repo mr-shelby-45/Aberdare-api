@@ -4,6 +4,7 @@ import { DatabaseModule } from '../../database/database.module.js';
 import { DevicesModule } from '../devices/devices.module.js';
 import { LocationsModule } from '../locations/locations.module.js';
 import { ProductsModule } from '../products/products.module.js';
+import { SalesModule } from '../sales/sales.module.js';
 import { StockCommandsModule } from '../stock/stock-commands.module.js';
 import { StockModule } from '../stock/stock.module.js';
 import { ChangeFeedService } from './change-feed.service.js';
@@ -19,7 +20,7 @@ import { SyncService } from './sync.service.js';
 
 // Phone commands (Phase B) and, from Phase D, the change feed for the sync reads.
 @Module({
-  imports: [DatabaseModule, ProductsModule, StockCommandsModule, StockModule, LocationsModule, DevicesModule],
+  imports: [DatabaseModule, ProductsModule, StockCommandsModule, StockModule, LocationsModule, DevicesModule, SalesModule],
   controllers: [SyncController],
   providers: [SyncService, SyncRepository, CommandHandlers, SignedCursor, ChangesCursor, ChangeLogRepository, ChangeFeedService, SyncTables, SnapshotService, ChangesService],
 })

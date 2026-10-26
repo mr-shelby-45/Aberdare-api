@@ -29,6 +29,8 @@ export interface MovementRow {
   // COUNT only, both: quantity_change = counted - expected (a database check).
   expectedQuantity?: number | null;
   countedQuantity?: number | null;
+  // SALE and SALE_VOID (Phase E): the sale the movement belongs to.
+  saleId?: string | null;
 }
 
 // The largest balance a pool may hold, either way (docs/phase-c-design.md section 4; floor since C3): an
@@ -107,6 +109,7 @@ export class StockRepository {
         reference: movement.reference ?? null,
         expectedQuantity: movement.expectedQuantity ?? null,
         countedQuantity: movement.countedQuantity ?? null,
+        saleId: movement.saleId ?? null,
         occurredAt: ctx.occurredAt,
         createdByMembershipId: ctx.createdByMembershipId,
         syncCommandId: ctx.syncCommandId,

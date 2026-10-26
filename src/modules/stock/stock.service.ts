@@ -179,6 +179,40 @@ export class StockService {
     return this.repo.balancesByIdsForSync(ids);
   }
 
+  /**
+   * Phase E2, step 1 of a sale's stock: the sale-mode balance statement for
+   * each line, in the order given (the caller sorts with inLockOrder). Never
+   * refuses: the goods are already gone, so a pool may go below zero. Returns
+   * each line's balance afterwards, in the same order. The ledger rows are
+   * written by recordSaleMovements() in the SAME transaction, once the sale
+   * row exists (its number comes from the counter, which must come after
+   * these statements; decided in E2). Used only together.
+   */
+  async saleDecreases(locationId: string, lines: { packTypeId: string; quantity: number }[]): Promise<number[]> {
+    const after: number[] = [];
+    // One after another: queries on one transaction cannot run in parallel.
+    for (const line of lines) {
+      assertPositiveWholeNumber(line.quantity);
+      after.push(withinLimit(await this.repo.changeBalance(locationId, line.packTypeId, -line.quantity)));
+    }
+    return after;
+  }
+
+  /** Phase E2, step 2: one SALE movement per line, with the balance from saleDecreases(). */
+  async recordSaleMovements(
+    saleId: string,
+    locationId: string,
+    lines: { packTypeId: string; quantity: number; quantityAfter: number }[],
+    ctx: MovementContext,
+  ): Promise<void> {
+    for (const line of lines) {
+      await this.repo.insertMovement(
+        { locationId, packTypeId: line.packTypeId, quantityChange: -line.quantity, movementType: 'SALE', quantityAfter: line.quantityAfter, saleId },
+        ctx,
+      );
+    }
+  }
+
   /** For sale.create from sync: always records the sale, flags an oversell. */
   async decreaseForSale(
     locationId: string,
