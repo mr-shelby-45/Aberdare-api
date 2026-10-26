@@ -5,16 +5,20 @@ import type { LocationRow } from '../locations/locations.repository.js';
 import type { PackTypeRow } from '../products/pack-types.repository.js';
 import { ProductsService } from '../products/products.service.js';
 import type { ProductRow } from '../products/products.repository.js';
+import { SalesReadsService } from '../sales/sales-reads.service.js';
+import { paymentJson, saleItemJson, saleJson } from '../sales/sales-view.js';
 import { StockService } from '../stock/stock.service.js';
 import type { ResultValue } from './command-outcome.js';
 
-/** The tables a phone keeps offline, parents before children (docs/phase-d-design.md section 5). */
-export const SYNC_TABLE_NAMES = ['location', 'product', 'pack_type', 'product_barcode', 'stock_balance'] as const;
+/** The tables a phone keeps offline, parents before children (docs/phase-d-design.md section 5; sales from Phase E4). */
+export const SYNC_TABLE_NAMES = ['location', 'product', 'pack_type', 'product_barcode', 'stock_balance', 'sale', 'sale_item', 'payment'] as const;
 export type SyncTableName = (typeof SYNC_TABLE_NAMES)[number];
 
-/** What the reader may see. */
+/** What the reader may see: costs, and all sales or only the reader's own (Phase E4). */
 export interface SyncView {
   costs: boolean;
+  allSales: boolean;
+  membershipId: string;
 }
 
 /** One row as the phone receives it: snake_case, money as strings, times as ISO text. */
@@ -25,6 +29,9 @@ export interface SyncTable {
   // Needed to see the table at all; without it the table is empty in a
   // snapshot and its changes are skipped.
   permission: Permission | null;
+  // false for tables whose rows are never deleted (sales): a row not found
+  // in changes is one this reader may not see, skipped without a delete marker.
+  deletes: boolean;
   /** Rows after afterId in id order, at most limit, shaped for this reader (snapshot). */
   page(afterId: string | null, limit: number, view: SyncView): Promise<SyncRow[]>;
   /** These rows as they are now, shaped for this reader; missing ids are absent (changes). */
@@ -71,37 +78,66 @@ const balanceRow = (b: { id: string; locationId: string; packTypeId: string; qua
 export class SyncTables {
   private readonly byName: ReadonlyMap<SyncTableName, SyncTable>;
 
-  constructor(locations: LocationsService, products: ProductsService, stock: StockService) {
+  constructor(locations: LocationsService, products: ProductsService, stock: StockService, sales: SalesReadsService) {
     const entries: SyncTable[] = [
       {
         name: 'location',
         permission: null,
+        deletes: true,
         page: async (after, limit) => (await locations.pageForSync(after, limit)).map(locationRow),
         byIds: async (ids) => (await locations.byIdsForSync(ids)).map(locationRow),
       },
       {
         name: 'product',
         permission: null,
+        deletes: true,
         page: async (after, limit) => (await products.productsPageForSync(after, limit)).map(productRow),
         byIds: async (ids) => (await products.productsByIdsForSync(ids)).map(productRow),
       },
       {
         name: 'pack_type',
         permission: null,
+        deletes: true,
         page: async (after, limit, view) => (await products.packTypesPageForSync(after, limit)).map(packTypeRow(view)),
         byIds: async (ids, view) => (await products.packTypesByIdsForSync(ids)).map(packTypeRow(view)),
       },
       {
         name: 'product_barcode',
         permission: null,
+        deletes: true,
         page: async (after, limit) => (await products.barcodesPageForSync(after, limit)).map(barcodeRow),
         byIds: async (ids) => (await products.barcodesByIdsForSync(ids)).map(barcodeRow),
       },
       {
         name: 'stock_balance',
         permission: 'stock.view',
+        deletes: true,
         page: async (after, limit) => (await stock.balancesPageForSync(after, limit)).map(balanceRow),
         byIds: async (ids) => (await stock.balancesByIdsForSync(ids)).map(balanceRow),
+      },
+      // Sales (Phase E4, docs/phase-e-design.md section 8): every member, but a
+      // member without sales.void receives only their own sales and their
+      // items and payments. The snapshot holds the last 30 days.
+      {
+        name: 'sale',
+        permission: null,
+        deletes: false,
+        page: async (after, limit, view) => (await sales.salesPageForSync(after, limit, view)).map(saleJson),
+        byIds: async (ids, view) => (await sales.salesByIdsForSync(ids, view)).map(saleJson),
+      },
+      {
+        name: 'sale_item',
+        permission: null,
+        deletes: false,
+        page: async (after, limit, view) => (await sales.itemsPageForSync(after, limit, view)).map((i) => saleItemJson(i, view.costs)),
+        byIds: async (ids, view) => (await sales.itemsByIdsForSync(ids, view)).map((i) => saleItemJson(i, view.costs)),
+      },
+      {
+        name: 'payment',
+        permission: null,
+        deletes: false,
+        page: async (after, limit, view) => (await sales.paymentsPageForSync(after, limit, view)).map(paymentJson),
+        byIds: async (ids, view) => (await sales.paymentsByIdsForSync(ids, view)).map(paymentJson),
       },
     ];
     this.byName = new Map(entries.map((e) => [e.name, e]));

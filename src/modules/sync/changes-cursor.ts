@@ -7,26 +7,33 @@ const KIND = 'sync-changes';
 // A 64-bit unsigned number as decimal text.
 const NUMBER = /^\d{1,20}$/;
 
+/** What the reader could see when a cursor was issued: costs (Phase D) and all sales, not only their own (Phase E4). */
+export interface CursorView {
+  costs: boolean;
+  allSales: boolean;
+}
+
 // The cursor of GET /v1/sync/changes (docs/phase-d-design.md section 4): the
 // shared signed cursor carrying the business, the last position returned and
-// whether the member could see costs when it was issued. Opaque to the phone,
-// and not tied to a device.
+// what the member could see when it was issued (costs; from E4 also all
+// sales). Opaque to the phone, and not tied to a device.
 @Injectable()
 export class ChangesCursor {
   constructor(private readonly cursor: SignedCursor) {}
 
-  sign(businessId: string, position: ChangePosition, costs: boolean): string {
-    return this.cursor.sign(KIND, { business_id: businessId, txid: position.txid, id: position.id, costs });
+  sign(businessId: string, position: ChangePosition, view: CursorView): string {
+    return this.cursor.sign(KIND, { business_id: businessId, txid: position.txid, id: position.id, costs: view.costs, all_sales: view.allSales });
   }
 
   /**
    * The position, if the cursor is genuine and was issued to this business.
    * Tampered, malformed, unsigned, or another business's: the same 422 (so a
-   * cursor never reveals that another business exists). Issued under another
-   * cost visibility: 410 SNAPSHOT_REQUIRED, either direction. The retention
+   * cursor never reveals that another business exists; a cursor from before
+   * E4, without all_sales, too). Issued under another cost or sales
+   * visibility: 410 SNAPSHOT_REQUIRED, either direction. The retention
    * check (also 410) needs the database: ChangeFeedService.open().
    */
-  read(raw: string, businessId: string, costs: boolean): ChangePosition {
+  read(raw: string, businessId: string, view: CursorView): ChangePosition {
     const v = this.cursor.read(KIND, raw);
     if (
       !v ||
@@ -35,11 +42,12 @@ export class ChangesCursor {
       !NUMBER.test(v.txid) ||
       typeof v.id !== 'string' ||
       !NUMBER.test(v.id) ||
-      typeof v.costs !== 'boolean'
+      typeof v.costs !== 'boolean' ||
+      typeof v.all_sales !== 'boolean'
     ) {
       throw new ApiError(422, 'VALIDATION_FAILED', 'The cursor is not valid.');
     }
-    if (v.costs !== costs) throw snapshotRequired();
+    if (v.costs !== view.costs || v.all_sales !== view.allSales) throw snapshotRequired();
     return { txid: v.txid, id: v.id };
   }
 }

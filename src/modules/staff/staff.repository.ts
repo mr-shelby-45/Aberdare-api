@@ -137,6 +137,12 @@ export class StaffRepository {
     });
   }
 
+  /** Display names of these memberships, any status (Phase E4: who made a sale). */
+  async displayNames(ids: string[]): Promise<{ id: string; displayName: string }[]> {
+    if (ids.length === 0) return [];
+    return currentTx().membership.findMany({ where: { id: { in: ids } }, select: { id: true, displayName: true } });
+  }
+
   /** Every membership of the current business, with the phone (never any hash). */
   async list() {
     return currentTx().membership.findMany({

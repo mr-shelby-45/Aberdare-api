@@ -81,3 +81,31 @@ Filled in step by step. The full summary (see `docs/phase-e-design.md` section 1
 1. Sales of one business queue on the `sale_counter` row, so concurrent `sale.create` commands with one code never really race on the code index. The real races are attaches (no counter); E3's race tests use them, with a held-open transaction and a wait for lock waiters to force the overlap (`lockWaiters()` in `test/e3-payments.spec.ts`).
 2. Test 5 (no `payments.confirm`) calls `SyncService.processCommands()` with a hand-built actor: every preset has `payments.confirm` and extras only add.
 3. My first draft of test 2 sent 12 payments in one command, over the limit; it now uses two commands.
+
+## E4: Reads and sync (passed)
+
+**Result:** new 7, Phase E cumulative 35 (`test/e4-sales-reads-sync.spec.ts` plus the E1 to E3 files), all passing in the gate run. The held-open-transaction test (out-of-order commits) passed 5 runs in a row. The Phase D files, changed mechanically (below), passed together: 5 files, 30 of 30. The full suite passed: 35 files, 390 of 390 (589.3 s). Lint, type-check, build and the drift check were clean.
+
+**Built (approved by Ian on 2026-10-26, with the eight recommended answers):**
+- Migration `*_e4_sale_read_indexes` (generated, exactly the SQL shown before approval; answer 1): `sale (business_id, occurred_at DESC, id DESC)` and `sale (business_id, created_by_membership_id, occurred_at DESC, id DESC)`. Applied to dev and test.
+- Reads (`SalesController`, `SalesReadsService`, `SalesReadsRepository`, `sales-view.ts`): `GET /v1/sales` (newest first by `(occurred_at, id)`, filters, signed cursor bound to the filters including the effective `created_by`) and `GET /v1/sales/:id` (items, payments, void details; `cost_price` key absent without `costs.view`). Any active member; a member without `sales.void` sees only their own sales, and anything else is the same `404 SALE_NOT_FOUND` as a missing id or a non-UUID (answer 6). Names come from the new `StaffService.displayNames()` (answer 5).
+- Sync: `SyncTables` gains `sale`, `sale_item`, `payment` after `stock_balance`, with one row shape shared with the detail read (answer 7; a payment shows `duplicate: true/false`). `SyncView` carries `allSales` and `membershipId`.
+- Snapshot: sales with `occurred_at` within `SALES_SNAPSHOT_DAYS` (30) of the Clock; items and payments of sales within 31 days (answer 4: a snapshot spans many requests while the Clock moves; the phone ignores children of a sale it does not hold).
+- Changes: no age filter. Sale tables have `deletes: false`: a row not found is one the reader may not see (sales are never deleted), skipped without a marker, and the cursor still moves past it (answer 3).
+- The changes cursor binds `all_sales` next to `costs` (answer 2): gaining or losing `sales.void` gives `410 SNAPSHOT_REQUIRED`. A cursor issued before E4 has no `all_sales` and is refused once with `422`, like a tampered one.
+
+**Mutations (each reverted and checked with `cmp`; no `MUTATION` marker left):**
+- Design 9 in reads (an attendant's list ignores the visibility rule): test 1 failed. In changes (sale rows read without the owner filter): test 5 failed.
+- Design 10 in reads (`cost_price` always shown in the detail): test 2 failed. In changes (items shaped with costs): test 5 failed (an assertion added to test 5 for this before the mutation ran).
+- Extra c, hidden sale rows sent as delete markers: test 5 failed.
+- Extra d, the cursor does not compare `all_sales`: test 6 failed.
+
+**Earlier tests changed by E4 (mechanical; no assertion weakened):**
+- D1 and D2: `ChangeFeedService.startCursor/open/sign` take a `{ costs, allSales }` view instead of `costs: boolean`; the calls pass `allSales: false` with the same `costs` value as before. D2's hand-built `SyncReader` gains `membershipId`.
+- D2 test 1: the snapshot's last table is now `payment`, not `stock_balance`; its expected counts include the three sale tables (zero rows there). D2's "without stock.view" page now has `nextTable: 'sale'`.
+- D4 walkthrough test and `docs/phase-d-walkthrough.md` step 2: the `stock_balance` page now has `next_table: 'sale'`.
+
+**Things to know:**
+1. Changes collapse repeats of a record only within one page (Phase D3). My first draft of test 5 drained with pages of 3 and expected each sale once; it now checks "once" with one page and checks separately that pages of 3 end in the same state.
+2. While any transaction is held open, `changes` hands out nothing committed after it (the finished-transactions rule of D1), not only the held change. My first draft expected a later sale to arrive while the transaction was open.
+3. Payments know only payments, so the snapshot's payment pages get the window's visible sale ids from the sales module and query `sale_id = ANY(ids)` (no cross-module join). With item pages (by id, filtered by date) this is fine for 30 days of a normal shop; measure for a busy wholesaler in Phase H (`docs/architecture.md` open item 59).

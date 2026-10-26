@@ -74,6 +74,11 @@ export class StaffService {
     return this.repo.listActive();
   }
 
+  /** Display names by membership id, any status; unknown ids are absent (Phase E4). */
+  async displayNames(ids: string[]): Promise<Map<string, string>> {
+    return new Map((await this.repo.displayNames([...new Set(ids)])).map((m) => [m.id, m.displayName]));
+  }
+
   /** Phase C5: a member's approving state (PIN hash, role, status, approval lock). */
   async findApproverState(membershipId: string): Promise<ApproverState | null> {
     return this.repo.findApproverState(membershipId);

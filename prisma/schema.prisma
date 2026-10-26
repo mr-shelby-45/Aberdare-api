@@ -641,6 +641,9 @@ model Sale {
   @@unique([businessId, saleNumber])
   // An approval voids at most one sale.
   @@unique([businessId, voidApprovalId])
+  // Phase E4 reads: the business list and an attendant's own list, newest first.
+  @@index([businessId, occurredAt(sort: Desc), id(sort: Desc)])
+  @@index([businessId, createdByMembershipId, occurredAt(sort: Desc), id(sort: Desc)])
   @@map("sale")
 }
 

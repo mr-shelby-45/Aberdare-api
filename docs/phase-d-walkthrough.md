@@ -138,7 +138,7 @@ curl -s "$API/sync/snapshot?table=product_barcode" -H "authorization: Bearer $AT
 curl -s "$API/sync/snapshot?table=stock_balance" -H "authorization: Bearer $ATTENDANT"
 ```
 
-Expect balances 10 (carton) and 5 (piece), and `"next_table":null`: the download is complete. The manager's phone also starts a snapshot, for step 5:
+Expect balances 10 (carton) and 5 (piece), and `"next_table":"sale"` (since Phase E4 the sale, sale_item and payment tables follow; with no sales they are empty, and the download is then complete). The manager's phone also starts a snapshot, for step 5:
 
 ```bash
 curl -s "$API/sync/snapshot" -H "authorization: Bearer $MANAGER"

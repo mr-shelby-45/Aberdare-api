@@ -32,6 +32,8 @@ const IsAddressOrRangeEach = () =>
 // variables and these; no provider-specific settings.
 /** change_log retention (Phase D1). */
 export const CHANGE_LOG_RETENTION_DAYS = 30;
+/** How far back a sync snapshot reaches for sales (Phase E4, docs/phase-e-design.md section 8). */
+export const SALES_SNAPSHOT_DAYS = 30;
 
 export class AppConfig {
   @IsIn(APP_ENVS)

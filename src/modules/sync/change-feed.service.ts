@@ -3,7 +3,7 @@ import { Clock } from '../../common/time/clock.js';
 import { AppConfig } from '../../config/app.config.js';
 import { ChangeLogMaintenance } from '../../database/change-log-maintenance.js';
 import { type ChangeLogRow, type ChangePosition, ChangeLogRepository } from './change-log.repository.js';
-import { ChangesCursor, snapshotRequired } from './changes-cursor.js';
+import { ChangesCursor, type CursorView, snapshotRequired } from './changes-cursor.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -22,17 +22,17 @@ export class ChangeFeedService {
   ) {}
 
   /** A cursor for a reader that has everything finished so far (the snapshot's start_cursor). */
-  async startCursor(businessId: string, costs: boolean): Promise<string> {
-    return this.cursor.sign(businessId, await this.repo.startPosition(), costs);
+  async startCursor(businessId: string, view: CursorView): Promise<string> {
+    return this.cursor.sign(businessId, await this.repo.startPosition(), view);
   }
 
   /**
    * The position of a cursor the phone sent back: 422 if it is not genuine or
-   * not this business's, 410 if it was issued under another cost visibility
-   * or is older than the retained history.
+   * not this business's, 410 if it was issued under another cost or sales
+   * visibility or is older than the retained history.
    */
-  async open(raw: string, businessId: string, costs: boolean): Promise<ChangePosition> {
-    const position = this.cursor.read(raw, businessId, costs);
+  async open(raw: string, businessId: string, view: CursorView): Promise<ChangePosition> {
+    const position = this.cursor.read(raw, businessId, view);
     if (!(await this.repo.isRetained(position))) throw snapshotRequired();
     return position;
   }
@@ -42,8 +42,8 @@ export class ChangeFeedService {
     return this.repo.finishedAfter(position, limit);
   }
 
-  sign(businessId: string, position: ChangePosition, costs: boolean): string {
-    return this.cursor.sign(businessId, position, costs);
+  sign(businessId: string, position: ChangePosition, view: CursorView): string {
+    return this.cursor.sign(businessId, position, view);
   }
 
   /**

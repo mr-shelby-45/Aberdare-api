@@ -4,7 +4,7 @@ import { SignedCursor, cursorUuid } from '../../common/paging/signed-cursor.js';
 import { DevicesService } from '../devices/devices.service.js';
 import { ChangeFeedService } from './change-feed.service.js';
 import type { SnapshotQueryDto } from './dto/snapshot-query.dto.js';
-import { SYNC_TABLE_NAMES, type SyncRow, type SyncTableName, SyncTables } from './sync-tables.js';
+import { SYNC_TABLE_NAMES, type SyncRow, type SyncTableName, SyncTables, type SyncView } from './sync-tables.js';
 
 const PAGE_KIND = 'sync-snapshot';
 const MAX_LIMIT = 500;
@@ -12,6 +12,7 @@ const MAX_LIMIT = 500;
 /** Who is reading, all from the token and the live session. */
 export interface SyncReader {
   businessId: string;
+  membershipId: string;
   deviceId: string;
   permissions: ReadonlySet<string>;
 }
@@ -44,7 +45,7 @@ export class SnapshotService {
    * next page. A page cursor is bound to its business and table.
    */
   async page(query: SnapshotQueryDto, reader: SyncReader): Promise<SnapshotPage> {
-    const costs = reader.permissions.has('costs.view');
+    const view = syncView(reader);
     const limit = pageLimit(query.limit);
     let table: SyncTableName;
     let after: string | null = null;
@@ -61,14 +62,14 @@ export class SnapshotService {
     } else if (query.table !== undefined) {
       table = query.table;
     } else {
-      startCursor = await this.feed.startCursor(reader.businessId, costs);
+      startCursor = await this.feed.startCursor(reader.businessId, view);
       table = SYNC_TABLE_NAMES[0];
     }
 
     const entry = this.tables.get(table);
     const visible = entry.permission === null || reader.permissions.has(entry.permission);
     // One row more than asked tells whether there is a next page.
-    const rows = visible ? await entry.page(after, limit + 1, { costs }) : [];
+    const rows = visible ? await entry.page(after, limit + 1, view) : [];
     const page = rows.slice(0, limit);
     const more = rows.length > limit;
     const last = page[page.length - 1];
@@ -84,6 +85,11 @@ export class SnapshotService {
       ...(startCursor !== undefined ? { startCursor } : {}),
     };
   }
+}
+
+/** What this reader may see, from the live session (Phase D costs; Phase E4 sales). */
+export function syncView(reader: SyncReader): SyncView {
+  return { costs: reader.permissions.has('costs.view'), allSales: reader.permissions.has('sales.void'), membershipId: reader.membershipId };
 }
 
 /** limit: default 500; above 500 is quietly capped; 0 is refused (as for the other lists). */

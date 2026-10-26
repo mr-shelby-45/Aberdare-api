@@ -86,7 +86,7 @@ describe('D2: snapshot', { timeout: 180_000 }, () => {
   const counts = (businessId: string) =>
     asAdmin(async (c) => {
       const n = async (table: string) => Number((await c.query<{ n: string }>(`SELECT count(*) AS n FROM ${table} WHERE business_id = $1`, [businessId])).rows[0].n);
-      return { location: await n('location'), product: await n('product'), pack_type: await n('pack_type'), product_barcode: await n('product_barcode'), stock_balance: await n('stock_balance') };
+      return { location: await n('location'), product: await n('product'), pack_type: await n('pack_type'), product_barcode: await n('product_barcode'), stock_balance: await n('stock_balance'), sale: await n('sale'), sale_item: await n('sale_item'), payment: await n('payment') };
     });
 
   // ---------------------------------------------------------------- 1. the whole download
@@ -107,7 +107,7 @@ describe('D2: snapshot', { timeout: 180_000 }, () => {
       expect(ids.length, name).toBe(expected[name]);
       expect([...ids].sort(), name).toEqual(ids); // keyset by id
     }
-    expect(d.pages[d.pages.length - 1]).toMatchObject({ table: 'stock_balance', next_cursor: null, next_table: null });
+    expect(d.pages[d.pages.length - 1]).toMatchObject({ table: 'payment', next_cursor: null, next_table: null }); // the last table since E4
 
     // Shapes and values against the Phase B and C reads.
     const locations = api.json<{ locations: { id: string; name: string; is_default: boolean; archived: boolean }[] }>(await get('/v1/locations?include_archived=true', fresh.token)).locations;
@@ -159,7 +159,7 @@ describe('D2: snapshot', { timeout: 180_000 }, () => {
     expect(rest.every((p) => p.start_cursor === undefined)).toBe(true);
     // The late product's rows come through the change feed from start_cursor, each record once.
     const changes = await tenants.run(w.owner.businessId, async () =>
-      feed.finishedAfter(await feed.open(first.start_cursor!, w.owner.businessId, false), 500),
+      feed.finishedAfter(await feed.open(first.start_cursor!, w.owner.businessId, { costs: false, allSales: false }), 500),
     );
     const changed = new Set(changes.map((c) => `${c.tableName}:${c.rowId}`));
     for (const key of [`product:${late.productId}`, `pack_type:${late.piece}`, `pack_type:${late.carton}`]) expect(changed.has(key), key).toBe(true);
@@ -188,7 +188,7 @@ describe('D2: snapshot', { timeout: 180_000 }, () => {
       const first = await page(w.attendant.token, '?limit=500');
       expect(first.rows.find((r) => r.id === w.loc)?.name).toBe('Main shop'); // read before T1 committed
       const changes = await tenants.run(w.owner.businessId, async () =>
-        feed.finishedAfter(await feed.open(first.start_cursor!, w.owner.businessId, false), 500),
+        feed.finishedAfter(await feed.open(first.start_cursor!, w.owner.businessId, { costs: false, allSales: false }), 500),
       );
       expect(changes.filter((c) => c.tableName === 'location' && c.rowId === w.loc && c.operation === 'UPDATE')).toHaveLength(1);
     } finally {
@@ -210,9 +210,9 @@ describe('D2: snapshot', { timeout: 180_000 }, () => {
     const snapshots = t.app.get(SnapshotService, { strict: false });
     const tenants = t.app.get(TenantRunner, { strict: false });
     const withoutStock = await tenants.run(w.owner.businessId, () =>
-      snapshots.page({ table: 'stock_balance' }, { businessId: w.owner.businessId, deviceId: w.attendant.deviceId!, permissions: new Set(['sales.create']) }),
+      snapshots.page({ table: 'stock_balance' }, { businessId: w.owner.businessId, membershipId: w.attendant.membershipId, deviceId: w.attendant.deviceId!, permissions: new Set(['sales.create']) }),
     );
-    expect(withoutStock).toEqual({ table: 'stock_balance', rows: [], nextCursor: null, nextTable: null });
+    expect(withoutStock).toEqual({ table: 'stock_balance', rows: [], nextCursor: null, nextTable: 'sale' }); // sale follows since E4
   });
 
   // ---------------------------------------------------------------- 4. archived rows

@@ -49,6 +49,7 @@ export class SyncController {
   async snapshot(@Req() request: AuthedRequest, @Query() query: SnapshotQueryDto) {
     const p = await this.snapshots.page(query, {
       businessId: request.auth!.businessId,
+      membershipId: request.session!.membership.id,
       deviceId: request.auth!.deviceId,
       permissions: request.session!.permissions,
     });
@@ -67,6 +68,7 @@ export class SyncController {
   async changes(@Req() request: AuthedRequest, @Query() query: ChangesQueryDto) {
     const r = await this.changeFeed.changes(query, {
       businessId: request.auth!.businessId,
+      membershipId: request.session!.membership.id,
       deviceId: request.auth!.deviceId,
       permissions: request.session!.permissions,
     });

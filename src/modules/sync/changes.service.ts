@@ -4,7 +4,7 @@ import { DevicesService } from '../devices/devices.service.js';
 import { ChangeFeedService } from './change-feed.service.js';
 import type { ChangeLogRow, ChangePosition } from './change-log.repository.js';
 import type { ChangesQueryDto } from './dto/changes-query.dto.js';
-import type { SyncReader } from './snapshot.service.js';
+import { type SyncReader, syncView } from './snapshot.service.js';
 import { type SyncRow, type SyncTableName, SyncTables } from './sync-tables.js';
 
 const DEFAULT_LIMIT = 200;
@@ -33,11 +33,11 @@ export class ChangesService {
   ) {}
 
   async changes(query: ChangesQueryDto, reader: SyncReader): Promise<{ changes: SyncChange[]; nextCursor: string; hasMore: boolean }> {
-    const costs = reader.permissions.has('costs.view');
+    const view = syncView(reader);
     const limit = pageLimit(query.limit);
     // 422 for a cursor that is not genuine or not this business's; 410 for
-    // another cost visibility or a position older than the retained history.
-    const position = await this.feed.open(query.cursor, reader.businessId, costs);
+    // another cost or sales visibility or a position older than the retained history.
+    const position = await this.feed.open(query.cursor, reader.businessId, view);
 
     // limit counts log rows, not changes (decided in D3): the cursor moves by
     // exactly the rows read, including rows the reader cannot see and rows
@@ -62,24 +62,27 @@ export class ChangesService {
     }
 
     // The current state, one query per table (one after another: queries on
-    // one transaction cannot run in parallel). A record not found is a delete.
+    // one transaction cannot run in parallel). A record not found is a delete,
+    // except in tables whose rows are never deleted (sales, Phase E4): there
+    // it is a row this reader may not see, skipped without a marker, so an
+    // attendant never learns that another member's sale exists.
     const current = new Map<string, SyncRow>();
-    const view = { costs };
     for (const table of new Set(order.map((o) => o.table))) {
       const ids = order.filter((o) => o.table === table).map((o) => o.id);
       for (const row of await this.tables.get(table).byIds(ids, view)) current.set(`${table}:${row.id}`, row);
     }
-    const changes: SyncChange[] = order.map((o) => {
+    const changes: SyncChange[] = order.flatMap((o): SyncChange[] => {
       const row = current.get(o.key);
-      if (row) return { table: o.table, op: 'upsert', id: o.id, row };
+      if (row) return [{ table: o.table, op: 'upsert', id: o.id, row }];
+      if (!this.tables.get(o.table).deletes) return [];
       return o.table === 'product_barcode'
-        ? { table: o.table, op: 'delete', id: o.id, key: { barcode: latest.get(o.key)!.rowKey } }
-        : { table: o.table, op: 'delete', id: o.id };
+        ? [{ table: o.table, op: 'delete', id: o.id, key: { barcode: latest.get(o.key)!.rowKey } }]
+        : [{ table: o.table, op: 'delete', id: o.id }];
     });
 
     // After the data is read, in the same transaction (docs/phase-d-design.md section 3).
     await this.devices.stampSync(reader.deviceId);
-    return { changes, nextCursor: this.feed.sign(reader.businessId, next, costs), hasMore };
+    return { changes, nextCursor: this.feed.sign(reader.businessId, next, view), hasMore };
   }
 }
 

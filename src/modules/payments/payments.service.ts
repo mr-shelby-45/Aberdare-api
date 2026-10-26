@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { MAX_CENTS, fromCents, toCents } from '../../common/money/cents.js';
 import type { PaymentDto } from './dto/payment.dto.js';
-import { PaymentsRepository } from './payments.repository.js';
+import { type PaymentReadRow, PaymentsRepository } from './payments.repository.js';
 
 export type PaymentReason = 'AMOUNT_INVALID' | 'METHOD_INVALID' | 'MPESA_CODE_MISSING' | 'MPESA_CODE_INVALID' | 'MPESA_CODE_NOT_ALLOWED';
 
@@ -60,6 +60,21 @@ export class PaymentsService {
       duplicates++;
     }
     return { duplicates };
+  }
+
+  // Reads (Phase E4). The sales module decides which sales a reader may see;
+  // these only fetch the payments of the sales it names, or by id.
+
+  async forSales(saleIds: string[]): Promise<PaymentReadRow[]> {
+    return this.repo.forSales(saleIds);
+  }
+
+  async byIdsForSync(ids: string[]): Promise<PaymentReadRow[]> {
+    return this.repo.byIds(ids);
+  }
+
+  async pageForSync(afterId: string | null, limit: number, saleIds: string[]): Promise<PaymentReadRow[]> {
+    return this.repo.pageForSync(afterId, limit, saleIds);
   }
 }
 

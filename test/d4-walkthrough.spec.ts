@@ -121,7 +121,7 @@ describe('D4 test 3: the Phase D walkthrough runs end to end', { timeout: 120_00
     for (const r of [...packs1.rows, ...packs2.rows]) expect(r).not.toHaveProperty('cost_price');
     expect((await snap(attendant.token, '?table=product_barcode&limit=500')).rows.map((r) => r.barcode)).toEqual(['6161101560029']);
     const balances = await snap(attendant.token, '?table=stock_balance&limit=500');
-    expect(balances).toMatchObject({ next_cursor: null, next_table: null });
+    expect(balances).toMatchObject({ next_cursor: null, next_table: 'sale' }); // the sale tables follow since E4
     expect(balances.rows.map((r) => Number(r.quantity)).sort((a, b) => a - b)).toEqual([5, 10]);
     const mgrCursor = (await snap(manager.token, '?limit=500')).start_cursor!;
 

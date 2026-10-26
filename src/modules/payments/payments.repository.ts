@@ -11,6 +11,45 @@ export interface PaymentRow {
   createdByMembershipId: string;
 }
 
+/** A payment as reads and sync show it (Phase E4). Money as canonical text. */
+export interface PaymentReadRow {
+  id: string;
+  saleId: string;
+  method: string;
+  amount: string;
+  mpesaCode: string | null;
+  verified: boolean;
+  duplicate: boolean;
+  status: string;
+  occurredAt: Date;
+}
+
+interface RawPayment {
+  id: string;
+  sale_id: string;
+  method: string;
+  amount: string;
+  mpesa_code: string | null;
+  verified: boolean;
+  duplicate: boolean;
+  status: string;
+  occurred_at: Date;
+}
+
+function readRows(rows: RawPayment[]): PaymentReadRow[] {
+  return rows.map((r) => ({
+    id: r.id,
+    saleId: r.sale_id,
+    method: r.method,
+    amount: r.amount,
+    mpesaCode: r.mpesa_code,
+    verified: r.verified,
+    duplicate: r.duplicate,
+    status: r.status,
+    occurredAt: r.occurred_at,
+  }));
+}
+
 // payment SQL (Phase E3), on the current tenant transaction. app_user may
 // insert payments and change only their status (a void, E5); never delete.
 @Injectable()
@@ -40,6 +79,43 @@ export class PaymentsRepository {
        WHERE business_id = ${currentBusinessId()}::uuid AND mpesa_code = ${mpesaCode}
          AND duplicate_of_payment_id IS NULL`;
     return rows[0]?.id ?? null;
+  }
+
+  /** Payments of these sales (Phase E4 reads). */
+  async forSales(saleIds: string[]): Promise<PaymentReadRow[]> {
+    if (saleIds.length === 0) return [];
+    return readRows(
+      await currentTx().$queryRaw<RawPayment[]>`
+        SELECT id, sale_id, method, amount::text AS amount, mpesa_code, verified,
+               (duplicate_of_payment_id IS NOT NULL) AS duplicate, status, occurred_at FROM payment
+         WHERE business_id = ${currentBusinessId()}::uuid AND sale_id = ANY(${saleIds}::uuid[])
+         ORDER BY created_at, id`,
+    );
+  }
+
+  /** These payments as they are now; missing ids are absent (Phase E4 changes). */
+  async byIds(ids: string[]): Promise<PaymentReadRow[]> {
+    if (ids.length === 0) return [];
+    return readRows(
+      await currentTx().$queryRaw<RawPayment[]>`
+        SELECT id, sale_id, method, amount::text AS amount, mpesa_code, verified,
+               (duplicate_of_payment_id IS NOT NULL) AS duplicate, status, occurred_at FROM payment
+         WHERE business_id = ${currentBusinessId()}::uuid AND id = ANY(${ids}::uuid[])`,
+    );
+  }
+
+  /** Payments of these sales after afterId in id order (Phase E4 snapshot). */
+  async pageForSync(afterId: string | null, limit: number, saleIds: string[]): Promise<PaymentReadRow[]> {
+    if (saleIds.length === 0) return [];
+    return readRows(
+      await currentTx().$queryRaw<RawPayment[]>`
+        SELECT id, sale_id, method, amount::text AS amount, mpesa_code, verified,
+               (duplicate_of_payment_id IS NOT NULL) AS duplicate, status, occurred_at FROM payment
+         WHERE business_id = ${currentBusinessId()}::uuid AND sale_id = ANY(${saleIds}::uuid[])
+           AND (${afterId}::uuid IS NULL OR id > ${afterId}::uuid)
+         ORDER BY id
+         LIMIT ${limit}::int`,
+    );
   }
 
   /** A payment whose code was already used: saved, pointing at the original, outside the unique index. */
