@@ -1,6 +1,82 @@
 # Phase C results
 
-Filled in step by step. The full summary (see `docs/phase-c-design.md` section 15) is written when C6 is finished. Only Ian marks the phase done, in `CLAUDE.md` section 2.
+**Status: all six steps (C1 to C6) passed. Waiting for Ian's review.** Only Ian marks Phase C done, in CLAUDE.md section 2. The manual walkthrough for Ian is `docs/phase-c-walkthrough.md`.
+
+**Final suite (end of phase, 3 runs in a row):** 3 runs done, all passed, on the working tree this commit records. Run 1: 26 files, 325 of 325 (421.7 s). Run 2: 26 files, 325 of 325 (346.2 s). Run 3: 26 files, 325 of 325 (374.2 s). Lint, type-check, build and the drift check were clean before the runs. Earlier failed runs during Phase C are recorded in their step sections below, as observed.
+
+## Summary
+
+| Step | What it built | New tests | Phase C cumulative | Workarounds and notable changes |
+|---|---|---|---|---|
+| C1 | Ledger columns, checks, `approval` table and grants, `stock_balance` change-log trigger, integrity check, approval consumption statement, `errorCode` in logs | 7 | 7 | Spike step 2 raw inserts given the new required columns (a NOT NULL hit before the targeted check); `seedShop` creates a real manager |
+| C2 | `stock.receive`, `stock.adjust`, `GET /v1/stock`, `GET /v1/stock/movements`, movement history index | 14 | 21 | `StockCommandsModule` (module cycle); nested audit metadata; read-only joins exception; shared `SignedCursor`; lines applied in the lock order; cap inside the upsert |
+| C3 | `stock.count` (counted minus expected, `FLAGGED / NEGATIVE_AFTER_COUNT`) | 8 | 29 | Balance floor added to the upsert (bigint check); one full run failed hashing timing tests under machine load, rerun clean |
+| C4 | `stock.convert` for managers and owners | 8 | 37 | Handler checks `stock.convert` itself (dispatcher: `stock.view`); spike `convertOne` replaced by `convert` |
+| C5 | Approvals: approvers list, PIN-minted approvals, own counters, the approval path of convert | 10 | 47 | `@OwnTransactions()` on the approvals route (approved); `SyncActor.deviceId` and `receivedAt` for handlers |
+| C6 | Randomized workload (3 seeds), logs, audit coverage, grants, walkthrough document and test | 8 | 55 | `DAMAGED` adjust in place of a sale in walkthrough step 7 (no sale endpoint until Phase E) |
+
+New tests count `it` cases as Vitest reports them; the C6 workload is one case per seed (three).
+
+## Final patterns
+
+| Concern | Pattern | Where |
+|---|---|---|
+| Ledger and balance | One movement row plus one balance statement per change, in the same transaction. Movements record type, `quantity_after` (from `RETURNING`), phone time, creator and sync command. Never updated or deleted (`app_user` has SELECT and INSERT only) | `stock.repository.ts`, `stock.service.ts` |
+| Strict decrease | `UPDATE stock_balance SET quantity = quantity - $q ... WHERE ... AND quantity >= $q RETURNING quantity`; no row means `STOCK_INSUFFICIENT` | `StockRepository.decreaseIfAvailable` |
+| Non-strict change | `INSERT ... ON CONFLICT DO UPDATE SET quantity = stock_balance.quantity + EXCLUDED.quantity ... WHERE stock_balance.quantity::bigint + EXCLUDED.quantity BETWEEN -2000000000 AND 2000000000 RETURNING quantity`; no row means `VALIDATION_FAILED` | `StockRepository.changeBalance` |
+| Count rule | `delta = counted - expected` (the phone's number), applied non-strictly; a zero delta writes nothing; any counted pool below zero flags the command | `StockService.count`, `StockCommandsService.count` |
+| Lock order | Every multi-balance operation changes the larger pack first, then by pack type id (`inLockOrder()`); a conversion goes larger to smaller, so no cycle is possible | `stock-commands.service.ts`, `StockService.convert` |
+| Invalid lines | Every line checked before any write; a bad line rejects the whole command with `INVALID_LINES` and `result.invalid_lines` listing every bad line (1-based, first problem per line); malformed shapes are `VALIDATION_FAILED` | `stock-commands.service.ts`, `commands/stock-rejection.ts` |
+| Approval minting | Outside the request transaction: short read, scrypt outside any transaction, short write. Every refusal the same `403 APPROVAL_DENIED` after one scrypt run; a locked approver's PIN is not checked; only real approvers are counted; counters read `FOR UPDATE` | `approvals.service.ts`, `StaffService.recordApprovalAttempt` |
+| Approval use | One atomic `UPDATE approval ... WHERE consumed_at IS NULL AND requester ... AND device ... AND time limits RETURNING approver`, then the approver re-checked live; inside the command's savepoint, so a failed conversion leaves it unused | `ApprovalsRepository.consume`, `ApprovalsService.useForConversion` |
+| Reads | Keyset paging with the shared `SignedCursor`, which also binds the filters; `unit_cost` key absent without `costs.view`; read-only joins for names (the one approved exception) | `stock-reads.service.ts`, `stock-reads.repository.ts`, `src/common/paging/signed-cursor.ts` |
+| Integrity | `StockIntegrityService.check()`: balances against ledger sums, both directions, for the current business | `stock-integrity.service.ts` |
+
+## Proof the tests catch mistakes
+
+Each design mutation was applied temporarily, the named test was shown failing, and the change was reverted (checked byte for byte with `cmp`, or the trigger definition's md5).
+
+| Design mutation | Test that failed | What it caught |
+|---|---|---|
+| 1. The valid lines of a bad delivery saved | C2 test 2 | the bad delivery was `ACCEPTED` |
+| 2. Adjust reads the balance, checks it in JavaScript, then writes | C2 test 6 | 18 of 50 decreases accepted against a balance of 10 |
+| 3. The count sets the balance to the counted number | C3 test 2 | the sales between the count and its arrival were lost |
+| 4. No strict guard on the conversion source | C4 test 3 | a conversion of two cartons was accepted with one |
+| 5. `consumed_at IS NULL` removed from the consumption | C5 test 4 | a used approval was accepted again |
+| 6. Requester and device binding removed | C5 test 5 | another member's use was accepted |
+| 7. `unit_cost` accepted without `costs.view` | C2 test 4 | the manager's cost lines were accepted |
+| 8. The `stock_balance` change-log trigger removed | C1 test 4 and C2 test 11 | no `change_log` rows for balances |
+| 9. Approval attempts written to the PIN login counters | C5 test 3 | the approval count stayed 0 |
+
+## Versions
+
+Unchanged from Phase B. No library was added in Phase C.
+
+## Things to know
+
+1. Rows written in one transaction share `created_at` (Postgres `now()` is the transaction start), so ordering them by `created_at, id` is random. Check order through `change_log.id`, or compare them as a set.
+2. Access tokens expire when a test moves the fake clock; log the member in again by PIN on the same device.
+3. Password-hashing timing tests fail when the machine is overloaded (seen once, in C3: the run took 1085 s). They are never weakened; such a run is repeated.
+4. Product list cursors issued before C2 are refused once (the shared cursor changed the format).
+5. Scratchpad scripts load project packages with `createRequire(process.cwd() + '/package.json')`; there is no Python on this machine; scripts with backticks are written with the editor, not a shell heredoc.
+6. The C6 workload prints its seed in the test name; `C6_SEED=<n> pnpm exec vitest run test/c6-hardening.spec.ts -t workload` replays one.
+
+## Open risks
+
+1. Overload still answers 500 instead of 503 (spike open risk 4, unchanged).
+2. An approval can be hoarded for up to 15 minutes of phone time; a phone with a wrong clock can stretch that, capped at 24 hours after minting (design open item 9).
+3. Approvers are not told their PIN was used until Phase F (design open item 2).
+4. The "another device" approval test sends the command through the dispatcher with another device id; it does not log in on a second phone.
+5. No sale endpoint yet: sale-mode decreases are exercised through the spike's repository code until Phase E.
+6. Later items from the design (section 17): transfers between locations, the nightly integrity schedule, valuation, reorder levels, supplier returns as documents.
+
+## Changes to the other documents
+
+- `CLAUDE.md`: the phase table row for C (C1); section 4's module rule notes the one approved read-only exception (C2); section 8 notes for the ledger, approvals, `errorCode`, `prisma format`, the stock commands module, the balance limits, the shared cursor, test helpers and gotchas (C1 to C5). The status line was not touched.
+- `docs/architecture.md`: sections 5, 6, 12, 13 and 16 (C1), then "as built" notes in sections 5 and 6 for each step (C2 to C5).
+- `docs/phase-c-walkthrough.md`: new (C6).
+
+# Step details
 
 ## C1: Schema, triggers, integrity check, housekeeping (passed)
 
@@ -133,3 +209,20 @@ Filled in step by step. The full summary (see `docs/phase-c-design.md` section 1
 1. The "another device" case is sent through the app's own `SyncService` with a different `deviceId`, as the dispatcher would receive it from another phone's token; the "another member" case goes through the real API.
 2. Three first-run failures were in my tests: the approvals module needed `DatabaseModule` for `TenantRunner`; access tokens expire when the fake clock moves (tests now log in again by PIN on the same device); staff PATCH answers 204, not 200.
 3. Notifying the approver ("your PIN was used") stays for Phase F (design open item 2).
+
+## C6: Hardening and handover (passed)
+
+**Result:** new 8, Phase C cumulative 55 (all seven Phase C files), all passing in the gate run. The randomized workload (seeds 101, 202 and 303) passed 5 runs in a row (15 of 15 seed runs). The walkthrough passed as a test, and once over real HTTP against the built API (`node dist/main`, port 3100) on the test database: 16 of 16 checks, and none of the PIN, the reference or the note in the API's 108 log lines.
+
+**Built (approved by Ian on 2026-10-26, with the four recommended answers):**
+- `test/c6-hardening.spec.ts`:
+  - Test 1, the randomized workload: two businesses (piece, carton of 24, case of 48), 200 operations in waves of 20 through the real API (receive, adjust, count, convert, and sale-mode decreases through the spike's code), about a tenth of the conversions by the attendant with a fresh approval (answer 2). Checked: no command `FAILED`, only expected outcomes; integrity clean; no strict movement below zero; nothing crossing businesses; consumed approvals equal accepted approved conversions. Seeded (mulberry32) and replayable with `C6_SEED`.
+  - Test 2, logs: marker text in every free-text field, a rejected and a `FAILED` command, a wrong and a right approval PIN, the approved conversion and the reads; no marker, PIN, approval id, or `lines`, `quantity`, `note`, `reference`, `unit_cost`, `approver_pin`, `approval_id` key in any log line.
+  - Test 3, audit: each action exactly once with the right actor; a crash right after the audit insert leaves no audit row and no change for every stock command and the approval mint (which answers 500), and the approval stays unused.
+  - Test 4, grants: `stock_movement` and `stock_conversion` SELECT and INSERT only; on `approval` only `consumed_at` and `consumed_by_sync_command_id` are updatable.
+- `docs/phase-c-walkthrough.md` and `test/c6-walkthrough.spec.ts` (test 5), with a `DAMAGED` adjust in place of the sale in step 7 (answer 1), explained in the document.
+- This results file (test 6), with the open risks of answer 4.
+
+**Things to know:**
+1. The first run of the logs test failed on its own order: the crash mock caught the next `receive`, which was the rejected command. The crashing command now goes first.
+2. The real-API run used a script in the session scratchpad (not in the repo): it wipes `aberdare_test` (it refuses any other database), runs the nine steps with `fetch`, and checks each answer.
