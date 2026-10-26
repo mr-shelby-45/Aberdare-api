@@ -22,6 +22,8 @@ export interface Member {
   // Staff only (C5: PIN login checks).
   deviceId?: string;
   deviceSecret?: string;
+  // Owner only (D3: a password login on a second device).
+  email?: string;
 }
 
 /** The PIN every staff member gets at activation. */
@@ -63,7 +65,9 @@ export interface MovementRow {
 }
 
 const PIN = OWNER_PIN;
-const PASSWORD = 'baobab-sunrise-73';
+/** The owner's password at signup. */
+export const OWNER_PASSWORD = 'baobab-sunrise-73';
+const PASSWORD = OWNER_PASSWORD;
 
 /** phoneBase keeps each test file's phone numbers apart (8 digits after +2547). */
 export function stockApi(t: TestApp, ip: string, phoneBase: number) {
@@ -107,7 +111,7 @@ export function stockApi(t: TestApp, ip: string, phoneBase: number) {
     expect(res.statusCode, JSON.stringify(res.json())).toBe(201);
     const r = json<{ access_token: string; membership: { id: string; business_id: string } }>(res);
     t.clock.advanceMinutes(2);
-    return { businessId: r.membership.business_id, membershipId: r.membership.id, token: r.access_token };
+    return { businessId: r.membership.business_id, membershipId: r.membership.id, token: r.access_token, email };
   }
 
   async function activeStaff(owner: Member, rolePreset: 'MANAGER' | 'ATTENDANT', displayName: string): Promise<Member> {

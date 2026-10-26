@@ -174,6 +174,11 @@ export class StockService {
     return this.repo.balancesPageForSync(afterId, limit);
   }
 
+  /** For sync changes (Phase D3): these balance rows as they are now; missing ones are absent. */
+  async balancesByIdsForSync(ids: string[]) {
+    return this.repo.balancesByIdsForSync(ids);
+  }
+
   /** For sale.create from sync: always records the sale, flags an oversell. */
   async decreaseForSale(
     locationId: string,

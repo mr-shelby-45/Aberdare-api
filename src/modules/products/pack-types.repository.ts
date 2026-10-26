@@ -138,4 +138,25 @@ export class PackTypesRepository {
       archivedAt: r.archived_at,
     }));
   }
+
+  /** Phase D3 changes: these pack types as they are now (missing ids are simply absent). */
+  async byIdsForSync(ids: string[]): Promise<PackTypeRow[]> {
+    if (ids.length === 0) return [];
+    const rows = await currentTx().$queryRaw<
+      { id: string; product_id: string; name: string; units_per_pack: number; sell_price: string; cost_price: string | null; archived_at: Date | null }[]
+    >`
+      SELECT id, product_id, name, units_per_pack, sell_price::text AS sell_price,
+             cost_price::text AS cost_price, archived_at
+        FROM pack_type
+       WHERE id = ANY(${ids}::uuid[]) AND business_id = ${currentBusinessId()}::uuid`;
+    return rows.map((r) => ({
+      id: r.id,
+      productId: r.product_id,
+      name: r.name,
+      unitsPerPack: r.units_per_pack,
+      sellPrice: r.sell_price,
+      costPrice: r.cost_price,
+      archivedAt: r.archived_at,
+    }));
+  }
 }

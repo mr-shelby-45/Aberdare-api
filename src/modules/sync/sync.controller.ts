@@ -2,6 +2,8 @@ import { Body, Controller, Get, HttpCode, Post, Query, Req } from '@nestjs/commo
 import { OwnTransactions } from '../../common/auth/own-transactions.decorator.js';
 import type { AuthedRequest } from '../../common/auth/request-auth.js';
 import type { CommandResult } from './command-outcome.js';
+import { ChangesService } from './changes.service.js';
+import { ChangesQueryDto } from './dto/changes-query.dto.js';
 import { SnapshotQueryDto } from './dto/snapshot-query.dto.js';
 import { SyncBatchDto } from './dto/sync-batch.dto.js';
 import { SnapshotService } from './snapshot.service.js';
@@ -15,6 +17,7 @@ export class SyncController {
   constructor(
     private readonly sync: SyncService,
     private readonly snapshots: SnapshotService,
+    private readonly changeFeed: ChangesService,
   ) {}
 
   @Post('commands')
@@ -56,6 +59,18 @@ export class SyncController {
       next_table: p.nextTable,
       ...(p.startCursor !== undefined ? { start_cursor: p.startCursor } : {}),
     };
+  }
+
+  // What changed since the phone's cursor (docs/phase-d-design.md section 6).
+  // Same pipeline and transaction rules as the snapshot.
+  @Get('changes')
+  async changes(@Req() request: AuthedRequest, @Query() query: ChangesQueryDto) {
+    const r = await this.changeFeed.changes(query, {
+      businessId: request.auth!.businessId,
+      deviceId: request.auth!.deviceId,
+      permissions: request.session!.permissions,
+    });
+    return { changes: r.changes, next_cursor: r.nextCursor, has_more: r.hasMore };
   }
 }
 

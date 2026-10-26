@@ -69,4 +69,13 @@ export class BarcodesRepository {
       select: { id: true, barcode: true, productId: true, packTypeId: true },
     });
   }
+
+  /** Phase D3 changes: these barcodes as they are now (missing ids are simply absent). */
+  async byIdsForSync(ids: string[]): Promise<(BarcodeRow & { id: string })[]> {
+    if (ids.length === 0) return [];
+    return currentTx().productBarcode.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, barcode: true, productId: true, packTypeId: true },
+    });
+  }
 }

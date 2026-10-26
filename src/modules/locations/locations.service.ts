@@ -37,6 +37,11 @@ export class LocationsService {
     return this.repo.pageForSync(afterId, limit);
   }
 
+  /** For sync changes (Phase D3): these locations as they are now; missing ones are absent. */
+  async byIdsForSync(ids: string[]): Promise<LocationRow[]> {
+    return this.repo.byIdsForSync(ids);
+  }
+
   /** For the stock commands (Phase C2). Another business's id gives null, like a missing one. */
   async findById(id: string): Promise<LocationRow | null> {
     return this.repo.findById(id);

@@ -147,4 +147,10 @@ export class ProductsRepository {
       select: { id: true, name: true, sku: true, archivedAt: true },
     });
   }
+
+  /** Phase D3 changes: these products as they are now (missing ids are simply absent). */
+  async byIdsForSync(ids: string[]): Promise<ProductRow[]> {
+    if (ids.length === 0) return [];
+    return currentTx().product.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, sku: true, archivedAt: true } });
+  }
 }

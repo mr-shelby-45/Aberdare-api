@@ -11,6 +11,7 @@ import { ChangeLogRepository } from './change-log.repository.js';
 import { ChangesCursor } from './changes-cursor.js';
 import { CommandHandlers } from './command-handlers.js';
 import { SyncController } from './sync.controller.js';
+import { ChangesService } from './changes.service.js';
 import { SnapshotService } from './snapshot.service.js';
 import { SyncTables } from './sync-tables.js';
 import { SyncRepository } from './sync.repository.js';
@@ -20,6 +21,6 @@ import { SyncService } from './sync.service.js';
 @Module({
   imports: [DatabaseModule, ProductsModule, StockCommandsModule, StockModule, LocationsModule, DevicesModule],
   controllers: [SyncController],
-  providers: [SyncService, SyncRepository, CommandHandlers, SignedCursor, ChangesCursor, ChangeLogRepository, ChangeFeedService, SyncTables, SnapshotService],
+  providers: [SyncService, SyncRepository, CommandHandlers, SignedCursor, ChangesCursor, ChangeLogRepository, ChangeFeedService, SyncTables, SnapshotService, ChangesService],
 })
 export class SyncModule {}

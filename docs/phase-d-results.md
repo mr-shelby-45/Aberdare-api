@@ -55,3 +55,30 @@ Filled in step by step. The full summary (see `docs/phase-d-design.md` section 1
 **Things to know:**
 1. No preset lacks `stock.view`, so "stock_balance empty without stock.view" is tested through `SnapshotService.page()` with a reader built directly.
 2. The held-open case commits T1 from inside a spy on the location table's page read, so the commit lands exactly between the read and anything after it.
+
+## D3: Changes (passed)
+
+**Result:** new 9, Phase D cumulative 25 (the D1, D2 and `test/d3-changes.spec.ts` files), all passing in the gate run. D3 test 8 (out-of-order commits with a held-open transaction, polled through the real endpoint) passed 5 runs in a row. The full suite passed once: 29 files, 350 of 350 (329.2 s), with lint, type-check, build and the drift check clean.
+
+**Built (approved by Ian on 2026-10-26, with the six recommended answers):** no migration.
+- `GET /v1/sync/changes?cursor=&limit=` on `SyncController` (`ChangesService`), in the request's own short tenant transaction; `cursor` required; `limit` default 200, above 500 quietly capped, 0 refused. Response `{ changes, next_cursor, has_more }`.
+- Steps: open the cursor (D1: `422` or `410`), read up to `limit + 1` finished log rows, skip tables the reader cannot see, collapse, read every record's state now through `SyncTables.byIds` (one query per table, through each module's `...ByIdsForSync` service method), turn missing records into deletes, stamp the device, answer.
+- Answer 1: a collapsed change sits at the record's first appearance in the page, with its latest state, so a parent stays before its children.
+- Answer 2: `limit` counts log rows; the cursor moves by exactly the rows read.
+- Answer 3: delete markers are `{ table, op: "delete", id }`, plus `key: { barcode }` (from `row_key`) for barcodes; never other contents.
+- Answer 4: rows of tables the reader cannot see (`stock_balance` without `stock.view`) are skipped, upserts and deletes alike; the cursor moves past them.
+- Answer 5: an empty page returns the same position, re-signed (identical to the cursor sent).
+- `SyncTables` entries gained `byIds`, sharing one shape function per table with the snapshot.
+
+**Proof the tests catch mistakes** (each applied, shown failing, reverted, revert checked with `cmp`):
+- Mutation 1, order and filter by id only, without the finished-transactions condition: D3 test 8 failed, at its first poll (the id-only filter also replayed rows from before the snapshot). A second form that keeps the `(txid, id)` order and drops only the finished-transactions condition made test 8 fail on the gap itself: T1's change was lost (`'Main shop'` instead of `'Renamed by T1'`). D1 test 3 caught mutation 1 too.
+- Mutation 3, `cost_price` in changes without `costs.view`: D3 test 4 failed (the attendant received `"150.00"`).
+- Mutation 4, `costs` not checked in the cursor: D3 test 4 failed (the promoted manager's old cursor was accepted).
+- Mutation 6, state taken from the log instead of the record as it is now: D3 test 6 failed (a barcode added and removed in the window came back as an upsert); D3 test 1 still passed under this form, because it has no record that was added and removed in the same window.
+- Mutation 7, in the two forms agreed: removing only the explicit `business_id` filter left D3 tests 1 and 7 passing (RLS still isolates, as intended); clearing the tenant setting before the read failed closed (D3 test 1: the business's own changes were missing), while test 7 still passed (nothing from another business appeared). A real leak would need a role with BYPASSRLS, which the app does not have.
+- Mutation 8, the live device check skipped: D3 test 9 failed (a revoked device read changes). (D2 test 7 failed too, in D2.)
+
+**Things to know:**
+1. The promotion case uses the staff PATCH (`extra_permissions: ['costs.view']`) and back; both cursors issued under the other visibility get `410`.
+2. A second device for one member comes from the owner's password login (staff have no password); test 9 revokes the first device through the second.
+3. Three first-run problems were in my tests: the cost check had to look for the quoted value (`"150.00"`, since a random id can contain `150`); the suspend call used the owner's token from the device the test had just revoked; and an edit put a comment inside an expression.

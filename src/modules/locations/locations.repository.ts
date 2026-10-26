@@ -68,4 +68,10 @@ export class LocationsRepository {
       select: SELECT,
     });
   }
+
+  /** Phase D3 changes: these locations as they are now (missing ids are simply absent). */
+  async byIdsForSync(ids: string[]): Promise<LocationRow[]> {
+    if (ids.length === 0) return [];
+    return currentTx().location.findMany({ where: { id: { in: ids } }, select: SELECT });
+  }
 }

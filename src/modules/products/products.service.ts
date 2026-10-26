@@ -320,6 +320,19 @@ export class ProductsService {
     return this.barcodes.pageForSync(afterId, limit);
   }
 
+  // For sync changes (Phase D3): these rows as they are now; missing ones are absent.
+  async productsByIdsForSync(ids: string[]) {
+    return this.products.byIdsForSync(ids);
+  }
+
+  async packTypesByIdsForSync(ids: string[]): Promise<PackTypeRow[]> {
+    return this.packTypes.byIdsForSync(ids);
+  }
+
+  async barcodesByIdsForSync(ids: string[]) {
+    return this.barcodes.byIdsForSync(ids);
+  }
+
   /** GET /products/:id. Another business's id, a missing one and a non-UUID: the same 404. */
   async findById(id: string): Promise<ProductView> {
     const [product] = UUID.test(id) ? await this.views([id]) : [];

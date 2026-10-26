@@ -211,4 +211,15 @@ export class StockRepository {
       select: { id: true, locationId: true, packTypeId: true, quantity: true, updatedAt: true },
     });
   }
+
+  /** Phase D3 changes: these balance rows as they are now (missing ids are simply absent). */
+  async balancesByIdsForSync(
+    ids: string[],
+  ): Promise<{ id: string; locationId: string; packTypeId: string; quantity: number; updatedAt: Date }[]> {
+    if (ids.length === 0) return [];
+    return currentTx().stockBalance.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, locationId: true, packTypeId: true, quantity: true, updatedAt: true },
+    });
+  }
 }
