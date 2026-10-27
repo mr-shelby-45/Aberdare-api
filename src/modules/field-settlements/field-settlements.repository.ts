@@ -37,6 +37,7 @@ export interface SettlementLineRow {
 
 export interface SettlementInsert {
   id: string;
+  sequence: number;
   fieldLocationId: string;
   attendantMembershipId: string;
   closedByMembershipId: string;
@@ -87,12 +88,16 @@ export class FieldSettlementsRepository {
     return (await currentTx().fieldSettlement.findUnique({ where: { id }, select: { id: true } })) !== null;
   }
 
-  /** The location's latest settlement: its period_end and snapshot, or null. */
-  async latest(fieldLocationId: string): Promise<{ periodEnd: Date; snapshot: string } | null> {
+  /**
+   * The location's latest settlement: the highest sequence (fix found in T5:
+   * period_end can tie, or be earlier for a close that waited for the lock
+   * and committed later). Its sequence, period_end and snapshot, or null.
+   */
+  async latest(fieldLocationId: string): Promise<{ sequence: number; periodEnd: Date; snapshot: string } | null> {
     return currentTx().fieldSettlement.findFirst({
       where: { fieldLocationId },
-      orderBy: [{ periodEnd: 'desc' }, { id: 'desc' }],
-      select: { periodEnd: true, snapshot: true },
+      orderBy: { sequence: 'desc' },
+      select: { sequence: true, periodEnd: true, snapshot: true },
     });
   }
 

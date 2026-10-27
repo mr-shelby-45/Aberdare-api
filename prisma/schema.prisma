@@ -800,7 +800,10 @@ model FieldSettlement {
   // Phone time of the close, and server time (= period_end).
   occurredAt            DateTime              @map("occurred_at") @db.Timestamptz(6)
   receivedAt            DateTime              @map("received_at") @db.Timestamptz(6)
-  // The window: sales with received_at in (period_start, period_end].
+  // Phase T5 fix: 1, 2, 3... per location, assigned under the location lock, so it
+  // follows the order closes commit (period_end can tie or run out of order).
+  sequence              Int
+  // Shown to people: from the previous settlement's period_end to this close's time.
   periodStart           DateTime              @map("period_start") @db.Timestamptz(6)
   periodEnd             DateTime              @map("period_end") @db.Timestamptz(6)
   // KES, NUMERIC(14,2).
@@ -826,7 +829,8 @@ model FieldSettlement {
   movements             StockMovement[]
 
   @@unique([businessId, id])
-  // Phase T4: the previous settlement, the list read and the AFTER_SETTLEMENT check.
+  @@unique([businessId, fieldLocationId, sequence])
+  // Phase T4: the list read across locations, newest first.
   @@index([businessId, fieldLocationId, periodEnd(sort: Desc), id(sort: Desc)])
   @@map("field_settlement")
 }

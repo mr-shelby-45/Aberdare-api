@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { MAX_CENTS, fromCents, toCents } from '../../common/money/cents.js';
 import { ApiError } from '../../common/errors/api.error.js';
 import { type CursorValues, SignedCursor, cursorUuid } from '../../common/paging/signed-cursor.js';
+import { Clock } from '../../common/time/clock.js';
 import { FIELD_SYNC_MAX_AGE_MINUTES } from '../../config/app.config.js';
 import { AuditService } from '../audit/audit.service.js';
 import { DevicesService } from '../devices/devices.service.js';
@@ -78,6 +79,7 @@ export class FieldService {
     private readonly staff: StaffService,
     private readonly audit: AuditService,
     private readonly cursor: SignedCursor,
+    private readonly clock: Clock,
   ) {}
 
   /** GET /v1/field/settlements/preview: what a close now would store. Read only, no locks. */
@@ -135,7 +137,12 @@ export class FieldService {
     const expectedCents = toCents(figures.expectedCash)!;
     const cashVariance = fromCents(cashCents - expectedCents);
     const names = await this.staff.displayNames([attendant]);
-    const periodEnd = actor.receivedAt;
+    // Fix found in T5: the order and the period follow the lock, not the command's arrival.
+    // The sequence is the previous + 1 (we hold the location lock); period_end is the
+    // server time now, after the lock wait, and never before the previous period_end.
+    const sequence = (latest?.sequence ?? 0) + 1;
+    const now = this.clock.now();
+    const periodEnd = latest && latest.periodEnd.getTime() > now.getTime() ? latest.periodEnd : now;
     // A location created after the close's server time (only with a test clock) starts its first window at the close.
     const created = (await this.locations.createdAt(location.id)) ?? periodEnd;
     const periodStart = latest?.periodEnd ?? (created.getTime() < periodEnd.getTime() ? created : periodEnd);
@@ -143,6 +150,7 @@ export class FieldService {
     await this.settlements.insert(
       {
         id: dto.settlement_id,
+        sequence,
         fieldLocationId: location.id,
         attendantMembershipId: attendant,
         closedByMembershipId: actor.membershipId,

@@ -406,6 +406,61 @@ describe('T4: settlement', { timeout: 240_000 }, () => {
     expect(await api.integrity(w.owner.businessId)).toEqual([]);
   });
 
+  it('7. forced (found in T5): a close that arrives first but commits second is ordered by its commit; each sale counted once', async () => {
+    const w = await fieldWorld();
+    const sell = async () => expect((await api.sendOne(w.f1.token, fsale(w, [{ pack: w.maize.piece, qty: 1, price: '100' }]).cmd)).status).toBe('ACCEPTED');
+    await sell();
+    const counts = { [w.maize.piece]: 9, [w.maize.carton]: 2 };
+    const early = closeCmd(w, counts, '0');
+    const later = closeCmd(w, counts, '0');
+    // An uncommitted command row with the early close's command id holds it at its claim, after its arrival time is taken.
+    const held = new pg.Client({ connectionString: process.env.TEST_ADMIN_DATABASE_URL });
+    await held.connect();
+    let earlyResult: Promise<Result> | null = null;
+    let done = false;
+    try {
+      await held.query('BEGIN');
+      await held.query(
+        "INSERT INTO sync_command (business_id, command_id, type, occurred_at, received_at, status) VALUES ($1, $2, 'settlement.close', now(), now(), 'PROCESSING')",
+        [w.owner.businessId, early.command_id],
+      );
+      earlyResult = api.sendOne(w.manager.token, early);
+      await lockWaiters(1);
+      t.clock.advanceMinutes(1);
+      expect((await api.sendOne(w.owner.token, later)).status).toBe('ACCEPTED'); // arrives later, commits first
+      t.clock.advanceMinutes(1);
+      await held.query('ROLLBACK');
+      done = true;
+    } finally {
+      if (!done) await held.query('ROLLBACK');
+      await held.end();
+    }
+    expect((await earlyResult!).status).toBe('ACCEPTED');
+    const rows = await asAdmin(
+      async (c) =>
+        (await c.query<{ id: string; sequence: number; received_at: Date; period_start: Date; period_end: Date; sale_count: number }>(
+          'SELECT id, sequence, received_at, period_start, period_end, sale_count FROM field_settlement WHERE field_location_id = $1 ORDER BY sequence',
+          [w.van],
+        )).rows,
+    );
+    expect(rows.map((r) => [r.id, r.sequence])).toEqual([
+      [settlementIdOf(later), 1],
+      [settlementIdOf(early), 2],
+    ]);
+    // The early close's period starts where the later one's ended, and does not run backwards.
+    expect(rows[1].period_start).toEqual(rows[0].period_end);
+    expect(rows[1].period_end.getTime()).toBeGreaterThanOrEqual(rows[1].period_start.getTime());
+    expect(rows[1].received_at.getTime()).toBeLessThan(rows[0].period_end.getTime());
+    // A sale after both (made after them, so not AFTER_SETTLEMENT) goes to the next settlement only.
+    t.clock.advanceMinutes(1);
+    await sell();
+    await sync(w.f1);
+    const third = closeCmd(w, { [w.maize.piece]: 8, [w.maize.carton]: 2 }, '0');
+    expect((await api.sendOne(w.manager.token, third)).status).toBe('ACCEPTED');
+    const counted = await asAdmin(async (c) => (await c.query<{ sale_count: number }>('SELECT sale_count FROM field_settlement WHERE field_location_id = $1 ORDER BY sequence', [w.van])).rows.map((r) => r.sale_count));
+    expect(counted).toEqual([1, 0, 1]);
+  });
+
   // ---------------------------------------------------------------- 8. final
   it('8. a settlement is final: app_user cannot change it, a second command with its id is SETTLEMENT_ALREADY_EXISTS, the same command twice closes once', async () => {
     const w = await fieldWorld();

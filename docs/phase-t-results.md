@@ -1,6 +1,84 @@
 # Phase T results
 
-Filled in step by step. The full summary (see `docs/phase-t-design.md` section 13) is written when T5 is finished. Only Ian marks the phase done, in `CLAUDE.md` section 2.
+**Status: all five steps (T1 to T5) passed. Waiting for Ian's review.** Only Ian marks Phase T done, in CLAUDE.md section 2. The manual walkthrough for Ian is `docs/phase-t-walkthrough.md`.
+
+**Final suite (end of phase, 3 runs in a row):** 3 runs done, all passed, on the working tree this commit records. Run 1: 44 files, 454 of 454 (602.4 s). Run 2: 44 files, 454 of 454 (584.4 s). Run 3: 44 files, 454 of 454 (580.6 s). Lint, type-check, build and the drift check were clean before the runs. Earlier failed runs during Phase T are recorded in their step sections below, as observed.
+
+## Summary
+
+| Step | What it built | New tests | Phase T cumulative | Workarounds and notable changes |
+|---|---|---|---|---|
+| T1 | `location.kind` and `assigned_membership_id`, `stock_transfer`, `field_settlement`, `field_settlement_line`, transfer and settlement movement columns, checks, grants, RLS, the one-active-van index; the `FIELD_ATTENDANT` preset, `stock.transfer` and `field.settle`; doc updates | 5 | 5 | Location UPDATE limited to three columns (kind and assignee never change); two earlier exact-list tests (A3, B5 walkthrough) missed in the survey, caught by the first full run |
+| T2 | `LocationScope`: commands, stock and location reads, snapshot and changes; the cursor binds `scope` | 8 | 13 | No schema change; `location` and `stock_balance` send no delete markers |
+| T3 | `StockService.transfer()`, `stock.issue`, `stock.return`, the global transfer lock order | 11 | 24 | No schema change; the forced deadlock test must start the issue first |
+| T4 | `settlement.close`, preview, list and detail reads, `AFTER_SETTLEMENT` | 13 | 37 | The window rule changed to the snapshot rule B (Ian's decision); `txid` on `sale` and `stock_movement`; mutation 11 needed both guards removed |
+| T5 | Randomized field workload (3 seeds), logs, audit, walkthrough document and test; the settlement order fix (`sequence`, `period_end` after the lock) and its forced regression test | 7 | 44 | The workload found settlements ordered by arrival time instead of commit; fixed with Ian's approval (two migrations) |
+
+New tests count `it` cases as Vitest reports them; the T5 workload is one case per seed (three). T5's seven are five in `test/t5-hardening.spec.ts`, one in `test/t5-walkthrough.spec.ts`, and the regression test added to `test/t4-settlement.spec.ts`.
+
+## Final patterns
+
+| Concern | Pattern | Where |
+|---|---|---|
+| Location scope | One helper decides, from the live membership, per command and per request: a `FIELD_ATTENDANT` is limited to the locations assigned to them (archived ones included), everyone else sees all. Out of scope is exactly "not found" (`LOCATION_NOT_FOUND`, `SALE_NOT_FOUND`, an empty list). Commands use `findInScope()`, reads put `scopeOf().ids()` in the query, sync gets it through `syncView()`; the changes cursor binds the scope digest (`410` on change) | `src/modules/locations/location-scope.ts`, `LocationsService.findInScope`, `syncView()`, `ChangesCursor` |
+| Transfer lock order | Every balance statement of one transfer, on both locations, in one global order: location id, then larger pack first, then pack type id. Source strict (`STOCK_INSUFFICIENT` rolls back everything), destination capped. One `stock_transfer` row, then a `TRANSFER_OUT` and a `TRANSFER_IN` per line with `quantity_after` and `transfer_id` | `inTransferLockOrder()` in `src/modules/stock/lock-order.ts`, `StockService.transfer` |
+| Settlement close | Lock the location row `FOR NO KEY UPDATE` (never `FOR UPDATE`: every sale's foreign key takes `FOR KEY SHARE` on it); lock every balance row at the location in the pack order; take `pg_current_snapshot()`; compute the figures under it; per line one `UPDATE stock_balance ... FROM (SELECT ... FOR UPDATE) old RETURNING old.quantity` sets the count and gives the difference in SQL; a nonzero difference writes `ADJUST` `LOST` or `FOUND` with `settlement_id`; then the settlement and its lines, then the audit row | `FieldService.close`, `StockRepository.setCounted`, `LocationsService.lockForSettlement` |
+| Settlement window and order | A sale or movement belongs to the settlement whose snapshot first sees its transaction (`pg_visible_in_snapshot(txid, snapshot)` true now, false for the previous one); never a time window. Settlements of a location are ordered by `sequence` (previous + 1 under the location lock, unique per location); `period_end` is the server time after the lock, never before the previous one | `FieldSettlementsRepository.latest`, `SalesReadsService.inSettlementWindow`, `StockService.windowFlows` |
+| `AFTER_SETTLEMENT` | A sale at a `FIELD` location whose latest settlement's `period_end` is at or after the sale's `occurred_at` is saved and flagged, last in the flag order; it counts in the next settlement | `SalesService` (`afterSettlement`) |
+
+## Proof the tests catch mistakes
+
+Each design mutation was applied temporarily, the named test was shown failing, and the change was reverted (checked byte for byte with `cmp`; no `MUTATION` marker left).
+
+| Mutation | Test that failed | What it caught |
+|---|---|---|
+| 1. No scope check in `sale.create` | T2 test 1 | a field attendant's sale at the main shop accepted |
+| 2. No scope filter in the stock reads | T2 test 4 | all three locations' balances shown |
+| 3. No scope filter in `changes` | T2 test 5 | other locations' balances delivered |
+| 4. `scope` left out of the cursor comparison | T2 test 6 | `200` instead of `410` |
+| 5. A non-strict issue | T3 test 2 | an issue of 21 against 20 accepted |
+| 6. Source-first lock order | forced T3 test 6 | `deadlock detected`, the return `FAILED` |
+| 7. `FOR UPDATE` on the location row | forced T4 test 7 | a deadlock between the close and a sale |
+| 8. The expected quantity taken from the phone | T4 test 2 | a phone `expected_quantity` accepted |
+| 9. The window by `occurred_at` | T4 test 3 | sales in the wrong settlement |
+| 10. No `AFTER_SETTLEMENT` | T4 test 6 | a late sale not flagged |
+| 11. Reversed payments in the expected cash | T4 test 1, with both guards removed | expected cash 1000.00 instead of 640.00; either guard alone holds |
+| 12. Extra permissions for a field attendant | T1 test 4 | `201` instead of `422` |
+| Extra (T4): the window by `received_at` (the design's first rule) | forced T4 sale-still-saving test | a sale counted in no settlement |
+| Extra (T5): the previous settlement by `period_end`, and `period_end = received_at` (the T4 code) | forced T4 test "7. ... arrives first but commits second" | the early close `FAILED` on the period check |
+
+## Versions
+
+Unchanged. No library was added in Phase T (`package.json` and `pnpm-lock.yaml` are as at the end of Phase E).
+
+## Things to know
+
+1. A forced race test holds a row in an uncommitted admin transaction and waits for lock waiters in `pg_stat_activity` (`lockWaiters()`); the transaction first in the lock queue gets the released row, so start the commands in the order the test needs.
+2. The test clock moves only when told, so two commands often carry the same time. Never order business events by a time column where a tie is possible; settlements now use `sequence`.
+3. `pg_visible_in_snapshot(txid, snapshot)` is the whole window rule. Rows written before T4 carry the T4 migration's transaction id, visible in every snapshot, so they fall in a location's first settlement.
+4. A settlement close needs the attendant's phone synced within 10 minutes; a sync read stamps `last_sync_at` at most once every 5 minutes.
+5. The T5 workload prints its seed in the test name; `T5_SEED=<n> pnpm exec vitest run test/t5-hardening.spec.ts -t randomized` replays one. It uses a new IP and phone range per test, because the auth routes are rate limited per IP.
+6. A failed migration on the test database (for example a `NOT NULL` column added while rows are left over from the last test) stays recorded as failed: wipe `aberdare_test` (tests only wipe before each test, not after), run `prisma migrate resolve --rolled-back <name>` against it, then deploy again.
+
+## Open risks
+
+1. Payments attached to a sale after its settlement closed are in no settlement's expected cash (the window takes the payments of the window's sales). The owner sees them on the sale; a later design should count them in the settlement that sees the payment.
+2. The server cannot know whether a field attendant's offline outbox is empty (design open item 8). `ATTENDANT_NOT_SYNCED` and `AFTER_SETTLEMENT` reduce the risk but do not remove it.
+3. The sync stamp moves at most every 5 minutes, so "synced within 10 minutes" can be up to 5 minutes older than the last real sync.
+4. The close locks balance rows created while it is locking in further rounds, at most 5, then goes on with the rows it holds. A pool created after that (a new pack type issued to the van during the close) may be left out of this close's counted lines (not tested). Only a location gaining new pack types continuously during the close could reach this.
+5. M-Pesa codes are unverified until Phase M; settlement M-Pesa totals are all `mpesa_unverified_total`, and typed codes can be fake (design open item 6).
+6. Every `sale.create` of a business still queues on `sale_counter` (architecture open item 56); field sales add phones to that queue.
+7. Overload still answers 500 instead of 503 (spike open risk 4, unchanged).
+8. Design open items 1 to 5, 7, 9 and 10 (stock acknowledgement, hawking prices, settlement history on phones, a cash and shortage ledger, customer credit, generic transfers, long offline days, variance notifications) are not built.
+
+## Changes to the other documents
+
+- `CLAUDE.md`: the phase table row for T (T1); section 8 notes for the field schema, the location scope, transfers, settlements, and the settlement order with the T5 workload replay and walkthrough (T1 to T5). The status line was not touched.
+- `docs/architecture.md`: sections 4, 5, 6, 12, 13, 14 and 16 (T1), "as built" notes for the scope, transfers and settlements (T2 to T4), the window rule B (T4), the settlement `sequence` and `period_end` after the lock (T5).
+- `docs/phase-t-design.md`: the window rule B in sections 6, 9 and 11 (T4); `sequence` and `period_end` in sections 3 and 6 (T5).
+- `docs/phase-t-walkthrough.md`: new (T5).
+
+# Step details
 
 ## T1: Schema, preset, permissions, doc updates (passed)
 
@@ -106,3 +184,30 @@ Filled in step by step. The full summary (see `docs/phase-t-design.md` section 1
 1. Payments attached to a sale after its settlement closed are in no settlement's expected cash: the window takes the payments of the window's sales (design rule). Recorded as an open risk for T5.
 2. A race test that counts the van down can leave it below zero; a count is never negative. My first draft of the 20-sale race counted the remaining balance as is and was refused (`QUANTITY_INVALID`).
 3. `pg_visible_in_snapshot(txid, snapshot)` is the whole window rule. Rows written before T4 got the migration's transaction id, visible in every snapshot, so they fall in a location's first settlement.
+
+## T5: Hardening and handover (passed)
+
+**Result:** new 7, Phase T cumulative 44 (all six Phase T files: 44 of 44, 145.7 s), all passing in the gate run. The randomized workload (seeds 707, 808 and 909) passed 5 runs in a row after the fix below (15 of 15 seed runs); before it, every seed failed. The T4 concurrency tests, with the new forced one, passed 5 runs in a row. The walkthrough passed as a test, and once over real HTTP against the built API (`node dist/main`, port 3100) on the test database: 30 of 30 checks, and none of the names, the reference, the note, the M-Pesa code, the cash received, the phones, the PINs or the fixed code in the API's 137 log lines (and no error line). Lint, type-check, build and the drift check were clean.
+
+**Built (approved by Ian on 2026-10-27, with the six recommended answers):**
+- `test/t5-hardening.spec.ts`:
+  - Test 1, the randomized workload (answer 1): two businesses (A with a shop, a warehouse and two field attendants; B with one), 10 waves of 20 operations through the real API: field sales (cash, M-Pesa, split, none; sometimes into the attendant's older van), issues from the shop or warehouse, returns, manager voids, settlements (the phone syncs first; counts near the balance, never below zero), receives and counts, phone syncs; in wave 5 the first attendant's van is archived and they get a new one. Checked: no command `FAILED` and only expected outcomes per kind; every kind succeeded at least once; integrity clean for both businesses; every sale in exactly the settlement whose snapshot first sees it, or in none yet (answer 3, checked in SQL with the stored snapshots and `sequence`); each settlement's lines satisfy the ledger identity (opening plus issued minus returned minus sold plus voided back plus other equals expected, and counted minus expected equals the variance); every location an attendant ever received was assigned to them; settlements ran; nothing crossed businesses (answer 2). Seeded (mulberry32), replayable with `T5_SEED`.
+  - Test 2, logs: marker text in a product name, a van name, the transfer reference and note, the settlement note, a price, the M-Pesa code and the cash received; an issue and a return, a field sale, a close, a refused close, the preview, list, detail, movements and locations reads, and changes. No marker, cursor or PIN in any log line, and none of the keys `lines`, `note`, `reference`, `cash_received`, `counted_quantity`, `mpesa_code`.
+  - Test 3, audit: `stock.issued`, `stock.returned`, `settlement.closed` and `location.archived` (with kind and assignee) exactly once each, by the acting member; a short issue, a return to a field location and a close of a shop write nothing; settlements are not a sync table.
+  - Test 4 (grants) is the B5 inventory and T1 test 1; the crash-after-audit checks are T3 test 8 and T4 test 10 (answer 4; not duplicated).
+- `docs/phase-t-walkthrough.md` and `test/t5-walkthrough.spec.ts` (test 5): the eight steps of design section 12 with phones `0712000601` to `0712000603` and `0712000609` (answer 5). In step 7 the late offline sale is the piece counted as missing in step 6, so it is flagged `STOCK_NEGATIVE` and `AFTER_SETTLEMENT` and counts in the next settlement.
+- This results file (test 6), with the open risks of answer 6.
+
+**The settlement order bug (found by test 1, fixed with Ian's approval):**
+- Seen: sales in the wrong number of settlements in every seed (35, 51 and 14 sales).
+- Cause: the close found the previous settlement by the latest `period_end`, and `period_end` was the command's `received_at`, taken when the command arrived, before it waited for the location lock. With the test clock two closes often had the same time (the tie broken by id, at random). In production a close that arrives first but waits for the lock commits second, yet looked older. Either way a close could take the wrong previous snapshot, and its window counted sales already counted, or left some out.
+- Fix: `field_settlement.sequence` (1, 2, 3... per location, previous + 1, assigned while holding the location lock, unique per location); the previous settlement is the highest `sequence`. `period_end` is the clock time after the lock, never earlier than the previous `period_end`, so the times shown to people also follow the commit order.
+- Migrations (shown to Ian before applying): `20261027190000_t5_settlement_sequence` (`sequence INTEGER NOT NULL` and the unique index `field_settlement_business_id_field_location_id_sequence_key`) and `20261027190001_t5_settlement_period_check` (the check becomes `period_end >= received_at AND period_start <= period_end`; new check `sequence >= 1`). Dev had no settlements and took them as written. The test database still held settlement rows from the last test run (tests wipe before each test, not after), so the first migration failed there on `NOT NULL`; I wiped `aberdare_test` (truncate), marked the migration rolled back (`prisma migrate resolve --rolled-back`) and deployed both again. The migration has no default on purpose: there are no real settlements yet.
+- Proof: a new forced test in `test/t4-settlement.spec.ts` holds an early close at its command claim (an uncommitted `sync_command` row with its command id), lets a later close finish, then releases the early one: the sequences are later 1, early 2; the early close's `period_start` is the later close's `period_end`; over a third close the sale counts are 1, 0, 1. With the old ordering and `period_end` put back, the test failed (the early close `FAILED` on the period check); reverted, `cmp`.
+
+**Earlier tests changed by T5 (mechanical; no assertion weakened):**
+- T1 tests 2 and 3: the raw settlement insert supplies `sequence` (next per location).
+
+**Things to know:**
+1. My first T5 audit test logged many staff in from one IP and hit the auth rate limit (`RATE_LIMITED`); each test now uses its own IP and phone range.
+2. The real-API run used a script in the session scratchpad (not in the repo): it wipes `aberdare_test` (it refuses any other database), runs the eight steps with `fetch`, and checks each answer.

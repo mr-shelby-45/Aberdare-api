@@ -74,8 +74,9 @@ describe('T1: field schema, preset and permissions', { timeout: 240_000 }, () =>
     ).rows[0].id;
   const settlementSql = `INSERT INTO field_settlement (id, business_id, field_location_id, attendant_membership_id, closed_by_membership_id, sync_command_id,
       occurred_at, received_at, period_start, period_end, expected_cash, cash_received, cash_variance, mpesa_verified_total, mpesa_unverified_total,
-      sale_count, voided_count, unpaid_total, snapshot)
-    VALUES ($1, $2, $3, $4, $5, $6, now(), now(), now() - interval '1 day', now(), 100, $7, $7::numeric - 100, 0, 0, 1, 0, 0, pg_current_snapshot()::text)`; // snapshot since T4
+      sale_count, voided_count, unpaid_total, snapshot, sequence)
+    VALUES ($1, $2, $3, $4, $5, $6, now(), now(), now() - interval '1 day', now(), 100, $7, $7::numeric - 100, 0, 0, 1, 0, 0, pg_current_snapshot()::text,
+            (SELECT coalesce(max(sequence), 0) + 1 FROM field_settlement WHERE field_location_id = $3))`; // snapshot since T4, sequence since T5
 
   // ---------------------------------------------------------------- 1. inventories and grants
   it('1. app_user may only read and insert transfers, settlements and lines; a location\'s kind and assignee never change', async () => {
