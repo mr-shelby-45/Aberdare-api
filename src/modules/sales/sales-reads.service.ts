@@ -140,6 +140,11 @@ export class SalesReadsService {
     return rows.filter((p) => visible.has(p.saleId));
   }
 
+  /** Phase T4: a settlement window's sales at a location (see SalesReadsRepository.inWindow). */
+  async inSettlementWindow(locationId: string, snapshot: string, previous: string | null) {
+    return this.repo.inWindow(locationId, snapshot, previous);
+  }
+
   private since(days: number): Date {
     return new Date(this.clock.now().getTime() - days * DAY_MS);
   }

@@ -34,6 +34,8 @@ const IsAddressOrRangeEach = () =>
 export const CHANGE_LOG_RETENTION_DAYS = 30;
 /** How far back a sync snapshot reaches for sales (Phase E4, docs/phase-e-design.md section 8). */
 export const SALES_SNAPSHOT_DAYS = 30;
+/** A field settlement needs the attendant's devices to have synced this recently (Phase T4, docs/phase-t-design.md section 6). */
+export const FIELD_SYNC_MAX_AGE_MINUTES = 10;
 
 export class AppConfig {
   @IsIn(APP_ENVS)

@@ -88,6 +88,18 @@ export class PaymentsRepository {
        WHERE business_id = ${currentBusinessId()}::uuid AND sale_id = ${saleId}::uuid AND status = 'RECORDED'`;
   }
 
+  /** Phase T4: RECORDED (not reversed) totals of these sales' payments, by method and verified or not. */
+  async totalsForSales(saleIds: string[]): Promise<{ cash: string; mpesaVerified: string; mpesaUnverified: string }> {
+    if (saleIds.length === 0) return { cash: '0.00', mpesaVerified: '0.00', mpesaUnverified: '0.00' };
+    const rows = await currentTx().$queryRaw<{ cash: string; mpesa_verified: string; mpesa_unverified: string }[]>`
+      SELECT coalesce(sum(amount) FILTER (WHERE method = 'CASH'), 0)::numeric(14,2)::text AS cash,
+             coalesce(sum(amount) FILTER (WHERE method = 'MPESA' AND verified), 0)::numeric(14,2)::text AS mpesa_verified,
+             coalesce(sum(amount) FILTER (WHERE method = 'MPESA' AND NOT verified), 0)::numeric(14,2)::text AS mpesa_unverified
+        FROM payment
+       WHERE business_id = ${currentBusinessId()}::uuid AND sale_id = ANY(${saleIds}::uuid[]) AND status = 'RECORDED'`;
+    return { cash: rows[0].cash, mpesaVerified: rows[0].mpesa_verified, mpesaUnverified: rows[0].mpesa_unverified };
+  }
+
   /** Payments of these sales (Phase E4 reads). */
   async forSales(saleIds: string[]): Promise<PaymentReadRow[]> {
     if (saleIds.length === 0) return [];

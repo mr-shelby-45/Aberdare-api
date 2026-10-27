@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { AddBarcodeHandler } from '../products/commands/add-barcode.handler.js';
+import { CloseSettlementHandler } from '../field/commands/close-settlement.handler.js';
 import { CreateProductHandler } from '../products/commands/create-product.handler.js';
 import { RemoveBarcodeHandler } from '../products/commands/remove-barcode.handler.js';
 import { UpdateProductHandler } from '../products/commands/update-product.handler.js';
@@ -17,7 +18,7 @@ import type { CommandHandler } from './command-handler.js';
 
 // The command types POST /v1/sync/commands accepts: the five catalogue
 // commands (Phase B) and the stock commands built so far (Phase C2: receive
-// and adjust; C3: count; C4: convert) and the sale commands (Phase E2: sale.create; E3: payment.attach; E5: sale.void) and field transfers (Phase T3: stock.issue, stock.return).
+// and adjust; C3: count; C4: convert) and the sale commands (Phase E2: sale.create; E3: payment.attach; E5: sale.void) and field transfers (Phase T3: stock.issue, stock.return) and settlements (T4: settlement.close).
 @Injectable()
 export class CommandHandlers {
   readonly all: readonly CommandHandler<object>[];
@@ -37,7 +38,8 @@ export class CommandHandlers {
     voidSale: VoidSaleHandler,
     issueStock: IssueStockHandler,
     returnStock: ReturnStockHandler,
+    closeSettlement: CloseSettlementHandler,
   ) {
-    this.all = [createProduct, updateProduct, upsertPackType, addBarcode, removeBarcode, receiveStock, adjustStock, countStock, convertStock, createSale, attachPayment, voidSale, issueStock, returnStock];
+    this.all = [createProduct, updateProduct, upsertPackType, addBarcode, removeBarcode, receiveStock, adjustStock, countStock, convertStock, createSale, attachPayment, voidSale, issueStock, returnStock, closeSettlement];
   }
 }

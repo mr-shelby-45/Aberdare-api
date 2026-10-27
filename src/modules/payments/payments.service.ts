@@ -70,6 +70,11 @@ export class PaymentsService {
   // Reads (Phase E4). The sales module decides which sales a reader may see;
   // these only fetch the payments of the sales it names, or by id.
 
+  /** Phase T4: cash and M-Pesa totals of these sales' RECORDED payments (a settlement's window). */
+  async totalsForSales(saleIds: string[]) {
+    return this.repo.totalsForSales(saleIds);
+  }
+
   async forSales(saleIds: string[]): Promise<PaymentReadRow[]> {
     return this.repo.forSales(saleIds);
   }

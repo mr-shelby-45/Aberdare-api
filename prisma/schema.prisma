@@ -197,6 +197,11 @@ model StockMovement {
   // settlement of an ADJUST it wrote (checks in *_t1_field_checks).
   transferId     String?          @map("transfer_id") @db.Uuid
   settlementId   String?          @map("settlement_id") @db.Uuid
+  // Phase T4: the id of the transaction that wrote the movement (as change_log.txid).
+  // Settlements count a row when its transaction is visible in their snapshot
+  // and was not in the previous one's (docs/phase-t-design.md section 6, as
+  // decided in T4). Read as text (txid::text); Prisma has no xid8 type.
+  txid           Unsupported("xid8") @default(dbgenerated("pg_current_xact_id()"))
   createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
   business       Business         @relation(fields: [businessId], references: [id])
   location       Location         @relation(fields: [businessId, locationId], references: [businessId, id])
@@ -644,6 +649,12 @@ model Sale {
   // The greater of total minus paid_total and zero.
   balanceDue                 Decimal    @map("balance_due") @db.Decimal(14, 2)
   totalMismatch              Boolean    @default(false) @map("total_mismatch")
+  // Phase T4: the id of the transaction that wrote the sale (as change_log.txid).
+  // Settlements count a row when its transaction is visible in their snapshot
+  // and was not in the previous one's (docs/phase-t-design.md section 6, as
+  // decided in T4). Read as text (txid::text); Prisma has no xid8 type.
+  txid           Unsupported("xid8") @default(dbgenerated("pg_current_xact_id()"))
+
   note                       String?
   // Void: all null until voided (void_note and void_approval_id may stay null).
   voidedAt                   DateTime?  @map("voided_at") @db.Timestamptz(6)
@@ -801,6 +812,9 @@ model FieldSettlement {
   saleCount             Int                   @map("sale_count")
   voidedCount           Int                   @map("voided_count")
   unpaidTotal           Decimal               @map("unpaid_total") @db.Decimal(14, 2)
+  // Phase T4: pg_current_snapshot() at the close, as text. With the previous
+  // settlement's, it decides which sales and movements this one covers.
+  snapshot              String
   note                  String?
   createdAt             DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
   business              Business              @relation(fields: [businessId], references: [id])
@@ -812,6 +826,8 @@ model FieldSettlement {
   movements             StockMovement[]
 
   @@unique([businessId, id])
+  // Phase T4: the previous settlement, the list read and the AFTER_SETTLEMENT check.
+  @@index([businessId, fieldLocationId, periodEnd(sort: Desc), id(sort: Desc)])
   @@map("field_settlement")
 }
 

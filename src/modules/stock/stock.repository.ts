@@ -33,6 +33,8 @@ export interface MovementRow {
   saleId?: string | null;
   // TRANSFER_OUT and TRANSFER_IN (Phase T3): the transfer.
   transferId?: string | null;
+  // ADJUST written by a field settlement (Phase T4).
+  settlementId?: string | null;
 }
 
 // The largest balance a pool may hold, either way (docs/phase-c-design.md section 4; floor since C3): an
@@ -113,6 +115,7 @@ export class StockRepository {
         countedQuantity: movement.countedQuantity ?? null,
         saleId: movement.saleId ?? null,
         transferId: movement.transferId ?? null,
+        settlementId: movement.settlementId ?? null,
         occurredAt: ctx.occurredAt,
         createdByMembershipId: ctx.createdByMembershipId,
         syncCommandId: ctx.syncCommandId,
@@ -120,6 +123,66 @@ export class StockRepository {
       select: { id: true },
     });
     return row.id;
+  }
+
+  /** Phase T4: every balance row at a location, unlocked (the settlement then locks them in order). */
+  async balancesAt(locationId: string): Promise<{ id: string; packTypeId: string; quantity: number }[]> {
+    return currentTx().stockBalance.findMany({ where: { locationId }, select: { id: true, packTypeId: true, quantity: true } });
+  }
+
+  /** Phase T4: locks one balance row until the end of the transaction; its quantity now. */
+  async lockBalance(id: string): Promise<number | null> {
+    const rows = await currentTx().$queryRaw<{ quantity: number }[]>`
+      SELECT quantity FROM stock_balance WHERE id = ${id}::uuid AND business_id = ${currentBusinessId()}::uuid FOR UPDATE`;
+    return rows[0]?.quantity ?? null;
+  }
+
+  /**
+   * Phase T4: the flows per pack type at a location in a settlement window:
+   * movements whose transaction is visible in `snapshot` and was not in
+   * `previous` (null: none before). A settlement's own adjustments are left
+   * out (they are the result of a count, not a flow).
+   */
+  async windowFlows(
+    locationId: string,
+    snapshot: string,
+    previous: string | null,
+  ): Promise<{ packTypeId: string; issued: number; returned: number; sold: number; voidedBack: number; other: number }[]> {
+    const rows = await currentTx().$queryRaw<{ pack_type_id: string; issued: number; returned: number; sold: number; voided_back: number; other: number }[]>`
+      SELECT m.pack_type_id,
+             coalesce(sum(m.quantity_change) FILTER (WHERE m.movement_type = 'TRANSFER_IN'), 0)::int AS issued,
+             coalesce(-sum(m.quantity_change) FILTER (WHERE m.movement_type = 'TRANSFER_OUT'), 0)::int AS returned,
+             coalesce(-sum(m.quantity_change) FILTER (WHERE m.movement_type = 'SALE'), 0)::int AS sold,
+             coalesce(sum(m.quantity_change) FILTER (WHERE m.movement_type = 'SALE_VOID'), 0)::int AS voided_back,
+             coalesce(sum(m.quantity_change) FILTER (WHERE m.movement_type NOT IN ('TRANSFER_IN', 'TRANSFER_OUT', 'SALE', 'SALE_VOID')), 0)::int AS other
+        FROM stock_movement m
+       WHERE m.business_id = ${currentBusinessId()}::uuid AND m.location_id = ${locationId}::uuid
+         AND m.settlement_id IS NULL
+         AND m.txid IS NOT NULL
+         AND pg_visible_in_snapshot(m.txid, ${snapshot}::pg_snapshot)
+         AND (${previous}::text IS NULL OR NOT pg_visible_in_snapshot(m.txid, ${previous}::pg_snapshot))
+       GROUP BY m.pack_type_id`;
+    return rows.map((r) => ({ packTypeId: r.pack_type_id, issued: r.issued, returned: r.returned, sold: r.sold, voidedBack: r.voided_back, other: r.other }));
+  }
+
+  /**
+   * Phase T4, the settlement's count (docs/phase-t-design.md section 6): one
+   * statement locks the balance row, sets it to the counted quantity and
+   * returns the old value, so the difference is computed in SQL from the
+   * locked row, never read in JavaScript and written back. Null when the
+   * location has no balance row for the pack type.
+   */
+  async setCounted(locationId: string, packTypeId: string, counted: number): Promise<{ expected: number; delta: bigint } | null> {
+    const rows = await currentTx().$queryRaw<{ expected: number; delta: bigint }[]>`
+      UPDATE stock_balance b
+         SET quantity = ${counted}::int, updated_at = now()
+        FROM (SELECT id, quantity FROM stock_balance
+               WHERE business_id = ${currentBusinessId()}::uuid AND location_id = ${locationId}::uuid
+                 AND pack_type_id = ${packTypeId}::uuid
+                 FOR UPDATE) old
+       WHERE b.id = old.id
+      RETURNING old.quantity AS expected, ${counted}::bigint - old.quantity AS delta`;
+    return rows[0] ?? null;
   }
 
   /** Phase T3: the transfer row, before its movements (they point at it). Returns its id. */

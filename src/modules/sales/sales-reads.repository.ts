@@ -172,6 +172,22 @@ export class SalesReadsRepository {
     return new Set(rows.map((r) => r.id));
   }
 
+  /**
+   * Phase T4: the sales at a location in a settlement window (their
+   * transaction visible in `snapshot` and not in `previous`), with status and
+   * balance due as they are now.
+   */
+  async inWindow(locationId: string, snapshot: string, previous: string | null): Promise<{ id: string; status: string; balanceDue: string }[]> {
+    const rows = await currentTx().$queryRaw<{ id: string; status: string; balance_due: string }[]>`
+      SELECT s.id, s.status, s.balance_due::text AS balance_due
+        FROM sale s
+       WHERE s.business_id = ${currentBusinessId()}::uuid AND s.location_id = ${locationId}::uuid
+         AND s.txid IS NOT NULL
+         AND pg_visible_in_snapshot(s.txid, ${snapshot}::pg_snapshot)
+         AND (${previous}::text IS NULL OR NOT pg_visible_in_snapshot(s.txid, ${previous}::pg_snapshot))`;
+    return rows.map((r) => ({ id: r.id, status: r.status, balanceDue: r.balance_due }));
+  }
+
   /** Items of these sales, in line order. */
   async items(saleIds: string[]): Promise<SaleItemReadRow[]> {
     if (saleIds.length === 0) return [];

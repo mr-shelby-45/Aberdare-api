@@ -284,6 +284,58 @@ export class StockService {
     };
   }
 
+  // Phase T4: the settlement's stock work (docs/phase-t-design.md section 6).
+
+  async balancesAt(locationId: string) {
+    return this.repo.balancesAt(locationId);
+  }
+
+  async lockBalance(balanceId: string): Promise<number | null> {
+    return this.repo.lockBalance(balanceId);
+  }
+
+  async windowFlows(locationId: string, snapshot: string, previous: string | null) {
+    return this.repo.windowFlows(locationId, snapshot, previous);
+  }
+
+  /**
+   * Sets a field balance to the counted quantity in one statement and, for a
+   * nonzero difference, writes an ADJUST movement (LOST when negative, FOUND
+   * when positive) with the settlement's id. Returns the expected quantity
+   * (the balance before) and the difference.
+   */
+  async settleCount(
+    locationId: string,
+    packTypeId: string,
+    counted: number,
+    ctx: MovementContext,
+    settlement: { settlementId: string; note: string },
+  ): Promise<{ expected: number; variance: bigint }> {
+    const r = await this.repo.setCounted(locationId, packTypeId, counted);
+    if (!r) throw new StockError('PACK_TYPE_NOT_FOUND', 'This pack type has no stock at the location.');
+    const delta = BigInt(r.delta);
+    if (delta !== 0n) {
+      // quantity_change is an int: a difference beyond the balance limits cannot be recorded.
+      if (delta > BigInt(MAX_BALANCE) || delta < BigInt(-MAX_BALANCE)) {
+        throw new StockError('VALIDATION_FAILED', 'This count is too far from the stock to record.');
+      }
+      await this.repo.insertMovement(
+        {
+          locationId,
+          packTypeId,
+          quantityChange: Number(delta),
+          movementType: 'ADJUST',
+          quantityAfter: counted,
+          reason: delta < 0n ? 'LOST' : 'FOUND',
+          note: settlement.note,
+          settlementId: settlement.settlementId,
+        },
+        ctx,
+      );
+    }
+    return { expected: r.expected, variance: delta };
+  }
+
   /** For sale.create from sync: always records the sale, flags an oversell. */
   async decreaseForSale(
     locationId: string,

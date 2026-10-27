@@ -108,7 +108,7 @@ Audit `stock.issued` and `stock.returned` (locations, kind, lines of `{ pack_typ
 - Block if the attendant's devices have not synced recently: the most recent `last_sync_at` among the assignee's devices must be within 10 minutes of the command's `received_at` (a constant in config), otherwise `REJECTED / ATTENDANT_NOT_SYNCED`. This does not prove an empty outbox; the `AFTER_SETTLEMENT` flag below is the backstop.
 - Serialise settlements of one location: lock the location row with `FOR NO KEY UPDATE`. **Not** `FOR UPDATE`: every sale's foreign key takes a key-share lock on its location row, so `FOR UPDATE` would deadlock with sales. Prove it with a forced test.
 - One transaction: window and figures from the ledger and payments; per line, one atomic statement that locks the balance row and sets it to `counted_quantity` while returning the old value, so the adjustment `delta = counted - old` is computed in SQL from the locked row (never read in JavaScript and written back; show Ian the exact statement); a nonzero delta writes an `ADJUST` movement (`LOST` when negative, `FOUND` when positive) with `settlement_id` and the attendant as the subject in the note field; then the settlement rows; then the audit row.
-- Window rule: sales belong to the first settlement closed at or after their `received_at`, so each sale is counted in exactly one settlement. Use `received_at`, never `occurred_at`. Payments of the window are those of the window's `COMPLETED` sales (reversed payments excluded); `CASH` and `MPESA` totals by method, and verified or not.
+- Window rule (changed in T4 with Ian's approval, option B): a sale or stock movement at the location belongs to a settlement when the transaction that wrote it is visible in that settlement's snapshot (`pg_current_snapshot()`, taken after the balance rows are locked) and was not visible in the previous settlement's, using `sale.txid` and `stock_movement.txid` (`pg_visible_in_snapshot`). Each row is counted in exactly one settlement, also when its transaction was still running at the close (it then goes to the next one). The first version ("the first settlement closed at or after its `received_at`") lost a sale whose transaction committed just after a close; never `occurred_at` either. `period_start` and `period_end` remain the times shown to people. Payments of the window are those of the window's `COMPLETED` sales (reversed payments excluded); `CASH` and `MPESA` totals by method, and verified or not.
 - Result: `{ settlement_id, cash_variance, lines: [{ pack_type_id, variance }] }`.
 - The settlement is final. No update, no delete, no reopen. A mistake is corrected by the next settlement and a note.
 
@@ -146,7 +146,7 @@ Audit `settlement.closed` (settlement id, attendant, location, sale count, expec
 - Locking the location row `FOR UPDATE` in the settlement (deadlocks with sales).
 - Computing the settlement variance against a number the phone sent. The expected stock comes from the server, atomically, at close.
 - Reading the balance in JavaScript, then writing the counted number. One statement, with the movement delta computed in SQL.
-- Counting a sale in two settlements or in none (use `received_at` and the previous `period_end`).
+- Counting a sale in two settlements or in none (use the snapshot window of T4, not times).
 - Changing a closed settlement, or letting a settlement skip a pack type that still has stock.
 - Putting names, notes or amounts beyond the audit fields in logs, or notes in audit metadata.
 - Giving extra permissions to a `FIELD_ATTENDANT`, which would break the scope and the sales visibility rule.
@@ -224,7 +224,7 @@ Real Docker database, injectable `Clock`, genuinely concurrent concurrency tests
 6. Lock the two transfer directions in different orders: T3 test 6.
 7. Use `FOR UPDATE` on the location row in the settlement: T4 test 7.
 8. Compute the variance against a phone-sent expected quantity: T4 test 2.
-9. Window by `occurred_at` instead of `received_at`: T4 test 3.
+9. Window by `occurred_at` instead of the snapshot rule: T4 test 3 (and by `received_at`: the forced T4 test 7 of a sale still saving during a close).
 10. Drop the `AFTER_SETTLEMENT` flag: T4 test 6.
 11. Include reversed payments in the expected cash: T4 test 1.
 12. Allow extra permissions for a field attendant: T1 test 4.

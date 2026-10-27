@@ -69,6 +69,16 @@ export class LocationsService {
     return this.repo.findById(id);
   }
 
+  /** Phase T4: the location locked for a settlement (FOR NO KEY UPDATE), or null. */
+  async lockForSettlement(id: string) {
+    return this.repo.lockForSettlement(id);
+  }
+
+  /** Phase T4: a location's creation time. */
+  async createdAt(id: string): Promise<Date | null> {
+    return this.repo.createdAt(id);
+  }
+
   /** GET /v1/locations: a field attendant sees only the locations assigned to them (Phase T2). */
   async list(includeArchived: boolean, membershipId: string): Promise<LocationRow[]> {
     return this.repo.list(includeArchived, (await this.scope.resolve(membershipId)).ids());

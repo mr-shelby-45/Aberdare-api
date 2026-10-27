@@ -527,17 +527,18 @@ describe('B5: hardening', { timeout: 120_000 }, () => {
       { table_name: 'payment', privilege_type: 'UPDATE', columns: 'status' },
       { table_name: 'person', privilege_type: 'SELECT', columns: 'created_at,email,email_verified_at,id,phone,phone_verified_at' },
       // Phase E1: a sale changes only by payments and the void; the counter only by its number.
+      // Phase T4: txid (the writing transaction) is readable and filled by its default, never updatable.
       {
         table_name: 'sale',
         privilege_type: 'INSERT',
         columns:
-          'balance_due,business_id,created_at,created_by_membership_id,device_id,id,local_ref,location_id,note,occurred_at,paid_total,received_at,sale_number,status,total,total_mismatch,void_approval_id,void_approved_by_membership_id,void_note,void_reason,voided_at,voided_by_membership_id',
+          'balance_due,business_id,created_at,created_by_membership_id,device_id,id,local_ref,location_id,note,occurred_at,paid_total,received_at,sale_number,status,total,total_mismatch,txid,void_approval_id,void_approved_by_membership_id,void_note,void_reason,voided_at,voided_by_membership_id',
       },
       {
         table_name: 'sale',
         privilege_type: 'SELECT',
         columns:
-          'balance_due,business_id,created_at,created_by_membership_id,device_id,id,local_ref,location_id,note,occurred_at,paid_total,received_at,sale_number,status,total,total_mismatch,void_approval_id,void_approved_by_membership_id,void_note,void_reason,voided_at,voided_by_membership_id',
+          'balance_due,business_id,created_at,created_by_membership_id,device_id,id,local_ref,location_id,note,occurred_at,paid_total,received_at,sale_number,status,total,total_mismatch,txid,void_approval_id,void_approved_by_membership_id,void_note,void_reason,voided_at,voided_by_membership_id',
       },
       {
         table_name: 'sale',

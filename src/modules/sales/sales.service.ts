@@ -3,6 +3,7 @@ import { MAX_CENTS, fromCents, toCents } from '../../common/money/cents.js';
 import { isNumericOverflow, uniqueViolationConstraint } from '../../database/db-errors.js';
 import { ApprovalsService } from '../approvals/approvals.service.js';
 import { AuditService } from '../audit/audit.service.js';
+import { FieldSettlementsService } from '../field-settlements/field-settlements.service.js';
 import { LocationsService } from '../locations/locations.service.js';
 import { PaymentsService, type ValidPayment, paymentsTotal } from '../payments/payments.service.js';
 import type { PackTypeForSale } from '../products/pack-types.repository.js';
@@ -23,8 +24,9 @@ const MAX_LINE_QUANTITY = 100_000;
 const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 
 /** Flags in the order that picks the command's reason (docs/phase-e-design.md section 4). */
-export type SaleFlag = 'TOTAL_MISMATCH' | 'STOCK_NEGATIVE' | 'DUPLICATE_MPESA_CODE' | 'OVERPAYMENT';
-const FLAG_ORDER: SaleFlag[] = ['TOTAL_MISMATCH', 'STOCK_NEGATIVE', 'DUPLICATE_MPESA_CODE', 'OVERPAYMENT'];
+// AFTER_SETTLEMENT since Phase T4, last in the order.
+export type SaleFlag = 'TOTAL_MISMATCH' | 'STOCK_NEGATIVE' | 'DUPLICATE_MPESA_CODE' | 'OVERPAYMENT' | 'AFTER_SETTLEMENT';
+const FLAG_ORDER: SaleFlag[] = ['TOTAL_MISMATCH', 'STOCK_NEGATIVE', 'DUPLICATE_MPESA_CODE', 'OVERPAYMENT', 'AFTER_SETTLEMENT'];
 
 /** Who sold, where from, when, and which command. */
 export interface SaleActor {
@@ -88,6 +90,7 @@ export class SalesService {
     private readonly audit: AuditService,
     private readonly payments: PaymentsService,
     private readonly approvals: ApprovalsService,
+    private readonly fieldSettlements: FieldSettlementsService,
   ) {}
 
   /**
@@ -102,7 +105,8 @@ export class SalesService {
     const localRef = cleanText(dto.local_ref);
     if (!localRef) throw new SalesError('VALIDATION_FAILED', 'The local reference must be 1 to 30 characters.');
     const note = cleanText(dto.note);
-    if (!(await this.locations.findInScope(dto.location_id, actor.membershipId))) {
+    const location = await this.locations.findInScope(dto.location_id, actor.membershipId);
+    if (!location) {
       // The same for another business's location, one that does not exist, and
       // one outside a field attendant's scope (Phase T2).
       throw new SalesError('LOCATION_NOT_FOUND', 'Location not found.');
@@ -196,6 +200,7 @@ export class SalesService {
       STOCK_NEGATIVE: after.some((q) => q < 0),
       DUPLICATE_MPESA_CODE: duplicates > 0,
       OVERPAYMENT: paidCents > totalCents,
+      AFTER_SETTLEMENT: await this.afterSettlement(location, actor.occurredAt),
     });
 
     // Ids, numbers, totals and flags: never the note, names, prices, codes or single amounts.
@@ -342,6 +347,18 @@ export class SalesService {
       actorMembershipId: actor.membershipId,
     });
     return { saleId: dto.sale_id, voidedAt: actor.occurredAt, approvedByMembershipId: approvedBy };
+  }
+
+  /**
+   * Phase T4: a sale at a field location whose latest settlement's period_end
+   * is at or after the sale's occurred_at reached the server after the
+   * attendant's day was closed (docs/phase-t-design.md section 6). It is saved
+   * as usual; the flag tells the owner to look at that settlement.
+   */
+  private async afterSettlement(location: { id: string; kind: string }, occurredAt: Date): Promise<boolean> {
+    if (location.kind !== 'FIELD') return false;
+    const latest = await this.fieldSettlements.latest(location.id);
+    return latest !== null && latest.periodEnd.getTime() >= occurredAt.getTime();
   }
 
   /** Phase T2: a sale at a location outside the member's scope is the same as a missing sale. */

@@ -76,3 +76,33 @@ Filled in step by step. The full summary (see `docs/phase-t-design.md` section 1
 **Things to know:**
 1. The order of the two waiting commands matters in a forced deadlock test: the transaction first in the lock queue gets the released row. The issue must start first, or the mutation lets the return finish and no deadlock forms.
 2. A transfer's balance statements sort across both locations, so a source decrease can run after a destination increase; a short source still rolls everything back (one transaction).
+
+## T4: Settlement (passed)
+
+**Result:** new 13, Phase T cumulative 37 (`test/t4-settlement.spec.ts` plus the T1 to T3 files), all passing in the gate run. The four concurrency tests (two closes at once; a close racing 20 sales; the forced sale-still-saving test; the forced `FOR NO KEY UPDATE` test) passed 5 runs in a row. The full suite passed: 42 files, 447 of 447 (783.5 s). Lint, type-check, build and the drift check were clean.
+
+**The window rule changed (Ian's decision before T4, option B):** the design's rule ("a sale belongs to the first settlement closed at or after its `received_at`") lost a sale whose transaction was still running during a close: the close does not see it, and the next window starts after it. Now a sale or stock movement belongs to the settlement whose snapshot first sees its transaction. The design (section 6, section 9 and mutation 9) and `architecture.md` section 6 are updated in this commit.
+
+**Built (approved by Ian on 2026-10-27, rule B and the ten recommended answers):**
+- Migration `*_t4_settlement_window` (generated, shown before applying): `sale.txid` and `stock_movement.txid` (`xid8`, default `pg_current_xact_id()`, `Unsupported("xid8")` in Prisma, as `change_log.txid`), `field_settlement.snapshot` (text), and the index `(business_id, field_location_id, period_end DESC, id DESC)`.
+- `FieldSettlementsModule` (`src/modules/field-settlements/`, a data module for the two tables) and `FieldModule` (`src/modules/field/`: `FieldService`, `FieldController`, `CloseSettlementHandler`), answer 2. The ledger, sales, payment and device figures come from their own modules: `StockService.windowFlows/balancesAt/lockBalance/settleCount`, `SalesReadsService.inSettlementWindow`, `PaymentsService.totalsForSales`, `DevicesService.lastSyncOf`, `LocationsService.lockForSettlement/createdAt`.
+- `settlement.close` (`field.settle`): checks (amount, `SETTLEMENT_ALREADY_EXISTS`, `LOCATION_NOT_FOUND` for anything but a field location of the business, `ATTENDANT_NOT_SYNCED` beyond `FIELD_SYNC_MAX_AGE_MINUTES` = 10 on the attendant's active devices, answer 6); the location row `FOR NO KEY UPDATE`; every balance row at the location locked in the pack order (rows created meanwhile are locked in further rounds), then the snapshot; the figures under it; every line checked (`DUPLICATE_LINE`, `PACK_TYPE_NOT_FOUND` for a pack type with no balance row there, `QUANTITY_INVALID`, and `{ pack_type_id, reason: 'LINE_MISSING' }` for a pack type with a balance or window movements but no line, answer 4); the settlement row; per line the one-statement set to the count with the difference from the locked row (`StockRepository.setCounted`) and an `ADJUST` (`LOST`/`FOUND`) with `settlement_id`, created by the closer, note "Field settlement: <attendant>" (answer 5); the lines; the audit row `settlement.closed`.
+- Preview (`GET /v1/field/settlements/preview`, answer 3): the same figures under the current snapshot, no locks, with `last_synced_at`. Reads: `GET /v1/field/settlements` (newest first by `(period_end, id)`, signed cursor bound to `location_id`) and `GET /v1/field/settlements/:id` with lines; all three need `field.settle` (answer 8).
+- `AFTER_SETTLEMENT` (answer 7): `sale.create` at a `FIELD` location whose latest settlement's `period_end` is at or after the sale's `occurred_at`; last in the flag order. Settlements are not synced (answer 9).
+- `sale_count` counts every sale of the window, `voided_count` the voided ones among them; `period_start` is the previous `period_end`, or the location's creation (if that is after the close's server time, which only a test clock can do, the close's time).
+
+**Mutations (each reverted and checked with `cmp`; no `MUTATION` marker left):**
+- Design 7, `FOR UPDATE` on the location: the forced test failed (a deadlock: the sale's foreign key waits for the location row the close holds, the close for the sale's pool).
+- Design 8, the expected quantity taken from the phone: T4 test 2 failed (a close with a phone `expected_quantity` was accepted).
+- Design 9, the window by `occurred_at`: T4 test 3 failed. Extra: the window by `received_at` (the design's first rule): the forced sale-still-saving test failed (the sale counted in no settlement).
+- Design 10, no `AFTER_SETTLEMENT`: T4 test 6 failed.
+- Design 11, reversed payments in the expected cash: two guards keep them out (only `COMPLETED` sales' payments are summed, and only `RECORDED` payments). Removing either one alone changed nothing (reversed payments exist only on voided sales); removing both made T4 test 1 fail (expected cash 1000.00 instead of 640.00).
+
+**Earlier tests changed by T4 (mechanical; no assertion weakened):**
+- B5 grants inventory: the `sale` INSERT and SELECT column lists gain `txid` (it is in no UPDATE list).
+- T1 tests 2 and 3: their raw settlement insert supplies the new `snapshot` column (without it every later row failed on `NOT NULL` instead of the check under test).
+
+**Things to know:**
+1. Payments attached to a sale after its settlement closed are in no settlement's expected cash: the window takes the payments of the window's sales (design rule). Recorded as an open risk for T5.
+2. A race test that counts the van down can leave it below zero; a count is never negative. My first draft of the 20-sale race counted the remaining balance as is and was refused (`QUANTITY_INVALID`).
+3. `pg_visible_in_snapshot(txid, snapshot)` is the whole window rule. Rows written before T4 got the migration's transaction id, visible in every snapshot, so they fall in a location's first settlement.

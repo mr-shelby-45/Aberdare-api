@@ -67,6 +67,11 @@ export class DevicesService {
     return this.repo.stampSync(deviceId, this.clock.now(), SYNC_STAMP_MINUTES);
   }
 
+  /** Phase T4: when any of the member's active devices last synced (the settlement's sync check). */
+  async lastSyncOf(membershipId: string): Promise<Date | null> {
+    return this.repo.lastSyncOf(membershipId);
+  }
+
   // Data operations for the team module (device endpoints, staff lifecycle).
   list() {
     return this.repo.list();

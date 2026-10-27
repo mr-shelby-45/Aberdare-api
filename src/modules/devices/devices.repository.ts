@@ -34,6 +34,21 @@ export class DevicesRepository {
     return row.id;
   }
 
+  /**
+   * Phase T4: the newest last_sync_at among a member's active devices: those
+   * they registered and shared tablets linked to them. Null when none synced.
+   */
+  async lastSyncOf(membershipId: string): Promise<Date | null> {
+    const rows = await currentTx().$queryRaw<{ last: Date | null }[]>`
+      SELECT max(d.last_sync_at) AS last
+        FROM device d
+       WHERE d.business_id = ${currentBusinessId()}::uuid AND d.status = 'ACTIVE'
+         AND (d.registered_by_membership_id = ${membershipId}::uuid
+              OR EXISTS (SELECT 1 FROM device_membership dm
+                          WHERE dm.business_id = d.business_id AND dm.device_id = d.id AND dm.membership_id = ${membershipId}::uuid))`;
+    return rows[0]?.last ?? null;
+  }
+
   async findForSession(deviceId: string): Promise<DeviceForSession | null> {
     return currentTx().device.findUnique({
       where: { id: deviceId },

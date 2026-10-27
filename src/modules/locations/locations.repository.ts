@@ -83,6 +83,27 @@ export class LocationsRepository {
     return currentTx().location.findMany({ where: { id: { in: ids } }, select: SELECT });
   }
 
+  /**
+   * Phase T4: locks a location row for a settlement, FOR NO KEY UPDATE: it
+   * serialises settlements of one location but not sales, whose foreign keys
+   * take FOR KEY SHARE (FOR UPDATE would conflict with those and deadlock).
+   */
+  async lockForSettlement(id: string): Promise<(LocationRow & { createdAt: Date }) | null> {
+    const rows = await currentTx().$queryRaw<{ id: string; name: string; is_default: boolean; kind: string; assigned_membership_id: string | null; archived_at: Date | null; created_at: Date }[]>`
+      SELECT id, name, is_default, kind, assigned_membership_id, archived_at, created_at
+        FROM location WHERE id = ${id}::uuid AND business_id = ${currentBusinessId()}::uuid
+         FOR NO KEY UPDATE`;
+    const r = rows[0];
+    return r
+      ? { id: r.id, name: r.name, isDefault: r.is_default, kind: r.kind, assignedMembershipId: r.assigned_membership_id, archivedAt: r.archived_at, createdAt: r.created_at }
+      : null;
+  }
+
+  /** Phase T4: a location's creation time (a first settlement's period_start). */
+  async createdAt(id: string): Promise<Date | null> {
+    return (await currentTx().location.findUnique({ where: { id }, select: { createdAt: true } }))?.createdAt ?? null;
+  }
+
   /** Phase T2: every location assigned to this member, active or archived. */
   async assignedIds(membershipId: string): Promise<string[]> {
     const rows = await currentTx().location.findMany({ where: { assignedMembershipId: membershipId }, select: { id: true } });
