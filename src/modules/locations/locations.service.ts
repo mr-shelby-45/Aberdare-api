@@ -1,7 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { ApiError } from '../../common/errors/api.error.js';
 import { Clock } from '../../common/time/clock.js';
+import { uniqueViolationConstraint } from '../../database/db-errors.js';
 import { AuditService } from '../audit/audit.service.js';
+import { StaffService } from '../staff/staff.service.js';
 import type { CreateLocationDto } from './dto/create-location.dto.js';
 import type { UpdateLocationDto } from './dto/update-location.dto.js';
 import { type LocationRow, LocationsRepository } from './locations.repository.js';
@@ -17,6 +19,7 @@ export class LocationsService {
     private readonly repo: LocationsRepository,
     private readonly audit: AuditService,
     private readonly clock: Clock,
+    private readonly staff: StaffService,
   ) {}
 
   /** The default location, created by signup in the signup transaction. */
@@ -26,7 +29,7 @@ export class LocationsService {
       action: 'location.created',
       targetType: 'location',
       targetId: location.id,
-      metadata: { is_default: true },
+      metadata: { is_default: true, ...kindOf(location) },
       actorMembershipId,
     });
     return location;
@@ -51,13 +54,31 @@ export class LocationsService {
     return this.repo.list(includeArchived);
   }
 
+  /**
+   * A shop, warehouse or (Phase T) field location. A FIELD location needs an
+   * assignee who is an invited or active FIELD_ATTENDANT of this business;
+   * other kinds take none. One active field location per member (a partial
+   * unique index): a reassignment is "archive the old one, create a new one".
+   */
   async create(dto: CreateLocationDto): Promise<LocationRow> {
-    const location = await this.repo.create({ name: cleanName(dto.name), isDefault: false });
+    const kind = dto.kind ?? 'SHOP';
+    const assignee = dto.assigned_membership_id ?? null;
+    if ((kind === 'FIELD') !== (assignee !== null)) {
+      throw new ApiError(422, 'VALIDATION_FAILED', 'A field location needs assigned_membership_id; other kinds take none.');
+    }
+    if (assignee !== null) {
+      const member = await this.staff.findForSession(assignee);
+      // The same answer for a missing member, another business's, and a wrong preset or status.
+      if (!member || member.rolePreset !== 'FIELD_ATTENDANT' || (member.status !== 'ACTIVE' && member.status !== 'INVITED')) {
+        throw new ApiError(422, 'ASSIGNEE_INVALID', 'A field location must be assigned to an active or invited field attendant.');
+      }
+    }
+    const location = await oneActiveField(() => this.repo.create({ name: cleanName(dto.name), isDefault: false, kind, assignedMembershipId: assignee }));
     await this.audit.record({
       action: 'location.created',
       targetType: 'location',
       targetId: location.id,
-      metadata: { is_default: false },
+      metadata: { is_default: false, ...kindOf(location) },
     });
     return location;
   }
@@ -78,7 +99,7 @@ export class LocationsService {
           action: 'location.updated',
           targetType: 'location',
           targetId: id,
-          metadata: { name_before: location.name, name_after: name },
+          metadata: { name_before: location.name, name_after: name, ...kindOf(location) },
         });
       }
     }
@@ -91,10 +112,11 @@ export class LocationsService {
       if (!(await this.repo.archive(id, this.clock.now()))) {
         throw new ApiError(422, 'LAST_ACTIVE_LOCATION', 'A business needs at least one active location.');
       }
-      await this.audit.record({ action: 'location.archived', targetType: 'location', targetId: id });
+      await this.audit.record({ action: 'location.archived', targetType: 'location', targetId: id, metadata: kindOf(location) });
     } else if (dto.archived === false && archived) {
-      await this.repo.restore(id);
-      await this.audit.record({ action: 'location.restored', targetType: 'location', targetId: id });
+      // A field location whose member has another active one stays archived.
+      await oneActiveField(() => this.repo.restore(id));
+      await this.audit.record({ action: 'location.restored', targetType: 'location', targetId: id, metadata: kindOf(location) });
     }
 
     const updated = await this.repo.findById(id);
@@ -109,6 +131,23 @@ function cleanName(name: string): string {
     throw new ApiError(422, 'VALIDATION_FAILED', 'Invalid fields: name');
   }
   return trimmed;
+}
+
+/** Phase T: the kind and assignee, in every location audit row. */
+function kindOf(l: LocationRow): { kind: string; assigned_membership_id: string | null } {
+  return { kind: l.kind, assigned_membership_id: l.assignedMembershipId };
+}
+
+/** Maps the one-active-field-location index (Phase T1) to 409 FIELD_LOCATION_EXISTS. */
+async function oneActiveField<T>(write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (err) {
+    if (uniqueViolationConstraint(err) === 'location_one_active_field_per_member') {
+      throw new ApiError(409, 'FIELD_LOCATION_EXISTS', 'This member already has an active field location.');
+    }
+    throw err;
+  }
 }
 
 /** Same answer for another business's id and a missing one. */

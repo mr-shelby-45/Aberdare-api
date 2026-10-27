@@ -16,15 +16,21 @@ const OWNER_ONLY: ReadonlySet<Permission> = new Set([
 const KNOWN: ReadonlySet<string> = new Set(PERMISSIONS);
 
 /**
- * Checks extra permissions for a MANAGER or ATTENDANT. Unknown strings and
- * stock.convert on an attendant are invalid (422); owner-only permissions
- * granted by someone who is not the owner are refused (403).
+ * Checks extra permissions for a MANAGER, ATTENDANT or FIELD_ATTENDANT.
+ * A field attendant takes none at all (422 EXTRA_PERMISSIONS_NOT_ALLOWED:
+ * an extra would break the location scope and the sales visibility rule).
+ * Unknown strings and stock.convert on an attendant are invalid (422);
+ * owner-only permissions granted by someone who is not the owner are
+ * refused (403).
  */
 export function checkExtraPermissions(
-  preset: 'MANAGER' | 'ATTENDANT',
+  preset: 'MANAGER' | 'ATTENDANT' | 'FIELD_ATTENDANT',
   extras: readonly string[],
   actor: RequestSession,
 ): void {
+  if (preset === 'FIELD_ATTENDANT' && extras.length > 0) {
+    throw new ApiError(422, 'EXTRA_PERMISSIONS_NOT_ALLOWED', 'A field attendant cannot be given extra permissions.');
+  }
   for (const p of extras) {
     if (!KNOWN.has(p)) {
       throw new ApiError(422, 'VALIDATION_FAILED', `Unknown permission: ${p}`);

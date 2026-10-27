@@ -42,7 +42,14 @@ const iso = (d: Date | null) => (d ? d.toISOString() : null);
 
 // One shape per table, shared by the snapshot and the changes, so a row
 // looks the same whichever way it reached the phone.
-const locationRow = (l: LocationRow): SyncRow => ({ id: l.id, name: l.name, is_default: l.isDefault, archived_at: iso(l.archivedAt) });
+const locationRow = (l: LocationRow): SyncRow => ({
+  id: l.id,
+  name: l.name,
+  is_default: l.isDefault,
+  kind: l.kind,
+  assigned_membership_id: l.assignedMembershipId,
+  archived_at: iso(l.archivedAt),
+});
 const productRow = (p: ProductRow): SyncRow => ({ id: p.id, name: p.name, sku: p.sku, archived_at: iso(p.archivedAt) });
 const packTypeRow =
   (view: SyncView) =>

@@ -564,8 +564,9 @@ describe('A3: login, tokens and the request pipeline', { timeout: 60_000 }, () =
       business: { id: biz, name: 'Duka A', type: 'RETAIL' },
       device: { id: device.deviceId, name: 'Test phone', is_shared: false },
       permissions: [
+        'field.settle', // field.settle and stock.transfer since Phase T1
         'orders.manage', 'payments.approve', 'payments.confirm', 'products.edit', 'reports.view',
-        'sales.create', 'sales.void', 'stock.adjust', 'stock.convert', 'stock.count', 'stock.receive', 'stock.view',
+        'sales.create', 'sales.void', 'stock.adjust', 'stock.convert', 'stock.count', 'stock.receive', 'stock.transfer', 'stock.view',
       ],
     });
   });

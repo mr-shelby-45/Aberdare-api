@@ -114,7 +114,7 @@ export function stockApi(t: TestApp, ip: string, phoneBase: number) {
     return { businessId: r.membership.business_id, membershipId: r.membership.id, token: r.access_token, email };
   }
 
-  async function activeStaff(owner: Member, rolePreset: 'MANAGER' | 'ATTENDANT', displayName: string): Promise<Member> {
+  async function activeStaff(owner: Member, rolePreset: 'MANAGER' | 'ATTENDANT' | 'FIELD_ATTENDANT', displayName: string): Promise<Member> {
     const phone = newPhone();
     const created = await post('/v1/staff', { phone, display_name: displayName, role_preset: rolePreset }, owner.token);
     expect(created.statusCode, JSON.stringify(created.json())).toBe(201);

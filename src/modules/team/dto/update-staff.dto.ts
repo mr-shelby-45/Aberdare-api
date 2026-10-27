@@ -7,8 +7,8 @@ export class UpdateStaffDto {
   display_name?: string;
 
   @IsOptional()
-  @IsIn(['MANAGER', 'ATTENDANT'])
-  role_preset?: 'MANAGER' | 'ATTENDANT';
+  @IsIn(['MANAGER', 'ATTENDANT', 'FIELD_ATTENDANT'])
+  role_preset?: 'MANAGER' | 'ATTENDANT' | 'FIELD_ATTENDANT';
 
   @IsOptional()
   @IsArray()

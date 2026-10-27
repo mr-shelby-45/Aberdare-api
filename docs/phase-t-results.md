@@ -1,0 +1,35 @@
+# Phase T results
+
+Filled in step by step. The full summary (see `docs/phase-t-design.md` section 13) is written when T5 is finished. Only Ian marks the phase done, in `CLAUDE.md` section 2.
+
+## T1: Schema, preset, permissions, doc updates (passed)
+
+**Result:** new 5, Phase T cumulative 5 (`test/t1-field-schema.spec.ts`), all passing in the gate run. T1 test 6 is the earlier suites: the changed step 4, B1, B5 and D2 files passed with the other likely-affected files (A4, A5) before the gate. The first full run failed 2 of 415 (39 files): the A3 and B5 walkthrough expectations above, both mechanical consequences of the approved changes. After updating them (both files 32 of 32) the full suite passed: 39 files, 415 of 415 (462.3 s). Lint, type-check, build and the drift check were clean.
+
+**Built (approved by Ian on 2026-10-27, with the seven recommended answers):**
+- Five migrations, replayed and probed in the shadow database before approval (15 of 15 probes as expected), then applied to dev and test:
+  - `*_t1_field_tables` (generated): the `FIELD_ATTENDANT` value of `role_preset`, `location.kind` (`NOT NULL DEFAULT 'SHOP'`, so existing rows are shops) and `location.assigned_membership_id`, `stock_movement.transfer_id` and `settlement_id`, and the `stock_transfer`, `field_settlement` and `field_settlement_line` tables with composite foreign keys. `sync_command_id` is required on transfers and settlements (answer 2); `variance` is BIGINT (answer 3).
+  - `*_t1_field_checks`: location kind, assignee exactly on `FIELD`, never a default `FIELD`; transfer kind, different locations, text lengths; movement types `TRANSFER_OUT` (negative) and `TRANSFER_IN` (positive), `transfer_id` exactly on them, `settlement_id` only on `ADJUST`; settlement money never negative, `cash_variance = cash_received - expected_cash`, counts never negative, `period_end = received_at`, `period_start <= period_end`; lines' flows never negative, counted 0 to 2,000,000,000, `variance = counted - expected`.
+  - `*_t1_location_one_active_field_per_member`: the partial unique index (archived locations do not count).
+  - `*_t1_field_rls`: SELECT and INSERT only on the three tables, forced RLS with `shop_only`.
+  - `*_t1_location_update_columns`: `app_user` may update only `name`, `archived_at` and `updated_at` of a location (answer 1, the D1 device pattern), so kind and assignee never change after creation.
+- No read indexes for settlements yet; they come in T4 with the queries (answer 4).
+- Permissions: `stock.transfer` and `field.settle` for managers and owners; the `FIELD_ATTENDANT` preset (`sales.create`, `payments.confirm`, `stock.view`). `effectivePermissions()` ignores any stored extras for a field attendant; the staff API refuses them with `422 EXTRA_PERMISSIONS_NOT_ALLOWED`, also when a preset change would keep old extras (answer 6).
+- Locations (answer 5): `POST /v1/locations` takes `kind` (default `SHOP`) and `assigned_membership_id`. A `FIELD` location without an assignee, or an assignee on another kind, is `422 VALIDATION_FAILED`; an assignee who is not an invited or active `FIELD_ATTENDANT` of the business is `422 ASSIGNEE_INVALID` (the same for a missing member); a member's second active field location, on create or restore, is `409 FIELD_LOCATION_EXISTS`. Responses (REST and the sync row) gain `kind` and `assigned_membership_id`. `LocationsModule` now imports `StaffModule` (a data module).
+- Location audit rows carry `kind` and `assigned_membership_id` (answer 7).
+- Doc updates of design section 15: the `CLAUDE.md` phase row for T (the status line not touched), and `docs/architecture.md` sections 4, 5, 6, 12, 13, 14 and 16 (open items 60 to 69), edited in place.
+
+**Mutation (reverted and checked with `cmp`; no `MUTATION` marker left):**
+- Design 12, extras allowed for a field attendant: T1 test 4 failed (the staff API created one with an extra, `201` instead of `422`).
+
+**Earlier tests changed by T1 (mechanical; no assertion weakened):**
+- Step 4: the RLS list gains `field_settlement`, `field_settlement_line`, `stock_transfer`; `HAND_WRITTEN_INDEXES` gains `location_one_active_field_per_member`, with a check of its definition.
+- B5: the grants inventory lists the three tables and replaces `location`'s table-wide UPDATE with its three columns.
+- B1 tests 5 and 7, and the `location.updated` audit check: location responses and audit metadata gain `kind` and `assigned_membership_id`.
+- D2 test 1: the location sync row's keys gain `kind` and `assigned_membership_id`.
+- A3 (`GET /v1/me` for a manager): the exact permission list gains `field.settle` and `stock.transfer`. B5 walkthrough test step 1: the exact location response gains `kind` and `assigned_membership_id`. My survey before the full run missed these two; the first full run failed on exactly them (see below).
+- `test/helpers/stock-api.ts`: `activeStaff()` accepts `FIELD_ATTENDANT`.
+
+**Things to know:**
+1. Adding an enum value (`ALTER TYPE role_preset ADD VALUE`) works inside Prisma's migration, but Postgres refuses to use the new value in the same transaction; nothing in `*_t1_field_tables` uses it.
+2. Audit `occurred_at` comes from the database, not the fake clock, so audit rows of one test still sort in real order. My first draft of test 5 assumed otherwise and was corrected.

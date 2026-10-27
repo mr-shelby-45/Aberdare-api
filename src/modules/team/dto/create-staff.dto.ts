@@ -11,8 +11,8 @@ export class CreateStaffDto {
   display_name!: string;
 
   // The owner is created at signup only.
-  @IsIn(['MANAGER', 'ATTENDANT'])
-  role_preset!: 'MANAGER' | 'ATTENDANT';
+  @IsIn(['MANAGER', 'ATTENDANT', 'FIELD_ATTENDANT'])
+  role_preset!: 'MANAGER' | 'ATTENDANT' | 'FIELD_ATTENDANT';
 
   @IsOptional()
   @IsArray()

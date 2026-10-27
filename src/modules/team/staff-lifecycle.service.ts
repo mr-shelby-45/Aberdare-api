@@ -100,7 +100,7 @@ export class StaffLifecycleService {
     if (changesAccess) {
       refuseSelf(id, actor);
       if (target.rolePreset === 'OWNER') throw ownerProtected();
-      const preset = dto.role_preset ?? (target.rolePreset as 'MANAGER' | 'ATTENDANT');
+      const preset = dto.role_preset ?? (target.rolePreset as 'MANAGER' | 'ATTENDANT' | 'FIELD_ATTENDANT');
       // Check the resulting combination, so a demotion cannot keep stock.convert.
       checkExtraPermissions(preset, dto.extra_permissions ?? target.extraPermissions ?? [], actor);
     }

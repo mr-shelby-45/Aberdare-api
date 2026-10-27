@@ -177,7 +177,7 @@ export class StaffRepository {
     id: string;
     personId: string;
     displayName: string;
-    rolePreset: 'MANAGER' | 'ATTENDANT';
+    rolePreset: 'MANAGER' | 'ATTENDANT' | 'FIELD_ATTENDANT';
     extraPermissions: string[];
     tempPinHash: string;
     tempPinExpiresAt: Date;
@@ -192,7 +192,7 @@ export class StaffRepository {
   /** A REMOVED member invited again: same row, fresh invite. Returns false if it was not REMOVED. */
   async reinvite(
     membershipId: string,
-    invite: { displayName: string; rolePreset: 'MANAGER' | 'ATTENDANT'; extraPermissions: string[]; tempPinHash: string; tempPinExpiresAt: Date },
+    invite: { displayName: string; rolePreset: 'MANAGER' | 'ATTENDANT' | 'FIELD_ATTENDANT'; extraPermissions: string[]; tempPinHash: string; tempPinExpiresAt: Date },
   ): Promise<boolean> {
     const { count } = await currentTx().membership.updateMany({
       where: { id: membershipId, status: 'REMOVED' },
@@ -209,7 +209,7 @@ export class StaffRepository {
     return count === 1;
   }
 
-  async update(membershipId: string, fields: { displayName?: string; rolePreset?: 'MANAGER' | 'ATTENDANT'; extraPermissions?: string[] }): Promise<void> {
+  async update(membershipId: string, fields: { displayName?: string; rolePreset?: 'MANAGER' | 'ATTENDANT' | 'FIELD_ATTENDANT'; extraPermissions?: string[] }): Promise<void> {
     await currentTx().membership.updateMany({ where: { id: membershipId }, data: fields });
   }
 

@@ -34,5 +34,5 @@ export class LocationsController {
 }
 
 function toJson(l: LocationRow) {
-  return { id: l.id, name: l.name, is_default: l.isDefault, archived: l.archivedAt !== null };
+  return { id: l.id, name: l.name, is_default: l.isDefault, kind: l.kind, assigned_membership_id: l.assignedMembershipId, archived: l.archivedAt !== null };
 }

@@ -451,7 +451,9 @@ describe('B5: hardening', { timeout: 120_000 }, () => {
       change_log_horizon: 'SELECT', // written only by change_log_prune() (Phase D1)
       device: 'SELECT,INSERT', // plus UPDATE of five columns only (checked below; Phase D1)
       device_membership: 'SELECT,INSERT,DELETE',
-      location: 'SELECT,INSERT,UPDATE',
+      field_settlement: 'SELECT,INSERT', // append-only and final (Phase T1)
+      field_settlement_line: 'SELECT,INSERT', // append-only (Phase T1)
+      location: 'SELECT,INSERT', // plus UPDATE of name, archived_at, updated_at only (checked below; Phase T1)
       membership: 'SELECT,INSERT,UPDATE',
       otp_challenge: '-',
       pack_type: 'SELECT,INSERT,UPDATE',
@@ -466,6 +468,7 @@ describe('B5: hardening', { timeout: 120_000 }, () => {
       stock_balance: 'SELECT,INSERT,UPDATE',
       stock_conversion: 'SELECT,INSERT',
       stock_movement: 'SELECT,INSERT',
+      stock_transfer: 'SELECT,INSERT', // append-only (Phase T1)
       sync_command: 'SELECT,INSERT,UPDATE',
     });
 
@@ -475,7 +478,7 @@ describe('B5: hardening', { timeout: 120_000 }, () => {
           await c.query<{ table_name: string; privilege_type: string; columns: string }>(
             `SELECT table_name, privilege_type, string_agg(column_name, ',' ORDER BY column_name) AS columns
                FROM information_schema.column_privileges
-              WHERE grantee = 'app_user' AND table_schema = 'public' AND table_name IN ('approval', 'business', 'device', 'payment', 'person', 'sale', 'sale_counter')
+              WHERE grantee = 'app_user' AND table_schema = 'public' AND table_name IN ('approval', 'business', 'device', 'location', 'payment', 'person', 'sale', 'sale_counter')
               GROUP BY 1, 2 ORDER BY 1, 2`,
           )
         ).rows,
@@ -506,6 +509,10 @@ describe('B5: hardening', { timeout: 120_000 }, () => {
         columns: 'business_id,created_at,id,is_shared,last_seen_at,last_sync_at,name,platform,push_token,registered_by_membership_id,secret_hash,status',
       },
       { table_name: 'device', privilege_type: 'UPDATE', columns: 'is_shared,last_seen_at,last_sync_at,name,status' },
+      // Phase T1: table-wide UPDATE replaced by rename, archive and restore; kind and assignee never change.
+      { table_name: 'location', privilege_type: 'INSERT', columns: 'archived_at,assigned_membership_id,business_id,created_at,id,is_default,kind,name,updated_at' },
+      { table_name: 'location', privilege_type: 'SELECT', columns: 'archived_at,assigned_membership_id,business_id,created_at,id,is_default,kind,name,updated_at' },
+      { table_name: 'location', privilege_type: 'UPDATE', columns: 'archived_at,name,updated_at' },
       // Phase E1: payments are only ever reversed (status).
       {
         table_name: 'payment',

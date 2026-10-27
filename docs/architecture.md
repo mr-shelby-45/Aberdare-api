@@ -116,6 +116,8 @@ Constraints:
 
 Reinstall is treated as a new device: log in again, then a full snapshot sync rebuilds the local data.
 
+**Field attendants (Phase T, `docs/phase-t-design.md` sections 3 and 4):** a fourth preset, `FIELD_ATTENDANT` (`sales.create`, `payments.confirm`, `stock.view`; no extra permissions ever, `EXTRA_PERMISSIONS_NOT_ALLOWED`), for a shop employee who sells on foot or by vehicle. Their stock is a location of kind `FIELD` assigned to them. Such a member is restricted to the locations assigned to them (active or archived): one helper (`LocationScope`, resolved from the live membership) answers `allows(locationId)` and gives the allowed ids for queries, and is enforced on `sale.create`, `payment.attach`, `sale.void`, `stock.convert`, the stock reads, location reads, and the `location` and `stock_balance` sync tables. A location outside the scope behaves exactly like a missing one. Everyone else is unrestricted.
+
 ## 5. Offline sync
 
 **DECIDED.** The phone keeps a local SQLite database (via Drift, encrypted) and never writes sales directly to the server.
@@ -146,6 +148,8 @@ Command types and required permission:
 | stock.adjust | stock.adjust |
 | stock.convert | stock.convert (manager or owner), or an attendant with a valid approval (Phase C) |
 | stock.count | stock.count |
+| stock.issue, stock.return | stock.transfer (managers and owners) (Phase T) |
+| settlement.close | field.settle (managers and owners) (Phase T) |
 | product.create, product.update, pack_type.upsert, barcode.add, barcode.remove | products.edit (plus costs.view for any command that sets or changes `cost_price`) |
 | order.update | orders.manage |
 
@@ -172,6 +176,12 @@ As designed for Phase E (`docs/phase-e-design.md` sections 4 and 5):
 - `payment.attach` `{ sale_id, payments }`: the same payment rules; only a `COMPLETED` sale; attendants only on their own sales (`SALE_NOT_FOUND` otherwise, as for a missing sale). Result `{ paid_total, balance_due, flags }`. As built (E3): "attendant" means a member without `sales.void`; one conditional `UPDATE` adds to `paid_total` before the payments are inserted; duplicate codes use `INSERT ... ON CONFLICT DO NOTHING` on the partial index and count toward `paid_total`; `OVERPAYMENT` whenever `paid_total` ends above the total.
 - `sale.void` `{ sale_id, reason, note?, approval_id? }`: whole sale only; one conditional `UPDATE ... WHERE status = 'COMPLETED'`; payments become `REVERSED`; one `SALE_VOID` movement per item returns the stock to the sale's location; a failed void leaves the approval unused. A voided sale can never change again. Result `{ sale_id, voided_at, approved_by_membership_id }`. As built (E5): dispatcher permission `sales.create`, the real check (`sales.void` or a `SALE_VOID` approval) inside; checks in the order permission rule, sale, approval; a member without `sales.void` voids only their own sales, even with an approval; `voided_at` is the command's `occurred_at`; `paid_total` and `balance_due` keep their values. `GET /v1/stock/approvers` takes `?purpose=` (default `STOCK_CONVERT`). Changed in E6: the stock is returned before the payments are reversed (lock order: sale row, stock pools, payments); the other order deadlocked with a sale reusing the voided sale's M-Pesa code.
 - **Sync:** `sale`, `sale_item` and `payment` join the synced tables after `stock_balance`. The snapshot holds the last 30 days of sales; `changes` has no age limit, so a void of an old sale still arrives. Members without `sales.void` receive only their own sales and those sales' items and payments; `cost_price` on items needs `costs.view`.
+
+As designed for Phase T (`docs/phase-t-design.md` sections 4 to 7):
+- `stock.issue` and `stock.return` `{ from_location_id, to_location_id, reference?, note?, lines: [{ pack_type_id, quantity }] }` (`stock.transfer`): an issue goes from an active `SHOP` or `WAREHOUSE` to an active `FIELD` location, a return back (the field location may be archived). Strict at the source (`STOCK_INSUFFICIENT`), capped at the destination, all or nothing; bad lines as in Phase C; `LOCATION_KIND_INVALID`, `LOCATION_ARCHIVED`. Result `{ transfer_id, lines: [{ pack_type_id, from_after, to_after }] }`.
+- `settlement.close` `{ settlement_id, field_location_id, cash_received, note?, lines: [{ pack_type_id, counted_quantity }] }` (`field.settle`): server-computed figures for the window since the previous settlement; every pack type with a balance or movements must have a line (`LINE_MISSING`); refused with `ATTENDANT_NOT_SYNCED` unless the assignee's devices synced within 10 minutes. Result `{ settlement_id, cash_variance, lines: [{ pack_type_id, variance }] }`. Final: never changed.
+- **Flag `AFTER_SETTLEMENT`**, added at the end of the Phase E flag order: a sale at a field location whose latest settlement's `period_end` is at or after the sale's `occurred_at` (it reached the server after the attendant's day was closed). Saved as usual.
+- **Sync and the scope:** a field attendant's snapshot and changes carry only their own `location` and `stock_balance` rows; other rows are skipped, never sent as delete markers. Nothing new joins `SyncTables` (transfers and settlements are not synced). The changes cursor binds `scope` (`all`, or a short digest of the sorted allowed location ids) next to `costs` and `all_sales`; a change is `410 SNAPSHOT_REQUIRED`, and a cursor issued before Phase T is refused once with `422`.
 
 **Reads**:
 - `GET /v1/sync/snapshot`: full data for the business (products, barcodes, pack types, stock, recent sales), paged. Used on first login and after reinstall.
@@ -237,6 +247,11 @@ As designed for Phase C (`docs/phase-c-design.md` sections 3, 4 and 6):
 - **Approvals:** a generic `approval` row (purpose `STOCK_CONVERT` for now; Phase E may reuse it) is minted online with the approver's PIN, valid 15 minutes, bound to the requester and device, and consumed once by one atomic `UPDATE ... WHERE consumed_at IS NULL AND requester ... AND device ... AND time limits ... RETURNING approver`, then the approver is re-checked live. Approval PIN attempts have their own counter per approver (five wrong lock approvals by that person for 15 minutes); their own login is never affected. Every refusal is the same `403 APPROVAL_DENIED` with the same work, as for the PIN login lock.
 - **Approvals as built in C5 (decided with Ian):** `POST /v1/stock/approvals` is the second route with `@OwnTransactions()`, so the PIN is checked outside any transaction: a short transaction reads the approver, scrypt runs outside, and a second short transaction counts the attempt, mints and audits (as PIN login does). Only real approvers are counted (active, with an effective `stock.convert`, not the caller, with a PIN); naming anyone else costs one dummy scrypt and the same `403 APPROVAL_DENIED`, so no one can lock another person's approvals by naming them. The counter row is locked (`SELECT ... FOR UPDATE`) before it is changed, so concurrent attempts are counted exactly: every checked wrong PIN counts, every 5th starts a 15-minute lock unless one is running (one `approval.locked` row), a right PIN resets the count unless a lock is running. The route uses the auth routes' per-IP limit (`AUTH_RATE_LIMIT_MAX`, default 10). The dispatcher passes the token's `deviceId` (on `SyncActor`) and `receivedAt` (on the command context) for the consumption statement; the approver is re-checked live after it, and the whole use rolls back with a failed conversion.
 - **Integrity check:** `StockIntegrityService.check()` (tenant scoped) lists every `(location, pack type)` whose balance differs from its ledger sum, including a balance with no movements and movements with no balance. Phase F schedules it per business.
+
+As designed for Phase T (`docs/phase-t-design.md` sections 5 and 6):
+- **Transfers:** `StockService.transfer()` moves lines between two locations in one transaction: one `stock_transfer` row (`ISSUE` or `RETURN`), and per line a `TRANSFER_OUT` (strict decrease at the source) and a `TRANSFER_IN` (capped non-strict increase at the destination) movement, each with `quantity_after` and `transfer_id`. Only issue and return are exposed; generic transfers between shops or warehouses are not.
+- **Lock order across locations:** every balance statement of one transfer, on both locations, runs in one global order: by location id, then the shared pack type order (larger pack first, then pack type id). An issue and a return in opposite directions over the same pools therefore lock in the same order. With sales and voids the order stays: sale row, stock pools, payments.
+- **Settlement adjustments:** at the close, per line one atomic statement locks the field balance row, sets it to the counted quantity and returns the old value, so `delta = counted - old` is computed in SQL (never read in JavaScript and written back). A nonzero delta writes an `ADJUST` movement (`LOST` when negative, `FOUND` when positive) with `settlement_id`. The settlement serialises on the location row with `FOR NO KEY UPDATE` (not `FOR UPDATE`, which would deadlock with every sale's foreign key check). Window: sales belong to the first settlement closed at or after their `received_at`.
 
 ## 7. Barcodes and search
 
@@ -357,7 +372,7 @@ Table list (exact columns are designed during the build and reviewed by Ian befo
 | Table | Purpose |
 |---|---|
 | business | the tenant: name, type (`RETAIL`, `WHOLESALE`, `WAREHOUSE`), till number, subscription state, settings. RLS on its own `id` from Phase A |
-| location | a shop or warehouse of a business: name, default flag (one per business, created at signup), archived time |
+| location | a shop, warehouse or field location of a business: name, default flag (one per business, created at signup), archived time; `kind` (`SHOP`, `WAREHOUSE`, `FIELD`) and `assigned_membership_id` (exactly on `FIELD`; one active field location per member) (Phase T) |
 | person | one human across all businesses: phone (unique, E.164), verified flags, email (unique, nullable), password hash (owners only), login lockout. Not tenant-owned; read through the identity functions (section 3) |
 | membership | a person's role in one business: display name, role preset, extra permissions, status (`INVITED`, `ACTIVE`, `SUSPENDED`, `REMOVED`), PIN hash, temporary PIN hash and expiry, lockout counters, and separate approval counters (`approval_failed_count`, `approval_locked_until`, Phase C). Exactly one `OWNER` per business |
 | device | a registered phone: name, platform, device secret hash, shared flag, status (`ACTIVE`, `REVOKED`), push token (Phase F), last seen and last sync |
@@ -367,13 +382,15 @@ Table list (exact columns are designed during the build and reviewed by Ian befo
 | product | name (1 to 120 characters, not unique), SKU (unique per business when present), archived time. No categories and no stock columns (Phase B) |
 | pack_type | piece, carton of N, and so on: name and units per pack (both unique per product, 1 to 10000 units, at most one base unit), sell price and optional cost price (`NUMERIC(14,2)`, never negative), archived time. 1 to 6 per product |
 | product_barcode | barcode (text) to product and pack type, unique per business; composite key to `pack_type (business_id, product_id, id)` so it cannot point at another product's pack type. The only Phase B table where rows are deleted |
-| stock_movement | append-only ledger: type, change, quantity after, phone time, creator, sync command, and per type a unit cost (receive), reason (adjust) or expected and counted quantities (count); note and reference (Phase C) |
+| stock_movement | append-only ledger: type, change, quantity after, phone time, creator, sync command, and per type a unit cost (receive), reason (adjust) or expected and counted quantities (count); note and reference (Phase C); `sale_id` (Phase E); `transfer_id` on `TRANSFER_OUT` and `TRANSFER_IN`, `settlement_id` on a settlement's `ADJUST` (Phase T) |
 | stock_balance | cached balance per business, location, pack type; may be negative; logged in `change_log` (Phase C) |
 | stock_conversion | links the two ledger rows of a break-bulk; creator, approver and the approval used (Phase C) |
 | approval | a short-lived permission minted with an approver's PIN: purpose, requester, approver, device, valid until, consumed at and by which command. Generic, so Phase E can reuse it (Phase C) |
 | sale, sale_item | a sale (the phone's UUID, `sale_number` per business, `local_ref`, location, device, creator, phone and server times, `COMPLETED` or `VOIDED`, `total`, `paid_total`, `balance_due`, a mismatch flag, the void fields) and its append-only lines (names, quantity, unit, list and cost price at sale time, line total) (Phase E) |
 | payment | `CASH` or `MPESA` (code stored upper-case), amount, `verified` (always false until Phase M), `duplicate_of_payment_id`, `RECORDED` or `REVERSED` (Phase E) |
 | sale_counter | the last `sale_number` per business, one row each (Phase E) |
+| stock_transfer | an issue or return between two locations: kind, from and to, phone time, creator, sync command, reference, note; append-only. Its lines are the `TRANSFER_OUT` and `TRANSFER_IN` movements with its `transfer_id` (Phase T) |
+| field_settlement, field_settlement_line | a field attendant's day-end settlement (the phone's UUID, location, attendant, closer, phone and server times, the window `period_start`..`period_end`, expected cash, cash received and variance, M-Pesa totals verified and not, sale and void counts, unpaid total, note) and its per pack type lines (issued, returned, sold, voided back, expected, counted, variance); append-only and final (Phase T) |
 | mpesa_transaction | raw M-Pesa notifications, unique on trans_id (Phase M) |
 | order_inbox, order_inbox_item | orders from a website |
 | sync_command | every received command: UUID unique, result, status, `occurred_at` (phone) and `received_at` (server) |
@@ -421,6 +438,7 @@ All under `/v1`, JSON, access token required unless stated.
 - **devices** (`devices.manage`): `GET /devices`, `PATCH /devices/:id` (name, shared flag), `DELETE /devices/:id` (revoke), `POST /devices/:id/members`, `DELETE /devices/:id/members/:membershipId`
 - **stock** (Phase C, `stock.view`, any active member; writes are sync commands only): `GET /stock?location_id=&product_id=&include_zero=&include_archived=&limit=&cursor=` (balances; zero rows hidden by default, negative rows shown), `GET /stock/movements?location_id=&pack_type_id=&product_id=&type=&from=&to=&limit=&cursor=` (newest first; the `unit_cost` key absent without `costs.view`), `GET /stock/approvers` (active members with `stock.convert`, names only), `POST /stock/approvals` (`{ approver_membership_id, approver_pin, purpose }`, 201 `{ approval_id, valid_until }`; every refusal is the same `403 APPROVAL_DENIED`; 10 per minute per IP)
 - **sales** (Phase E; writes are sync commands only): `GET /sales?from=&to=&location_id=&status=&created_by=&limit=&cursor=` (newest first; members without `sales.void` see only their own sales, and `created_by` is ignored for them), `GET /sales/:id` (items, payments, void details; `cost_price` only with `costs.view`; another member's sale is `404` for an attendant). Approvals keep their Phase C routes: `GET /stock/approvers?purpose=` (default `STOCK_CONVERT`, or `SALE_VOID`) and `POST /stock/approvals` with `purpose: "SALE_VOID"`; moving them to a neutral prefix was not worth the break
+- **field settlements** (Phase T, `field.settle`; the close is the `settlement.close` sync command): `GET /field/settlements/preview?location_id=` (the figures a close would store, read only), `GET /field/settlements?location_id=&limit=&cursor=` (newest first, signed cursor), `GET /field/settlements/:id` (with lines). Location reads, the stock reads and sync follow the field attendant's location scope. `POST /locations` takes `kind` and, for `FIELD`, `assigned_membership_id` (a `FIELD_ATTENDANT`); a field location is reassigned by archiving it and creating a new one.
 - **reads**: `/payments/pending`, `/orders`, `/reports/*`, `/audit-log`, `/notifications`, `/subscription`
 - **sync**: `POST /sync/commands` (Phase B), `GET /sync/snapshot?table=&cursor=&limit=` (Phase D, any active member; `start_cursor` on the first page; cost fields only with `costs.view`, balances only with `stock.view`), `GET /sync/changes?cursor=&limit=` (Phase D; `410 SNAPSHOT_REQUIRED` for a cursor older than the retained history or issued under another cost visibility)
 - **manager actions**: voids are the `sale.void` sync command (Phase E), not a REST route; `POST /payments/:id/approve` (Phase M)
@@ -432,7 +450,7 @@ All under `/v1`, JSON, access token required unless stated.
 
 ## 14. Permissions
 
-**DECIDED.** Three presets. The owner can add individual permissions to a person, except `stock.convert`, which only managers and owners hold.
+**DECIDED.** Three presets (a fourth, `FIELD_ATTENDANT`, from Phase T: see below). The owner can add individual permissions to a person, except `stock.convert`, which only managers and owners hold.
 
 | Permission | Attendant | Manager | Owner |
 |---|---|---|---|
@@ -440,8 +458,11 @@ All under `/v1`, JSON, access token required unless stated.
 | products.edit, stock.receive, stock.adjust, stock.convert, stock.count | no | yes | yes |
 | sales.void, payments.approve, reports.view | no | yes | yes |
 | costs.view, staff.manage, devices.manage, subscription.manage, shopkey.manage, locations.manage | no | no | yes |
+| stock.transfer, field.settle (Phase T) | no | yes | yes |
 
 `sales.void` voids a sale and lets a member see every sale of the business; without it a member sees only their own sales (Phase E). `payments.approve` is not used until Phase M. Reading locations and the catalogue needs no permission beyond an active membership. `costs.view` covers reading and writing cost prices. `locations.manage` is new in Phase B (owner preset only, grantable like the others).
+
+**Field attendant (Phase T):** a fourth preset, `FIELD_ATTENDANT`, holds exactly `sales.create`, `payments.confirm` and `stock.view`, and never any extra permission (the staff API refuses them with `EXTRA_PERMISSIONS_NOT_ALLOWED`, and effective permissions ignore any that are stored). On top, the location scope of section 4 limits them to their assigned `FIELD` locations. `stock.transfer` (issue and return) and `field.settle` (settlements) belong to managers and owners.
 
 Permissions are **read live from the database on every request**, never stored in the token (Phase A decision). Inside the tenant transaction, the `TenantInterceptor` loads the membership and device, refuses unless both are `ACTIVE`, computes effective permissions (role preset plus `extra_permissions`) and checks the route's `@RequirePermission(...)`. Sync commands check the same effective permissions in the command dispatcher. Suspending someone or changing a permission therefore takes effect on the very next request. The check never lives in a Nest guard, because guards run before the tenant transaction exists. `stock.convert` can never be an extra permission on an attendant (rejected on write, ignored on read). The owner cannot be suspended, removed or demoted.
 
@@ -540,3 +561,16 @@ Found in the Phase E design (`docs/phase-e-design.md` section 17):
 57. Notifying the approver and the owner when a PIN approves a void (Phase F).
 58. Sale-mode stock for sales made while offline for days can swing balances; counts (Phase C) are the correction tool.
 59. Sales snapshot cost (E4): sale and item pages go through rows in id order filtered by date, and payment pages query `sale_id = ANY(<visible sale ids of the window>)`. Fine for 30 days of a normal shop; measure with a busy wholesaler in Phase H and add an index or change the paging if it hurts.
+
+Found in the Phase T design (`docs/phase-t-design.md` section 14):
+
+60. The field attendant's acknowledgement of received stock (disputes about the morning count).
+61. A separate hawking price list.
+62. Settlement history on managers' phones (today online only).
+63. A cash and shortage ledger, and payroll deductions (the settlement stores the variances only).
+64. Customer credit: unpaid sales exist, with no customer behind them.
+65. Verified payments (Phase M); until then M-Pesa totals are unverified, and typed codes can be fake.
+66. Generic transfers between two shop or warehouse locations (the service is ready).
+67. Whether a field attendant's offline outbox is empty cannot be known by the server; `ATTENDANT_NOT_SYNCED` and `AFTER_SETTLEMENT` reduce the risk but do not remove it.
+68. Settlement in a long offline day: the attendant's phone may need days of sales synced first.
+69. Notifying the manager of large variances (Phase F).

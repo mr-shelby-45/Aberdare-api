@@ -37,6 +37,10 @@ model Business {
   saleItems         SaleItem[]
   payments          Payment[]
   saleCounter       SaleCounter?
+  // Phase T.
+  stockTransfers    StockTransfer[]
+  fieldSettlements  FieldSettlement[]
+  fieldSettlementLines FieldSettlementLine[]
 
   @@map("business")
 }
@@ -87,13 +91,22 @@ model Location {
   // enforced by the hand-written partial unique index
   // location_one_default_per_business.
   isDefault  Boolean        @default(false) @map("is_default")
+  // Phase T: SHOP, WAREHOUSE or FIELD (checks in *_t1_field_checks). A FIELD
+  // location is assigned to exactly one member (a field attendant); others to none.
+  kind       String         @default("SHOP")
+  assignedMembershipId String? @map("assigned_membership_id") @db.Uuid
   archivedAt DateTime?      @map("archived_at") @db.Timestamptz(6)
   createdAt  DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt  DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   business   Business       @relation(fields: [businessId], references: [id])
+  assignedMembership Membership? @relation("LocationAssignee", fields: [businessId, assignedMembershipId], references: [businessId, id])
   balances   StockBalance[]
   movements  StockMovement[]
   sales      Sale[]
+  // Phase T.
+  transfersFrom    StockTransfer[]   @relation("TransferFrom")
+  transfersTo      StockTransfer[]   @relation("TransferTo")
+  fieldSettlements FieldSettlement[]
 
   @@unique([businessId, id])
   @@map("location")
@@ -121,6 +134,7 @@ model PackType {
   movements    StockMovement[]
   barcodes     ProductBarcode[]
   saleItems    SaleItem[]
+  fieldSettlementLines FieldSettlementLine[]
 
   @@unique([businessId, id])
   // Target of product_barcode's key, so a barcode cannot point at another
@@ -179,6 +193,10 @@ model StockMovement {
   countedQuantity  Int?           @map("counted_quantity")
   // Phase E: the sale of a SALE or SALE_VOID movement (checks in *_e1_sales_checks).
   saleId         String?          @map("sale_id") @db.Uuid
+  // Phase T: the transfer of a TRANSFER_OUT or TRANSFER_IN movement, and the
+  // settlement of an ADJUST it wrote (checks in *_t1_field_checks).
+  transferId     String?          @map("transfer_id") @db.Uuid
+  settlementId   String?          @map("settlement_id") @db.Uuid
   createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
   business       Business         @relation(fields: [businessId], references: [id])
   location       Location         @relation(fields: [businessId, locationId], references: [businessId, id])
@@ -186,6 +204,8 @@ model StockMovement {
   createdBy      Membership?      @relation("MovementCreatedBy", fields: [businessId, createdByMembershipId], references: [businessId, id])
   syncCommand    SyncCommand?     @relation(fields: [businessId, syncCommandId], references: [businessId, id])
   sale           Sale?            @relation(fields: [businessId, saleId], references: [businessId, id])
+  transfer       StockTransfer?   @relation(fields: [businessId, transferId], references: [businessId, id])
+  settlement     FieldSettlement? @relation(fields: [businessId, settlementId], references: [businessId, id])
   conversionOut  StockConversion? @relation("ConversionOut")
   conversionIn   StockConversion? @relation("ConversionIn")
 
@@ -254,6 +274,9 @@ model SyncCommand {
   business   Business          @relation(fields: [businessId], references: [id])
   movements  StockMovement[]
   approvalsConsumed Approval[]
+  // Phase T.
+  stockTransfers   StockTransfer[]
+  fieldSettlements FieldSettlement[]
 
   // Target for composite foreign keys (Phase C).
   @@unique([businessId, id])
@@ -334,6 +357,8 @@ enum RolePreset {
   OWNER
   MANAGER
   ATTENDANT
+  // Phase T: sells from, and sees stock of, only their assigned FIELD locations.
+  FIELD_ATTENDANT
 
   @@map("role_preset")
 }
@@ -418,6 +443,11 @@ model Membership {
   salesVoided           Sale[]            @relation("SaleVoidedBy")
   saleVoidsApproved     Sale[]            @relation("SaleVoidApprovedBy")
   paymentsCreated       Payment[]         @relation("PaymentCreatedBy")
+  // Phase T.
+  locationsAssigned     Location[]        @relation("LocationAssignee")
+  transfersCreated      StockTransfer[]   @relation("TransferCreatedBy")
+  settlementsAsAttendant FieldSettlement[] @relation("SettlementAttendant")
+  settlementsClosed     FieldSettlement[] @relation("SettlementClosedBy")
 
   @@unique([businessId, id])
   @@unique([businessId, personId])
@@ -715,4 +745,98 @@ model SaleCounter {
   business   Business @relation(fields: [businessId], references: [id])
 
   @@map("sale_counter")
+}
+
+// Phase T: stock moved from one location to another (docs/phase-t-design.md
+// section 5). Append-only. Only ISSUE (shop or warehouse to a field location)
+// and RETURN (back) are exposed. Its lines are the TRANSFER_OUT and
+// TRANSFER_IN movements that point at it.
+model StockTransfer {
+  id                    String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId            String          @map("business_id") @db.Uuid
+  // ISSUE or RETURN.
+  kind                  String
+  fromLocationId        String          @map("from_location_id") @db.Uuid
+  toLocationId          String          @map("to_location_id") @db.Uuid
+  // Phone time.
+  occurredAt            DateTime        @map("occurred_at") @db.Timestamptz(6)
+  createdByMembershipId String          @map("created_by_membership_id") @db.Uuid
+  syncCommandId         String          @map("sync_command_id") @db.Uuid
+  reference             String?
+  note                  String?
+  createdAt             DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  business              Business        @relation(fields: [businessId], references: [id])
+  fromLocation          Location        @relation("TransferFrom", fields: [businessId, fromLocationId], references: [businessId, id])
+  toLocation            Location        @relation("TransferTo", fields: [businessId, toLocationId], references: [businessId, id])
+  createdBy             Membership      @relation("TransferCreatedBy", fields: [businessId, createdByMembershipId], references: [businessId, id])
+  syncCommand           SyncCommand     @relation(fields: [businessId, syncCommandId], references: [businessId, id])
+  movements             StockMovement[]
+
+  @@unique([businessId, id])
+  @@map("stock_transfer")
+}
+
+// Phase T: a field attendant's day-end settlement (docs/phase-t-design.md
+// section 6). The id is the phone's UUID. Append-only: final once closed.
+model FieldSettlement {
+  id                    String                @id @db.Uuid
+  businessId            String                @map("business_id") @db.Uuid
+  fieldLocationId       String                @map("field_location_id") @db.Uuid
+  // The location's assignee at the close.
+  attendantMembershipId String                @map("attendant_membership_id") @db.Uuid
+  closedByMembershipId  String                @map("closed_by_membership_id") @db.Uuid
+  syncCommandId         String                @map("sync_command_id") @db.Uuid
+  // Phone time of the close, and server time (= period_end).
+  occurredAt            DateTime              @map("occurred_at") @db.Timestamptz(6)
+  receivedAt            DateTime              @map("received_at") @db.Timestamptz(6)
+  // The window: sales with received_at in (period_start, period_end].
+  periodStart           DateTime              @map("period_start") @db.Timestamptz(6)
+  periodEnd             DateTime              @map("period_end") @db.Timestamptz(6)
+  // KES, NUMERIC(14,2).
+  expectedCash          Decimal               @map("expected_cash") @db.Decimal(14, 2)
+  cashReceived          Decimal               @map("cash_received") @db.Decimal(14, 2)
+  cashVariance          Decimal               @map("cash_variance") @db.Decimal(14, 2)
+  mpesaVerifiedTotal    Decimal               @map("mpesa_verified_total") @db.Decimal(14, 2)
+  mpesaUnverifiedTotal  Decimal               @map("mpesa_unverified_total") @db.Decimal(14, 2)
+  saleCount             Int                   @map("sale_count")
+  voidedCount           Int                   @map("voided_count")
+  unpaidTotal           Decimal               @map("unpaid_total") @db.Decimal(14, 2)
+  note                  String?
+  createdAt             DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  business              Business              @relation(fields: [businessId], references: [id])
+  fieldLocation         Location              @relation(fields: [businessId, fieldLocationId], references: [businessId, id])
+  attendant             Membership            @relation("SettlementAttendant", fields: [businessId, attendantMembershipId], references: [businessId, id])
+  closedBy              Membership            @relation("SettlementClosedBy", fields: [businessId, closedByMembershipId], references: [businessId, id])
+  syncCommand           SyncCommand           @relation(fields: [businessId, syncCommandId], references: [businessId, id])
+  lines                 FieldSettlementLine[]
+  movements             StockMovement[]
+
+  @@unique([businessId, id])
+  @@map("field_settlement")
+}
+
+// Phase T: one pack type of a settlement. Append-only.
+model FieldSettlementLine {
+  id               String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId       String          @map("business_id") @db.Uuid
+  settlementId     String          @map("settlement_id") @db.Uuid
+  packTypeId       String          @map("pack_type_id") @db.Uuid
+  // From the ledger, in the settlement's window.
+  issued           Int
+  returned         Int
+  sold             Int
+  voidedBack       Int             @map("voided_back")
+  // The balance at the close (may be negative), the manager's count, and
+  // counted - expected (BIGINT: the difference of two ints can leave int range).
+  expectedQuantity Int             @map("expected_quantity")
+  countedQuantity  Int             @map("counted_quantity")
+  variance         BigInt
+  createdAt        DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  business         Business        @relation(fields: [businessId], references: [id])
+  settlement       FieldSettlement @relation(fields: [businessId, settlementId], references: [businessId, id])
+  packType         PackType        @relation(fields: [businessId, packTypeId], references: [businessId, id])
+
+  @@unique([businessId, id])
+  @@unique([businessId, settlementId, packTypeId])
+  @@map("field_settlement_line")
 }

@@ -112,7 +112,7 @@ describe('D2: snapshot', { timeout: 180_000 }, () => {
     // Shapes and values against the Phase B and C reads.
     const locations = api.json<{ locations: { id: string; name: string; is_default: boolean; archived: boolean }[] }>(await get('/v1/locations?include_archived=true', fresh.token)).locations;
     expect(sorted(d.byTable.location.map((l) => [l.id, l.name, l.is_default, l.archived_at !== null]))).toEqual(sorted(locations.map((l) => [l.id, l.name, l.is_default, l.archived])));
-    expect(Object.keys(d.byTable.location[0]).sort()).toEqual(['archived_at', 'id', 'is_default', 'name']);
+    expect(Object.keys(d.byTable.location[0]).sort()).toEqual(['archived_at', 'assigned_membership_id', 'id', 'is_default', 'kind', 'name']); // kind and assignee since T1
     for (const productId of [w.maize.productId, w.beans.productId]) {
       const read = api.json<{ id: string; name: string; sku: string | null; archived: boolean; pack_types: Row[]; barcodes: { barcode: string; pack_type_id: string }[] }>(
         await get(`/v1/products/${productId}`, fresh.token),

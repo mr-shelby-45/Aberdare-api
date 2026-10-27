@@ -1,20 +1,28 @@
 import { Injectable } from '@nestjs/common';
 import { currentBusinessId, currentTx } from '../../database/tenant.js';
 
+export const LOCATION_KINDS = ['SHOP', 'WAREHOUSE', 'FIELD'] as const;
+export type LocationKind = (typeof LOCATION_KINDS)[number];
+
 export interface LocationRow {
   id: string;
   name: string;
   isDefault: boolean;
+  // Phase T: a FIELD location is assigned to one member; others to none.
+  kind: string;
+  assignedMembershipId: string | null;
   archivedAt: Date | null;
 }
 
-const SELECT = { id: true, name: true, isDefault: true, archivedAt: true } as const;
+const SELECT = { id: true, name: true, isDefault: true, kind: true, assignedMembershipId: true, archivedAt: true } as const;
 
 // location SQL. Every method runs on the current tenant transaction, so RLS
-// limits it to the caller's business. app_user has no DELETE on location.
+// limits it to the caller's business. app_user has no DELETE on location, and
+// since T1 may update only name, archived_at and updated_at: a location's kind
+// and assignee never change after creation.
 @Injectable()
 export class LocationsRepository {
-  async create(location: { name: string; isDefault: boolean }): Promise<LocationRow> {
+  async create(location: { name: string; isDefault: boolean; kind?: LocationKind; assignedMembershipId?: string | null }): Promise<LocationRow> {
     return currentTx().location.create({
       data: { businessId: currentBusinessId(), ...location },
       select: SELECT,

@@ -91,7 +91,7 @@ describe('B5 test 4: the Phase B walkthrough runs end to end', { timeout: 120_00
     // 1. The owner signs up and sees the default "Main shop".
     const owner = await signup(OWNER, 'Duka la Amina');
     expect(ok<{ locations: unknown[] }>(await call('GET', '/v1/locations', owner)).locations).toEqual([
-      { id: expect.any(String), name: 'Main shop', is_default: true, archived: false },
+      { id: expect.any(String), name: 'Main shop', is_default: true, kind: 'SHOP', assigned_membership_id: null, archived: false }, // kind and assignee since T1
     ]);
 
     // 2. The owner adds a manager and an attendant (Phase A).

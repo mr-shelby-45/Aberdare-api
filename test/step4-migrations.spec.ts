@@ -82,6 +82,8 @@ describe('step 4: migrations keep hand-written SQL', () => {
         'change_log',
         'device',
         'device_membership',
+        'field_settlement', // Phase T1: field_settlement, field_settlement_line, stock_transfer
+        'field_settlement_line',
         'location',
         'membership',
         'pack_type',
@@ -95,6 +97,7 @@ describe('step 4: migrations keep hand-written SQL', () => {
         'stock_balance',
         'stock_conversion',
         'stock_movement',
+        'stock_transfer',
         'sync_command',
       ]);
       for (const r of rows) {
@@ -148,12 +151,17 @@ describe('step 4: migrations keep hand-written SQL', () => {
       const byName = new Map(found.indexes.map((i) => [i.indexname, i.indexdef]));
       expect(byName.get('location_one_default_per_business')).toMatch(/CREATE UNIQUE INDEX .* WHERE is_default/);
       expect([...byName.keys()]).toEqual([
+        'location_one_active_field_per_member',
         'location_one_default_per_business',
         'membership_one_owner_per_business',
         'pack_type_one_base_unit_per_product',
         'payment_mpesa_code_unique',
         'product_name_trgm_idx',
       ]);
+      // Phase T1: one active field location per member.
+      expect(byName.get('location_one_active_field_per_member')).toMatch(
+        /CREATE UNIQUE INDEX .* \(business_id, assigned_membership_id\) WHERE \(\(kind = 'FIELD'::text\) AND \(archived_at IS NULL\)\)/,
+      );
       // Phase E1: one original payment per M-Pesa code per business.
       expect(byName.get('payment_mpesa_code_unique')).toMatch(
         /CREATE UNIQUE INDEX .* \(business_id, mpesa_code\) WHERE \(\(mpesa_code IS NOT NULL\) AND \(duplicate_of_payment_id IS NULL\)\)/,

@@ -312,10 +312,10 @@ describe('B1: schema, triggers and locations', { timeout: 120_000 }, () => {
     const o = await signupOwner();
     const res = await call('GET', '/v1/locations', o.token);
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ locations: [{ id: expect.any(String), name: 'Main shop', is_default: true, archived: false }] });
+    expect(res.json()).toEqual({ locations: [{ id: expect.any(String), name: 'Main shop', is_default: true, kind: 'SHOP', assigned_membership_id: null, archived: false }] });
     const audit = (await auditActions(o.businessId)).filter((r) => r.action === 'location.created');
     expect(audit).toEqual([
-      { action: 'location.created', target_id: json<{ locations: { id: string }[] }>(res).locations[0].id, metadata: { is_default: true }, actor_membership_id: o.membershipId },
+      { action: 'location.created', target_id: json<{ locations: { id: string }[] }>(res).locations[0].id, metadata: { is_default: true, kind: 'SHOP', assigned_membership_id: null }, actor_membership_id: o.membershipId },
     ]);
   });
 
@@ -389,7 +389,7 @@ describe('B1: schema, triggers and locations', { timeout: 120_000 }, () => {
 
     // Rename (trimmed); bad names and empty updates are refused.
     const renamed = await call('PATCH', `/v1/locations/${store.id}`, o.token, { name: ' Back store ' });
-    expect(renamed.json()).toEqual({ id: store.id, name: 'Back store', is_default: false, archived: false });
+    expect(renamed.json()).toEqual({ id: store.id, name: 'Back store', is_default: false, kind: 'SHOP', assigned_membership_id: null, archived: false });
     expect(errorOf(await post('/v1/locations', { name: '   ' }, o.token))).toMatchObject({ status: 422, code: 'VALIDATION_FAILED' });
     expect(errorOf(await post('/v1/locations', { name: 'x'.repeat(61) }, o.token))).toMatchObject({ status: 422 });
     expect(errorOf(await call('PATCH', `/v1/locations/${store.id}`, o.token, {}))).toMatchObject({ status: 422, code: 'VALIDATION_FAILED' });
@@ -449,7 +449,7 @@ describe('B1: schema, triggers and locations', { timeout: 120_000 }, () => {
     const audit = (await auditActions(o.businessId)).filter((r) => r.target_id === store.id);
     expect(audit.map((r) => r.action).sort()).toEqual(['location.archived', 'location.created', 'location.restored', 'location.updated']);
     for (const r of audit) expect(r.actor_membership_id).toBe(o.membershipId);
-    expect(audit.find((r) => r.action === 'location.updated')!.metadata).toEqual({ name_before: 'Store', name_after: 'Back store' });
+    expect(audit.find((r) => r.action === 'location.updated')!.metadata).toEqual({ name_before: 'Store', name_after: 'Back store', kind: 'SHOP', assigned_membership_id: null }); // kind and assignee since T1
   });
 
   it('8. a rolled-back location change writes neither change_log nor audit rows', async () => {

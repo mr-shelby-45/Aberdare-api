@@ -10,6 +10,8 @@ export const HAND_WRITTEN_INDEXES = [
   'location_one_default_per_business',
   // Phase E1.
   'payment_mpesa_code_unique',
+  // Phase T1.
+  'location_one_active_field_per_member',
 ];
 
 // SQL that removes or weakens objects Prisma does not manage.
