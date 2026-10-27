@@ -102,8 +102,9 @@ export class SalesService {
     const localRef = cleanText(dto.local_ref);
     if (!localRef) throw new SalesError('VALIDATION_FAILED', 'The local reference must be 1 to 30 characters.');
     const note = cleanText(dto.note);
-    if (!(await this.locations.findById(dto.location_id))) {
-      // The same for another business's location and one that does not exist.
+    if (!(await this.locations.findInScope(dto.location_id, actor.membershipId))) {
+      // The same for another business's location, one that does not exist, and
+      // one outside a field attendant's scope (Phase T2).
       throw new SalesError('LOCATION_NOT_FOUND', 'Location not found.');
     }
 
@@ -227,7 +228,7 @@ export class SalesService {
   async attachPayments(dto: AttachPaymentDto, actor: PaymentActor): Promise<PaymentsAttached> {
     const payments = this.validPayments(dto.payments);
     const sale = await this.repo.findState(dto.sale_id);
-    if (!sale || (!actor.seesAllSales && sale.createdByMembershipId !== actor.membershipId)) {
+    if (!sale || (!actor.seesAllSales && sale.createdByMembershipId !== actor.membershipId) || !(await this.inScope(sale.locationId, actor.membershipId))) {
       throw new SalesError('SALE_NOT_FOUND', 'Sale not found.');
     }
     if (sale.status !== 'COMPLETED') throw voided();
@@ -277,7 +278,7 @@ export class SalesService {
     }
     const note = cleanText(dto.note);
     const sale = await this.repo.findState(dto.sale_id);
-    if (!sale || (!actor.canVoid && sale.createdByMembershipId !== actor.membershipId)) {
+    if (!sale || (!actor.canVoid && sale.createdByMembershipId !== actor.membershipId) || !(await this.inScope(sale.locationId, actor.membershipId))) {
       throw new SalesError('SALE_NOT_FOUND', 'Sale not found.');
     }
     if (sale.status !== 'COMPLETED') throw alreadyVoided();
@@ -341,6 +342,11 @@ export class SalesService {
       actorMembershipId: actor.membershipId,
     });
     return { saleId: dto.sale_id, voidedAt: actor.occurredAt, approvedByMembershipId: approvedBy };
+  }
+
+  /** Phase T2: a sale at a location outside the member's scope is the same as a missing sale. */
+  private async inScope(locationId: string, membershipId: string): Promise<boolean> {
+    return (await this.locations.scopeOf(membershipId)).allows(locationId);
   }
 
   private validPayments(payments: Parameters<PaymentsService['validate']>[0]): ValidPayment[] {

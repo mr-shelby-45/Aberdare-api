@@ -159,7 +159,7 @@ describe('D2: snapshot', { timeout: 180_000 }, () => {
     expect(rest.every((p) => p.start_cursor === undefined)).toBe(true);
     // The late product's rows come through the change feed from start_cursor, each record once.
     const changes = await tenants.run(w.owner.businessId, async () =>
-      feed.finishedAfter(await feed.open(first.start_cursor!, w.owner.businessId, { costs: false, allSales: false }), 500),
+      feed.finishedAfter(await feed.open(first.start_cursor!, w.owner.businessId, { costs: false, allSales: false, scope: 'all' }), 500),
     );
     const changed = new Set(changes.map((c) => `${c.tableName}:${c.rowId}`));
     for (const key of [`product:${late.productId}`, `pack_type:${late.piece}`, `pack_type:${late.carton}`]) expect(changed.has(key), key).toBe(true);
@@ -188,7 +188,7 @@ describe('D2: snapshot', { timeout: 180_000 }, () => {
       const first = await page(w.attendant.token, '?limit=500');
       expect(first.rows.find((r) => r.id === w.loc)?.name).toBe('Main shop'); // read before T1 committed
       const changes = await tenants.run(w.owner.businessId, async () =>
-        feed.finishedAfter(await feed.open(first.start_cursor!, w.owner.businessId, { costs: false, allSales: false }), 500),
+        feed.finishedAfter(await feed.open(first.start_cursor!, w.owner.businessId, { costs: false, allSales: false, scope: 'all' }), 500),
       );
       expect(changes.filter((c) => c.tableName === 'location' && c.rowId === w.loc && c.operation === 'UPDATE')).toHaveLength(1);
     } finally {

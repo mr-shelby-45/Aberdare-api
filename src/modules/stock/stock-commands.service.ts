@@ -62,7 +62,7 @@ export class StockCommandsService {
   async receive(dto: ReceiveStockDto, actor: StockActor): Promise<{ packTypeId: string; quantityAfter: number }[]> {
     const reference = cleanText(dto.reference);
     const note = cleanText(dto.note);
-    await this.activeLocation(dto.location_id);
+    await this.activeLocation(dto.location_id, actor.membershipId);
 
     const packs = await this.products.packTypesForStock([...new Set(dto.lines.map((l) => l.pack_type_id))]);
     const invalid: InvalidLine[] = [];
@@ -110,7 +110,7 @@ export class StockCommandsService {
     actor: StockActor,
   ): Promise<{ lines: { packTypeId: string; delta: number; quantityAfter: number }[]; flagged: boolean }> {
     const note = cleanText(dto.note);
-    if (!(await this.locations.findById(dto.location_id))) throw locationNotFound();
+    if (!(await this.locations.findInScope(dto.location_id, actor.membershipId))) throw locationNotFound();
 
     const packs = await this.products.packTypesForStock([...new Set(dto.lines.map((l) => l.pack_type_id))]);
     const invalid: InvalidLine[] = [];
@@ -166,7 +166,7 @@ export class StockCommandsService {
     approval: { approvalId: string; deviceId: string; receivedAt: Date } | null = null,
   ): Promise<{ fromAfter: number; toAfter: number; unitsAdded: number; approvedByMembershipId: string }> {
     const note = cleanText(dto.note);
-    if (!(await this.locations.findById(dto.location_id))) throw locationNotFound();
+    if (!(await this.locations.findInScope(dto.location_id, actor.membershipId))) throw locationNotFound();
     let approvedByMembershipId: string | undefined;
     if (approval) {
       const approver = await this.approvals.use('STOCK_CONVERT', {
@@ -214,7 +214,7 @@ export class StockCommandsService {
         sign > 0 ? 'This reason adds stock; use a positive change.' : 'This reason removes stock; use a negative change.',
       );
     }
-    if (!(await this.locations.findById(dto.location_id))) throw locationNotFound();
+    if (!(await this.locations.findInScope(dto.location_id, actor.membershipId))) throw locationNotFound();
     const packs = await this.products.packTypesForStock([dto.pack_type_id]);
     if (!packs.has(dto.pack_type_id)) throw new StockError('PACK_TYPE_NOT_FOUND', 'Pack type not found.');
 
@@ -242,9 +242,9 @@ export class StockCommandsService {
     return quantity;
   }
 
-  /** New stock only arrives at an active location of this business. */
-  private async activeLocation(id: string): Promise<void> {
-    const location = await this.locations.findById(id);
+  /** New stock only arrives at an active location of this business, in the member's scope. */
+  private async activeLocation(id: string, membershipId: string): Promise<void> {
+    const location = await this.locations.findInScope(id, membershipId);
     if (!location) throw locationNotFound();
     if (location.archivedAt) throw new StockError('LOCATION_ARCHIVED', 'This location is archived.');
   }

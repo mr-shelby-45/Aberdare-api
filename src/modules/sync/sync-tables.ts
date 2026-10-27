@@ -14,11 +14,12 @@ import type { ResultValue } from './command-outcome.js';
 export const SYNC_TABLE_NAMES = ['location', 'product', 'pack_type', 'product_barcode', 'stock_balance', 'sale', 'sale_item', 'payment'] as const;
 export type SyncTableName = (typeof SYNC_TABLE_NAMES)[number];
 
-/** What the reader may see: costs, and all sales or only the reader's own (Phase E4). */
+/** What the reader may see: costs, all sales or only the reader's own (Phase E4), and the allowed locations (Phase T2: null = all). */
 export interface SyncView {
   costs: boolean;
   allSales: boolean;
   membershipId: string;
+  locationIds: string[] | null;
 }
 
 /** One row as the phone receives it: snake_case, money as strings, times as ISO text. */
@@ -90,9 +91,10 @@ export class SyncTables {
       {
         name: 'location',
         permission: null,
-        deletes: true,
-        page: async (after, limit) => (await locations.pageForSync(after, limit)).map(locationRow),
-        byIds: async (ids) => (await locations.byIdsForSync(ids)).map(locationRow),
+        // Never deleted by the app; a row not found is outside the reader's location scope (T2).
+        deletes: false,
+        page: async (after, limit, view) => (await locations.pageForSync(after, limit, view.locationIds)).map(locationRow),
+        byIds: async (ids, view) => (await locations.byIdsForSync(ids, view.locationIds)).map(locationRow),
       },
       {
         name: 'product',
@@ -118,9 +120,10 @@ export class SyncTables {
       {
         name: 'stock_balance',
         permission: 'stock.view',
-        deletes: true,
-        page: async (after, limit) => (await stock.balancesPageForSync(after, limit)).map(balanceRow),
-        byIds: async (ids) => (await stock.balancesByIdsForSync(ids)).map(balanceRow),
+        // Never deleted by the app; a row not found is outside the reader's location scope (T2).
+        deletes: false,
+        page: async (after, limit, view) => (await stock.balancesPageForSync(after, limit, view.locationIds)).map(balanceRow),
+        byIds: async (ids, view) => (await stock.balancesByIdsForSync(ids, view.locationIds)).map(balanceRow),
       },
       // Sales (Phase E4, docs/phase-e-design.md section 8): every member, but a
       // member without sales.void receives only their own sales and their

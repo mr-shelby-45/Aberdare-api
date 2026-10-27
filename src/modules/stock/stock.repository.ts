@@ -206,9 +206,11 @@ export class StockRepository {
   async balancesPageForSync(
     afterId: string | null,
     limit: number,
+    // Phase T2: only balances at these locations, or all when null.
+    locationIds: string[] | null = null,
   ): Promise<{ id: string; locationId: string; packTypeId: string; quantity: number; updatedAt: Date }[]> {
     return currentTx().stockBalance.findMany({
-      where: afterId ? { id: { gt: afterId } } : {},
+      where: { ...(afterId ? { id: { gt: afterId } } : {}), ...(locationIds ? { locationId: { in: locationIds } } : {}) },
       orderBy: { id: 'asc' },
       take: limit,
       select: { id: true, locationId: true, packTypeId: true, quantity: true, updatedAt: true },
@@ -218,10 +220,11 @@ export class StockRepository {
   /** Phase D3 changes: these balance rows as they are now (missing ids are simply absent). */
   async balancesByIdsForSync(
     ids: string[],
+    locationIds: string[] | null = null,
   ): Promise<{ id: string; locationId: string; packTypeId: string; quantity: number; updatedAt: Date }[]> {
     if (ids.length === 0) return [];
     return currentTx().stockBalance.findMany({
-      where: { id: { in: ids } },
+      where: { id: { in: ids }, ...(locationIds ? { locationId: { in: locationIds } } : {}) },
       select: { id: true, locationId: true, packTypeId: true, quantity: true, updatedAt: true },
     });
   }

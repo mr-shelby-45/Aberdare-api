@@ -170,13 +170,13 @@ export class StockService {
   }
 
   /** For the sync snapshot (Phase D2): every balance row, zero and negative too, in id order. */
-  async balancesPageForSync(afterId: string | null, limit: number) {
-    return this.repo.balancesPageForSync(afterId, limit);
+  async balancesPageForSync(afterId: string | null, limit: number, locationIds: string[] | null = null) {
+    return this.repo.balancesPageForSync(afterId, limit, locationIds);
   }
 
   /** For sync changes (Phase D3): these balance rows as they are now; missing ones are absent. */
-  async balancesByIdsForSync(ids: string[]) {
-    return this.repo.balancesByIdsForSync(ids);
+  async balancesByIdsForSync(ids: string[], locationIds: string[] | null = null) {
+    return this.repo.balancesByIdsForSync(ids, locationIds);
   }
 
   /**

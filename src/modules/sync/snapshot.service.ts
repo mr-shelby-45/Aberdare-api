@@ -2,7 +2,9 @@ import { Injectable } from '@nestjs/common';
 import { ApiError } from '../../common/errors/api.error.js';
 import { SignedCursor, cursorUuid } from '../../common/paging/signed-cursor.js';
 import { DevicesService } from '../devices/devices.service.js';
+import { LocationsService } from '../locations/locations.service.js';
 import { ChangeFeedService } from './change-feed.service.js';
+import type { CursorView } from './changes-cursor.js';
 import type { SnapshotQueryDto } from './dto/snapshot-query.dto.js';
 import { SYNC_TABLE_NAMES, type SyncRow, type SyncTableName, SyncTables, type SyncView } from './sync-tables.js';
 
@@ -35,6 +37,7 @@ export class SnapshotService {
     private readonly feed: ChangeFeedService,
     private readonly cursor: SignedCursor,
     private readonly devices: DevicesService,
+    private readonly locations: LocationsService,
   ) {}
 
   /**
@@ -45,7 +48,7 @@ export class SnapshotService {
    * next page. A page cursor is bound to its business and table.
    */
   async page(query: SnapshotQueryDto, reader: SyncReader): Promise<SnapshotPage> {
-    const view = syncView(reader);
+    const { view, cursorView } = await syncView(reader, this.locations);
     const limit = pageLimit(query.limit);
     let table: SyncTableName;
     let after: string | null = null;
@@ -62,7 +65,7 @@ export class SnapshotService {
     } else if (query.table !== undefined) {
       table = query.table;
     } else {
-      startCursor = await this.feed.startCursor(reader.businessId, view);
+      startCursor = await this.feed.startCursor(reader.businessId, cursorView);
       table = SYNC_TABLE_NAMES[0];
     }
 
@@ -87,9 +90,19 @@ export class SnapshotService {
   }
 }
 
-/** What this reader may see, from the live session (Phase D costs; Phase E4 sales). */
-export function syncView(reader: SyncReader): SyncView {
-  return { costs: reader.permissions.has('costs.view'), allSales: reader.permissions.has('sales.void'), membershipId: reader.membershipId };
+/**
+ * What this reader may see, from the live session (Phase D costs; Phase E4
+ * sales) and the location scope resolved now (Phase T2), and what the changes
+ * cursor binds of it.
+ */
+export async function syncView(reader: SyncReader, locations: LocationsService): Promise<{ view: SyncView; cursorView: CursorView }> {
+  const scope = await locations.scopeOf(reader.membershipId);
+  const costs = reader.permissions.has('costs.view');
+  const allSales = reader.permissions.has('sales.void');
+  return {
+    view: { costs, allSales, membershipId: reader.membershipId, locationIds: scope.ids() },
+    cursorView: { costs, allSales, scope: scope.digest() },
+  };
 }
 
 /** limit: default 500; above 500 is quietly capped; 0 is refused (as for the other lists). */

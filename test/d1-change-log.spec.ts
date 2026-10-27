@@ -161,8 +161,8 @@ describe('D1: change_log, cursor, prune and device stamp', { timeout: 180_000 },
   it('3. gap test: an open T1 hides its row and the later committed T2; after T1 commits both arrive once, in (txid, id) order', async () => {
     const s = await seedShop(tenants);
     // The phone's cursor from before either change.
-    const before = await tenants.run(s.biz, () => feed.startCursor(s.biz, { costs: false, allSales: false }));
-    const start = await tenants.run(s.biz, () => feed.open(before, s.biz, { costs: false, allSales: false }));
+    const before = await tenants.run(s.biz, () => feed.startCursor(s.biz, { costs: false, allSales: false, scope: 'all' }));
+    const start = await tenants.run(s.biz, () => feed.open(before, s.biz, { costs: false, allSales: false, scope: 'all' }));
 
     // T1 writes first (lower change_log id, lower txid) and stays open.
     const t1 = await openTransaction(s.biz);
@@ -213,7 +213,7 @@ describe('D1: change_log, cursor, prune and device stamp', { timeout: 180_000 },
       }),
     ).rejects.toThrow('rolled back');
     expect(await logRows(s.biz)).toEqual(before);
-    const start = await tenants.run(s.biz, () => feed.open(feed.sign(s.biz, { txid: '0', id: '0' }, { costs: false, allSales: false }), s.biz, { costs: false, allSales: false }));
+    const start = await tenants.run(s.biz, () => feed.open(feed.sign(s.biz, { txid: '0', id: '0' }, { costs: false, allSales: false, scope: 'all' }), s.biz, { costs: false, allSales: false, scope: 'all' }));
     expect((await tenants.run(s.biz, () => feed.finishedAfter(start, 100))).map((r) => r.tableName).sort()).toEqual(['location', 'pack_type', 'pack_type', 'product']);
   });
 
@@ -221,8 +221,8 @@ describe('D1: change_log, cursor, prune and device stamp', { timeout: 180_000 },
   it('5. tampered, unsigned, malformed and another business’s cursors are the same 422; a costs mismatch is 410 either way', async () => {
     const a = await seedShop(tenants, 'Shop A');
     const b = await seedShop(tenants, 'Shop B');
-    const good = await tenants.run(a.biz, () => feed.startCursor(a.biz, { costs: false, allSales: false }));
-    const open = (biz: string, raw: string, costs: boolean) => failure(() => tenants.run(biz, () => feed.open(raw, biz, { costs, allSales: false })));
+    const good = await tenants.run(a.biz, () => feed.startCursor(a.biz, { costs: false, allSales: false, scope: 'all' }));
+    const open = (biz: string, raw: string, costs: boolean) => failure(() => tenants.run(biz, () => feed.open(raw, biz, { costs, allSales: false, scope: 'all' })));
 
     expect(await open(a.biz, good, false)).toBeNull();
     const tampered = `${good.slice(0, 5)}${good[5] === 'A' ? 'B' : 'A'}${good.slice(6)}`;
@@ -238,7 +238,7 @@ describe('D1: change_log, cursor, prune and device stamp', { timeout: 180_000 },
     // Issued without costs, read by a member who now sees costs: 410; and the other way round.
     const snapshot = { status: 410, code: 'SNAPSHOT_REQUIRED', message: expect.any(String) };
     expect(await open(a.biz, good, true)).toEqual(snapshot);
-    const withCosts = await tenants.run(a.biz, () => feed.startCursor(a.biz, { costs: true, allSales: false }));
+    const withCosts = await tenants.run(a.biz, () => feed.startCursor(a.biz, { costs: true, allSales: false, scope: 'all' }));
     expect(await open(a.biz, withCosts, false)).toEqual(snapshot);
     expect(await open(a.biz, withCosts, true)).toBeNull();
   });
@@ -346,8 +346,8 @@ describe('D1: change_log, cursor, prune and device stamp', { timeout: 180_000 },
       id: newest.id,
     });
 
-    const at = (p: ChangePosition) => feed.sign(a.biz, p, { costs: false, allSales: false });
-    const open = (raw: string) => failure(() => tenants.run(a.biz, () => feed.open(raw, a.biz, { costs: false, allSales: false })));
+    const at = (p: ChangePosition) => feed.sign(a.biz, p, { costs: false, allSales: false, scope: 'all' });
+    const open = (raw: string) => failure(() => tenants.run(a.biz, () => feed.open(raw, a.biz, { costs: false, allSales: false, scope: 'all' })));
     expect(await open(at({ txid: '0', id: '0' }))).toMatchObject({ status: 410, code: 'SNAPSHOT_REQUIRED' });
     expect(await open(at({ txid: newest.txid, id: String(BigInt(newest.id) - 1n) }))).toMatchObject({ status: 410, code: 'SNAPSHOT_REQUIRED' });
     expect(await open(at({ txid: newest.txid, id: newest.id }))).toBeNull();

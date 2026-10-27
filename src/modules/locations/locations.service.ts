@@ -4,6 +4,7 @@ import { Clock } from '../../common/time/clock.js';
 import { uniqueViolationConstraint } from '../../database/db-errors.js';
 import { AuditService } from '../audit/audit.service.js';
 import { StaffService } from '../staff/staff.service.js';
+import { LocationScope, type ResolvedScope } from './location-scope.js';
 import type { CreateLocationDto } from './dto/create-location.dto.js';
 import type { UpdateLocationDto } from './dto/update-location.dto.js';
 import { type LocationRow, LocationsRepository } from './locations.repository.js';
@@ -20,7 +21,24 @@ export class LocationsService {
     private readonly audit: AuditService,
     private readonly clock: Clock,
     private readonly staff: StaffService,
+    private readonly scope: LocationScope,
   ) {}
+
+  /** The member's location scope (Phase T2), resolved now from the live membership. */
+  async scopeOf(membershipId: string): Promise<ResolvedScope> {
+    return this.scope.resolve(membershipId);
+  }
+
+  /**
+   * Phase T2: the location, if it exists in this business and the member's
+   * scope allows it. null for a missing one, another business's, and one
+   * outside the scope alike, so the scope never reveals that a location exists.
+   */
+  async findInScope(id: string, membershipId: string): Promise<LocationRow | null> {
+    const location = await this.repo.findById(id);
+    if (!location || !(await this.scope.resolve(membershipId)).allows(id)) return null;
+    return location;
+  }
 
   /** The default location, created by signup in the signup transaction. */
   async createDefault(actorMembershipId: string): Promise<LocationRow> {
@@ -35,14 +53,15 @@ export class LocationsService {
     return location;
   }
 
-  /** For the sync snapshot (Phase D2): every location, archived too, in id order. */
-  async pageForSync(afterId: string | null, limit: number): Promise<LocationRow[]> {
-    return this.repo.pageForSync(afterId, limit);
+  /** For the sync snapshot (Phase D2): every location in scope (Phase T2: null = all), archived too, in id order. */
+  async pageForSync(afterId: string | null, limit: number, onlyIds: string[] | null = null): Promise<LocationRow[]> {
+    return this.repo.pageForSync(afterId, limit, onlyIds);
   }
 
-  /** For sync changes (Phase D3): these locations as they are now; missing ones are absent. */
-  async byIdsForSync(ids: string[]): Promise<LocationRow[]> {
-    return this.repo.byIdsForSync(ids);
+  /** For sync changes (Phase D3): these locations as they are now, only those in scope (Phase T2: null = all); others are absent. */
+  async byIdsForSync(ids: string[], onlyIds: string[] | null = null): Promise<LocationRow[]> {
+    const allowed = onlyIds === null ? null : new Set(onlyIds);
+    return (await this.repo.byIdsForSync(ids)).filter((l) => allowed === null || allowed.has(l.id));
   }
 
   /** For the stock commands (Phase C2). Another business's id gives null, like a missing one. */
@@ -50,8 +69,9 @@ export class LocationsService {
     return this.repo.findById(id);
   }
 
-  async list(includeArchived: boolean): Promise<LocationRow[]> {
-    return this.repo.list(includeArchived);
+  /** GET /v1/locations: a field attendant sees only the locations assigned to them (Phase T2). */
+  async list(includeArchived: boolean, membershipId: string): Promise<LocationRow[]> {
+    return this.repo.list(includeArchived, (await this.scope.resolve(membershipId)).ids());
   }
 
   /**

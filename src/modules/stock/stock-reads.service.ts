@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ApiError } from '../../common/errors/api.error.js';
 import { type CursorValues, SignedCursor, cursorUuid } from '../../common/paging/signed-cursor.js';
+import { LocationsService } from '../locations/locations.service.js';
 import type { ListMovementsQueryDto } from './dto/list-movements-query.dto.js';
 import type { ListStockQueryDto } from './dto/list-stock-query.dto.js';
 import { type BalanceRow, type MovementReadRow, StockReadsRepository } from './stock-reads.repository.js';
@@ -19,10 +20,12 @@ export class StockReadsService {
   constructor(
     private readonly repo: StockReadsRepository,
     private readonly cursor: SignedCursor,
+    private readonly locations: LocationsService,
   ) {}
 
   /** Hides zero rows unless include_zero; always shows negative ones. */
-  async balances(query: ListStockQueryDto): Promise<{ balances: BalanceRow[]; nextCursor: string | null }> {
+  /** Phase T2: only the member's allowed locations; a location_id outside them gives an empty list, like an unknown one. */
+  async balances(query: ListStockQueryDto, membershipId: string): Promise<{ balances: BalanceRow[]; nextCursor: string | null }> {
     const filters: CursorValues = {
       location_id: query.location_id ?? null,
       product_id: query.product_id ?? null,
@@ -40,6 +43,7 @@ export class StockReadsService {
     }
     // One row more than asked tells whether there is a next page.
     const rows = await this.repo.balances({
+      scopeIds: (await this.locations.scopeOf(membershipId)).ids(),
       locationId: query.location_id ?? null,
       productId: query.product_id ?? null,
       includeZero: filters.include_zero === true,
@@ -64,7 +68,7 @@ export class StockReadsService {
   }
 
   /** Newest first. */
-  async movements(query: ListMovementsQueryDto): Promise<{ movements: MovementReadRow[]; nextCursor: string | null }> {
+  async movements(query: ListMovementsQueryDto, membershipId: string): Promise<{ movements: MovementReadRow[]; nextCursor: string | null }> {
     const from = query.from === undefined ? null : new Date(query.from);
     const to = query.to === undefined ? null : new Date(query.to);
     if ((from && Number.isNaN(from.getTime())) || (to && Number.isNaN(to.getTime()))) {
@@ -90,6 +94,7 @@ export class StockReadsService {
       after = { occurredKey: v.after_occurred, id };
     }
     const rows = await this.repo.movements({
+      scopeIds: (await this.locations.scopeOf(membershipId)).ids(),
       locationId: query.location_id ?? null,
       packTypeId: query.pack_type_id ?? null,
       productId: query.product_id ?? null,

@@ -33,3 +33,28 @@ Filled in step by step. The full summary (see `docs/phase-t-design.md` section 1
 **Things to know:**
 1. Adding an enum value (`ALTER TYPE role_preset ADD VALUE`) works inside Prisma's migration, but Postgres refuses to use the new value in the same transaction; nothing in `*_t1_field_tables` uses it.
 2. Audit `occurred_at` comes from the database, not the fake clock, so audit rows of one test still sort in real order. My first draft of test 5 assumed otherwise and was corrected.
+
+## T2: Location scope (passed)
+
+**Result:** new 8, Phase T cumulative 13 (`test/t2-location-scope.spec.ts` plus the T1 file), all passing in the gate run. The earlier files these changes touch (D1 to D4, E3 to E5, C2, B1) passed together before the gate: 10 files, 84 of 84. The full suite passed: 40 files, 423 of 423 (491.3 s). Lint, type-check, build and the drift check were clean. No schema change and no migration.
+
+**Built (approved by Ian on 2026-10-27, with the seven recommended answers):**
+- `LocationScope` (`src/modules/locations/location-scope.ts`), the one place that decides: `resolve(membershipId)` reads the live membership in the current transaction, per command and per request (answer 1). A `FIELD_ATTENDANT` gets the ids of every location assigned to them, archived ones included; everyone else gets "all" without a further query. `ResolvedScope` answers `allows(id)`, `ids()` (null for all) and `digest()` (`"all"`, or the first 16 hex characters of a SHA-256 over the sorted ids, answer 3).
+- Commands: `LocationsService.findInScope(id, membershipId)` replaces the plain lookup in `sale.create` and in `stock.receive`, `stock.adjust`, `stock.count` and `stock.convert` (answer 6): outside the scope is `LOCATION_NOT_FOUND`, exactly like a missing location. `payment.attach` and `sale.void` answer `SALE_NOT_FOUND` for a sale at a location outside the scope, checked before any approval is used.
+- Reads: `GET /v1/stock` and `GET /v1/stock/movements` add `location_id = ANY(<allowed>)` (a filter outside the scope is the same empty list as an unknown id); `GET /v1/locations` shows a field attendant only their own locations, archived ones with `include_archived=true` (answer 4). Sales reads are unchanged (answer 5). `StockModule` now imports `LocationsModule`.
+- Sync: `SyncView.locationIds`; the `location` and `stock_balance` tables page and look up only allowed rows, and send no delete markers (`deletes: false`; the app can delete neither, answer 2). `syncView()` resolves the scope and returns both the view and the cursor view.
+- The changes cursor binds `scope` next to `costs` and `all_sales`: a different scope is `410 SNAPSHOT_REQUIRED`, a cursor without `scope` is `422`.
+- A field attendant with no assigned location cannot sell (`LOCATION_NOT_FOUND`) and receives no location or balance rows (answer 7).
+
+**Mutations (each reverted and checked with `cmp`; no `MUTATION` marker left):**
+- Design 1, no scope check in `sale.create`: T2 test 1 failed (a sale at the main shop was accepted).
+- Design 2, no scope filter in the stock reads: T2 test 4 failed (all three locations' balances shown).
+- Design 3, no scope filter in `changes` (`stock_balance` lookups): T2 test 5 failed (other locations' balances delivered).
+- Design 4, `scope` left out of the cursor comparison: T2 test 6 failed (`200` instead of `410`).
+
+**Earlier tests changed by T2 (mechanical; no assertion weakened):**
+- D1 and D2: the hand-built cursor views gain `scope: 'all'`.
+
+**Things to know:**
+1. Reassigning a van (archive it, create a new field location for someone else) leaves the old location in the original attendant's scope, so their offline sales into it are still accepted; the new member's scope changes, so their cursor is `410`.
+2. My first draft of test 2 expected a sale into a new, empty van to be `ACCEPTED`; it is saved and `FLAGGED / STOCK_NEGATIVE`, as for any sale beyond stock.

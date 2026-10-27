@@ -46,6 +46,8 @@ export interface MovementReadRow {
 @Injectable()
 export class StockReadsRepository {
   async balances(options: {
+    // Phase T2: the member's allowed locations, or null for all.
+    scopeIds: string[] | null;
     locationId: string | null;
     productId: string | null;
     includeZero: boolean;
@@ -53,7 +55,7 @@ export class StockReadsRepository {
     after: { productName: string; packTypeId: string; locationId: string } | null;
     limit: number;
   }): Promise<BalanceRow[]> {
-    const { locationId, productId, includeZero, includeArchived, after, limit } = options;
+    const { scopeIds, locationId, productId, includeZero, includeArchived, after, limit } = options;
     const rows = await currentTx().$queryRaw<
       {
         location_id: string;
@@ -75,6 +77,7 @@ export class StockReadsRepository {
         JOIN location l ON l.business_id = b.business_id AND l.id = b.location_id
        WHERE b.business_id = ${currentBusinessId()}::uuid
          AND (${locationId}::uuid IS NULL OR b.location_id = ${locationId}::uuid)
+         AND (${scopeIds}::uuid[] IS NULL OR b.location_id = ANY(${scopeIds}::uuid[]))
          AND (${productId}::uuid IS NULL OR p.id = ${productId}::uuid)
          AND (${includeZero}::boolean OR b.quantity <> 0)
          AND (${includeArchived}::boolean OR p.archived_at IS NULL)
@@ -98,6 +101,8 @@ export class StockReadsRepository {
 
   /** Newest first by (occurred_at, id), on the C2 index. */
   async movements(options: {
+    // Phase T2: the member's allowed locations, or null for all.
+    scopeIds: string[] | null;
     locationId: string | null;
     packTypeId: string | null;
     productId: string | null;
@@ -107,7 +112,7 @@ export class StockReadsRepository {
     after: { occurredKey: string; id: string } | null;
     limit: number;
   }): Promise<MovementReadRow[]> {
-    const { locationId, packTypeId, productId, type, from, to, after, limit } = options;
+    const { scopeIds, locationId, packTypeId, productId, type, from, to, after, limit } = options;
     const rows = await currentTx().$queryRaw<
       {
         id: string;
@@ -142,6 +147,7 @@ export class StockReadsRepository {
         LEFT JOIN membership mem ON mem.business_id = m.business_id AND mem.id = m.created_by_membership_id
        WHERE m.business_id = ${currentBusinessId()}::uuid
          AND (${locationId}::uuid IS NULL OR m.location_id = ${locationId}::uuid)
+         AND (${scopeIds}::uuid[] IS NULL OR m.location_id = ANY(${scopeIds}::uuid[]))
          AND (${packTypeId}::uuid IS NULL OR m.pack_type_id = ${packTypeId}::uuid)
          AND (${productId}::uuid IS NULL OR p.id = ${productId}::uuid)
          AND (${type}::text IS NULL OR m.movement_type = ${type}::text)

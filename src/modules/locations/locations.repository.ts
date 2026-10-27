@@ -29,10 +29,10 @@ export class LocationsRepository {
     });
   }
 
-  /** Default first, then by name. */
-  async list(includeArchived: boolean): Promise<LocationRow[]> {
+  /** Default first, then by name. Only these ids when given (the location scope, Phase T2). */
+  async list(includeArchived: boolean, onlyIds: string[] | null = null): Promise<LocationRow[]> {
     return currentTx().location.findMany({
-      where: includeArchived ? {} : { archivedAt: null },
+      where: { ...(includeArchived ? {} : { archivedAt: null }), ...(onlyIds ? { id: { in: onlyIds } } : {}) },
       orderBy: [{ isDefault: 'desc' }, { name: 'asc' }, { id: 'asc' }],
       select: SELECT,
     });
@@ -67,10 +67,10 @@ export class LocationsRepository {
     await currentTx().location.update({ where: { id }, data: { archivedAt: null }, select: { id: true } });
   }
 
-  /** Phase D2 snapshot: every location, archived too, keyset by id. */
-  async pageForSync(afterId: string | null, limit: number): Promise<LocationRow[]> {
+  /** Phase D2 snapshot: every location (or only these ids, Phase T2), archived too, keyset by id. */
+  async pageForSync(afterId: string | null, limit: number, onlyIds: string[] | null = null): Promise<LocationRow[]> {
     return currentTx().location.findMany({
-      where: afterId ? { id: { gt: afterId } } : {},
+      where: { ...(afterId ? { id: { gt: afterId } } : {}), ...(onlyIds ? { id: { in: onlyIds, ...(afterId ? { gt: afterId } : {}) } } : {}) },
       orderBy: { id: 'asc' },
       take: limit,
       select: SELECT,
@@ -81,5 +81,11 @@ export class LocationsRepository {
   async byIdsForSync(ids: string[]): Promise<LocationRow[]> {
     if (ids.length === 0) return [];
     return currentTx().location.findMany({ where: { id: { in: ids } }, select: SELECT });
+  }
+
+  /** Phase T2: every location assigned to this member, active or archived. */
+  async assignedIds(membershipId: string): Promise<string[]> {
+    const rows = await currentTx().location.findMany({ where: { assignedMembershipId: membershipId }, select: { id: true } });
+    return rows.map((r) => r.id);
   }
 }

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ApiError } from '../../common/errors/api.error.js';
 import { DevicesService } from '../devices/devices.service.js';
+import { LocationsService } from '../locations/locations.service.js';
 import { ChangeFeedService } from './change-feed.service.js';
 import type { ChangeLogRow, ChangePosition } from './change-log.repository.js';
 import type { ChangesQueryDto } from './dto/changes-query.dto.js';
@@ -30,14 +31,15 @@ export class ChangesService {
     private readonly feed: ChangeFeedService,
     private readonly tables: SyncTables,
     private readonly devices: DevicesService,
+    private readonly locations: LocationsService,
   ) {}
 
   async changes(query: ChangesQueryDto, reader: SyncReader): Promise<{ changes: SyncChange[]; nextCursor: string; hasMore: boolean }> {
-    const view = syncView(reader);
+    const { view, cursorView } = await syncView(reader, this.locations);
     const limit = pageLimit(query.limit);
     // 422 for a cursor that is not genuine or not this business's; 410 for
-    // another cost or sales visibility or a position older than the retained history.
-    const position = await this.feed.open(query.cursor, reader.businessId, view);
+    // another cost, sales or location visibility or a position older than the retained history.
+    const position = await this.feed.open(query.cursor, reader.businessId, cursorView);
 
     // limit counts log rows, not changes (decided in D3): the cursor moves by
     // exactly the rows read, including rows the reader cannot see and rows
@@ -82,7 +84,7 @@ export class ChangesService {
 
     // After the data is read, in the same transaction (docs/phase-d-design.md section 3).
     await this.devices.stampSync(reader.deviceId);
-    return { changes, nextCursor: this.feed.sign(reader.businessId, next, view), hasMore };
+    return { changes, nextCursor: this.feed.sign(reader.businessId, next, cursorView), hasMore };
   }
 }
 

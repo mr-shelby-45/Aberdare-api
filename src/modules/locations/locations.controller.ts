@@ -1,4 +1,5 @@
-import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, Req } from '@nestjs/common';
+import type { AuthedRequest } from '../../common/auth/request-auth.js';
 import { RequirePermission } from '../../common/auth/require-permission.decorator.js';
 import { CreateLocationDto } from './dto/create-location.dto.js';
 import { ListLocationsQueryDto } from './dto/list-locations-query.dto.js';
@@ -13,8 +14,8 @@ export class LocationsController {
   constructor(private readonly locations: LocationsService) {}
 
   @Get()
-  async list(@Query() query: ListLocationsQueryDto) {
-    const rows = await this.locations.list(query.include_archived === 'true');
+  async list(@Req() request: AuthedRequest, @Query() query: ListLocationsQueryDto) {
+    const rows = await this.locations.list(query.include_archived === 'true', request.session!.membership.id);
     return { locations: rows.map(toJson) };
   }
 
