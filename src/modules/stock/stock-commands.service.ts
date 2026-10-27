@@ -8,6 +8,7 @@ import type { AdjustStockDto } from './dto/adjust-stock.dto.js';
 import type { ConvertStockDto } from './dto/convert-stock.dto.js';
 import type { CountLineDto, CountStockDto } from './dto/count-stock.dto.js';
 import type { ReceiveLineDto, ReceiveStockDto } from './dto/receive-stock.dto.js';
+import type { TransferLineDto, TransferStockDto } from './dto/transfer-stock.dto.js';
 import { type InvalidLine, StockError, type StockLineReason } from './stock.error.js';
 import { type AdjustReason, MAX_BALANCE, type MovementContext } from './stock.repository.js';
 import { inLockOrder } from './lock-order.js';
@@ -242,6 +243,69 @@ export class StockCommandsService {
     return quantity;
   }
 
+  /**
+   * stock.issue (shop or warehouse to a field location) and stock.return (back),
+   * docs/phase-t-design.md section 5. Checked before any write, in this order
+   * (decided in T3): both locations exist and are in scope (LOCATION_NOT_FOUND,
+   * the same for either), their kinds (LOCATION_KIND_INVALID), archived state
+   * (LOCATION_ARCHIVED), then every line (INVALID_LINES). The writes are in
+   * StockService.transfer: strict at the source (STOCK_INSUFFICIENT), capped at
+   * the destination, in the global lock order. The note and reference are kept
+   * on the transfer row only.
+   */
+  async transfer(kind: 'ISSUE' | 'RETURN', dto: TransferStockDto, actor: StockActor) {
+    const reference = cleanText(dto.reference);
+    const note = cleanText(dto.note);
+    const from = await this.locations.findInScope(dto.from_location_id, actor.membershipId);
+    const to = await this.locations.findInScope(dto.to_location_id, actor.membershipId);
+    if (!from || !to) throw locationNotFound();
+    const isStore = (k: string) => k === 'SHOP' || k === 'WAREHOUSE';
+    const kindsFit = kind === 'ISSUE' ? isStore(from.kind) && to.kind === 'FIELD' : from.kind === 'FIELD' && isStore(to.kind);
+    if (!kindsFit) {
+      throw new StockError(
+        'LOCATION_KIND_INVALID',
+        kind === 'ISSUE' ? 'Stock is issued from a shop or warehouse to a field location.' : 'Stock is returned from a field location to a shop or warehouse.',
+      );
+    }
+    // An issue needs both ends active; a return may come from an archived field location.
+    if (to.archivedAt || (kind === 'ISSUE' && from.archivedAt)) throw new StockError('LOCATION_ARCHIVED', 'This location is archived.');
+
+    const packs = await this.products.packTypesForStock([...new Set(dto.lines.map((l) => l.pack_type_id))]);
+    const invalid: InvalidLine[] = [];
+    const seen = new Set<string>();
+    dto.lines.forEach((line, i) => {
+      const reason = transferLineProblem(line, seen, packs, kind === 'RETURN');
+      seen.add(line.pack_type_id);
+      if (reason) invalid.push({ line: i + 1, reason });
+    });
+    if (invalid.length > 0) {
+      throw new StockError('INVALID_LINES', 'Some lines are not valid. Nothing was moved.', invalid);
+    }
+
+    const r = await this.stock.transfer(
+      from.id,
+      to.id,
+      dto.lines.map((l) => ({ packTypeId: l.pack_type_id, quantity: l.quantity, unitsPerPack: packs.get(l.pack_type_id)!.unitsPerPack })),
+      { occurredAt: actor.occurredAt, createdByMembershipId: actor.membershipId, syncCommandId: actor.syncCommandId },
+      { kind, reference, note },
+    );
+    // Ids, the kind and quantities only: never the note or reference.
+    await this.audit.record({
+      action: kind === 'ISSUE' ? 'stock.issued' : 'stock.returned',
+      targetType: 'stock_transfer',
+      targetId: r.transferId,
+      metadata: {
+        transfer_id: r.transferId,
+        kind,
+        from_location_id: from.id,
+        to_location_id: to.id,
+        lines: dto.lines.map((l) => ({ pack_type_id: l.pack_type_id, quantity: l.quantity })),
+      },
+      actorMembershipId: actor.membershipId,
+    });
+    return r;
+  }
+
   /** New stock only arrives at an active location of this business, in the member's scope. */
   private async activeLocation(id: string, membershipId: string): Promise<void> {
     const location = await this.locations.findInScope(id, membershipId);
@@ -276,6 +340,25 @@ function lineProblem(
  * expected and the delta within -MAX_BALANCE..MAX_BALANCE, whole numbers).
  * Archived pack types are allowed.
  */
+/**
+ * The first problem of one transfer line, or null: a repeated pack type, the
+ * pack type (another business's is the same as a missing one), archived
+ * (refused on an issue only), then the quantity (1 to 1,000,000, whole).
+ */
+function transferLineProblem(
+  line: TransferLineDto,
+  seen: ReadonlySet<string>,
+  packs: ReadonlyMap<string, { archived: boolean }>,
+  allowArchived: boolean,
+): StockLineReason | null {
+  if (seen.has(line.pack_type_id)) return 'DUPLICATE_LINE';
+  const pack = packs.get(line.pack_type_id);
+  if (!pack) return 'PACK_TYPE_NOT_FOUND';
+  if (pack.archived && !allowArchived) return 'PACK_TYPE_ARCHIVED';
+  if (!Number.isSafeInteger(line.quantity) || line.quantity < 1 || line.quantity > MAX_LINE_QUANTITY) return 'QUANTITY_INVALID';
+  return null;
+}
+
 function countLineProblem(
   line: CountLineDto,
   seen: ReadonlySet<string>,

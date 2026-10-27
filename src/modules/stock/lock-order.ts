@@ -12,3 +12,19 @@ export function inLockOrder<T extends { pack_type_id: string }>(lines: T[], pack
     return a.pack_type_id < b.pack_type_id ? -1 : a.pack_type_id > b.pack_type_id ? 1 : 0;
   });
 }
+
+/**
+ * Phase T3: the global lock order of a statement on several locations (a
+ * transfer): by location id, then the shared pack order inside a location
+ * (larger units_per_pack first, then pack type id). An issue from S to V and
+ * a return from V to S lock the same pools in the same order, so they cannot
+ * deadlock each other; within one location it matches sales, counts and
+ * conversions.
+ */
+export function inTransferLockOrder<T extends { locationId: string; packTypeId: string; unitsPerPack: number }>(steps: T[]): T[] {
+  return [...steps].sort((a, b) => {
+    if (a.locationId !== b.locationId) return a.locationId < b.locationId ? -1 : 1;
+    if (a.unitsPerPack !== b.unitsPerPack) return b.unitsPerPack - a.unitsPerPack;
+    return a.packTypeId < b.packTypeId ? -1 : a.packTypeId > b.packTypeId ? 1 : 0;
+  });
+}

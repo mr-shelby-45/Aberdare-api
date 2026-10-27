@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { inTransferLockOrder } from './lock-order.js';
 import { StockError } from './stock.error.js';
 import { type AdjustReason, MAX_BALANCE, type MovementContext, StockRepository } from './stock.repository.js';
 
@@ -229,6 +230,58 @@ export class StockService {
         ctx,
       );
     }
+  }
+
+  /**
+   * Phase T3: moves lines from one location to another in one transaction
+   * (docs/phase-t-design.md section 5). The transfer row first (the
+   * movements point at it); then every balance statement of both locations
+   * in the global lock order (inTransferLockOrder: location id, then the pack
+   * order), the source a strict decrease (STOCK_INSUFFICIENT rolls the whole
+   * command back), the destination the capped non-strict increase; each with
+   * its TRANSFER_OUT or TRANSFER_IN movement. Results in the lines' order.
+   */
+  async transfer(
+    fromLocationId: string,
+    toLocationId: string,
+    lines: { packTypeId: string; quantity: number; unitsPerPack: number }[],
+    ctx: { occurredAt: Date; createdByMembershipId: string; syncCommandId: string },
+    transfer: { kind: 'ISSUE' | 'RETURN'; reference: string | null; note: string | null },
+  ): Promise<{ transferId: string; lines: { packTypeId: string; fromAfter: number; toAfter: number }[] }> {
+    for (const line of lines) assertPositiveWholeNumber(line.quantity);
+    const transferId = await this.repo.insertTransfer({ ...transfer, fromLocationId, toLocationId }, ctx);
+    const steps = lines.flatMap((l) => [
+      { locationId: fromLocationId, packTypeId: l.packTypeId, unitsPerPack: l.unitsPerPack, quantity: l.quantity, out: true },
+      { locationId: toLocationId, packTypeId: l.packTypeId, unitsPerPack: l.unitsPerPack, quantity: l.quantity, out: false },
+    ]);
+    const after = new Map<string, number>();
+    // One after another: queries on one transaction cannot run in parallel.
+    for (const step of inTransferLockOrder(steps)) {
+      let quantityAfter: number;
+      if (step.out) {
+        const left = await this.repo.decreaseIfAvailable(step.locationId, step.packTypeId, step.quantity);
+        if (left === null) throw new StockError('STOCK_INSUFFICIENT', 'Not enough stock at the source location.');
+        quantityAfter = left;
+      } else {
+        quantityAfter = withinLimit(await this.repo.changeBalance(step.locationId, step.packTypeId, step.quantity));
+      }
+      await this.repo.insertMovement(
+        {
+          locationId: step.locationId,
+          packTypeId: step.packTypeId,
+          quantityChange: step.out ? -step.quantity : step.quantity,
+          movementType: step.out ? 'TRANSFER_OUT' : 'TRANSFER_IN',
+          quantityAfter,
+          transferId,
+        },
+        ctx,
+      );
+      after.set(`${step.out ? 'out' : 'in'}:${step.packTypeId}`, quantityAfter);
+    }
+    return {
+      transferId,
+      lines: lines.map((l) => ({ packTypeId: l.packTypeId, fromAfter: after.get(`out:${l.packTypeId}`)!, toAfter: after.get(`in:${l.packTypeId}`)! })),
+    };
   }
 
   /** For sale.create from sync: always records the sale, flags an oversell. */

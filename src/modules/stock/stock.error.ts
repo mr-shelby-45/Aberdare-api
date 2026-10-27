@@ -14,7 +14,9 @@ export type StockErrorCode =
   | 'PACK_TYPES_NOT_CONVERTIBLE'
   | 'CONVERSION_RATIO_INVALID'
   // C5: the same for a missing, used, expired, foreign or rebound approval.
-  | 'APPROVAL_INVALID';
+  | 'APPROVAL_INVALID'
+  // T3: an issue or return between the wrong kinds of location.
+  | 'LOCATION_KIND_INVALID';
 
 export type StockLineReason =
   | 'DUPLICATE_LINE'

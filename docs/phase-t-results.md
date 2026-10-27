@@ -58,3 +58,21 @@ Filled in step by step. The full summary (see `docs/phase-t-design.md` section 1
 **Things to know:**
 1. Reassigning a van (archive it, create a new field location for someone else) leaves the old location in the original attendant's scope, so their offline sales into it are still accepted; the new member's scope changes, so their cursor is `410`.
 2. My first draft of test 2 expected a sale into a new, empty van to be `ACCEPTED`; it is saved and `FLAGGED / STOCK_NEGATIVE`, as for any sale beyond stock.
+
+## T3: Issue and return (passed)
+
+**Result:** new 11, Phase T cumulative 24 (`test/t3-transfers.spec.ts` plus the T1 and T2 files), all passing in the gate run. The three concurrency tests (20 issues against a balance of 5 and 20 copies of one command; opposite issues and returns with sales at the van; the forced opposite-direction test) passed 5 runs in a row. The full suite passed: 41 files, 434 of 434 (507.8 s). Lint, type-check, build and the drift check were clean. No schema change and no migration.
+
+**Built (approved by Ian on 2026-10-27, with the six recommended answers):**
+- `StockService.transfer()` (answer 1): the `stock_transfer` row first (the movements point at it), then every balance statement of both locations in one global order, `inTransferLockOrder()` in `src/modules/stock/lock-order.ts` (answer 2): by location id, then larger `units_per_pack` first, then pack type id. The source is the strict decrease (`decreaseIfAvailable`, `STOCK_INSUFFICIENT` rolls the whole command back), the destination the capped non-strict increase; each statement writes its `TRANSFER_OUT` or `TRANSFER_IN` movement with `quantity_after` and `transfer_id`.
+- `StockCommandsService.transfer('ISSUE' | 'RETURN', ...)` and the handlers `stock.issue` and `stock.return` (permission `stock.transfer`). Checks before any write, in this order (answer 4): both locations exist and are in scope (`LOCATION_NOT_FOUND`), kinds (`LOCATION_KIND_INVALID`: an issue goes from an active `SHOP` or `WAREHOUSE` to an active `FIELD` location, a return back), archived state (`LOCATION_ARCHIVED`; a return may come from an archived van), then the lines (answer 5: `DUPLICATE_LINE`, `PACK_TYPE_NOT_FOUND`, `PACK_TYPE_ARCHIVED` on an issue only, `QUANTITY_INVALID` for 1 to 1,000,000 whole). `STOCK_INSUFFICIENT` carries no detail (answer 6).
+- The note and reference are stored on the transfer row only (answer 3). Audit `stock.issued` and `stock.returned`: transfer id, kind, both locations and the lines; never the note or reference.
+- `MOVEMENT_TYPES` gains `TRANSFER_OUT` and `TRANSFER_IN`, so the movements read can filter by them.
+
+**Mutations (each reverted and checked with `cmp`; no `MUTATION` marker left):**
+- Design 5, a non-strict issue: T3 test 2 failed (an issue of 21 against 20 was accepted).
+- Design 6, source-first lock order: the forced T3 test 6 failed: Postgres reported `deadlock detected` (in its log) and the return ended `FAILED`. The forced test holds the shop's piece pool in an open transaction, starts the issue (it waits), then the return (with source first it takes the van pool and waits); released, the issue gets the shop pool and needs the van pool. With the global order both wait on the same first pool and both succeed.
+
+**Things to know:**
+1. The order of the two waiting commands matters in a forced deadlock test: the transaction first in the lock queue gets the released row. The issue must start first, or the mutation lets the return finish and no deadlock forms.
+2. A transfer's balance statements sort across both locations, so a source decrease can run after a destination increase; a short source still rolls everything back (one transaction).

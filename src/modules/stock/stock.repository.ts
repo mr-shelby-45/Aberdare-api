@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { currentBusinessId, currentTx } from '../../database/tenant.js';
 
-export const MOVEMENT_TYPES = ['RECEIVE', 'ADJUST', 'COUNT', 'CONVERT_OUT', 'CONVERT_IN', 'SALE', 'SALE_VOID'] as const;
+export const MOVEMENT_TYPES = ['RECEIVE', 'ADJUST', 'COUNT', 'CONVERT_OUT', 'CONVERT_IN', 'SALE', 'SALE_VOID', 'TRANSFER_OUT', 'TRANSFER_IN'] as const;
 export type MovementType = (typeof MOVEMENT_TYPES)[number];
 export const ADJUST_REASONS = ['DAMAGED', 'EXPIRED', 'LOST', 'FOUND', 'SUPPLIER_RETURN', 'CORRECTION', 'OTHER'] as const;
 export type AdjustReason = (typeof ADJUST_REASONS)[number];
@@ -31,6 +31,8 @@ export interface MovementRow {
   countedQuantity?: number | null;
   // SALE and SALE_VOID (Phase E): the sale the movement belongs to.
   saleId?: string | null;
+  // TRANSFER_OUT and TRANSFER_IN (Phase T3): the transfer.
+  transferId?: string | null;
 }
 
 // The largest balance a pool may hold, either way (docs/phase-c-design.md section 4; floor since C3): an
@@ -110,10 +112,23 @@ export class StockRepository {
         expectedQuantity: movement.expectedQuantity ?? null,
         countedQuantity: movement.countedQuantity ?? null,
         saleId: movement.saleId ?? null,
+        transferId: movement.transferId ?? null,
         occurredAt: ctx.occurredAt,
         createdByMembershipId: ctx.createdByMembershipId,
         syncCommandId: ctx.syncCommandId,
       },
+      select: { id: true },
+    });
+    return row.id;
+  }
+
+  /** Phase T3: the transfer row, before its movements (they point at it). Returns its id. */
+  async insertTransfer(
+    transfer: { kind: 'ISSUE' | 'RETURN'; fromLocationId: string; toLocationId: string; reference: string | null; note: string | null },
+    ctx: { occurredAt: Date; createdByMembershipId: string; syncCommandId: string },
+  ): Promise<string> {
+    const row = await currentTx().stockTransfer.create({
+      data: { businessId: currentBusinessId(), ...transfer, ...ctx },
       select: { id: true },
     });
     return row.id;
