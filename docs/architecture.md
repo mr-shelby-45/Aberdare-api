@@ -37,6 +37,7 @@ API process (NestJS + Fastify)  ----->  PostgreSQL  <-----  Worker process (pg-b
 ```
 
 - Two processes from one codebase: `main.ts` (API) and `worker.ts` (jobs). They share the database.
+- The worker (Phase F, `docs/phase-f-design.md`) is the Nest application context without HTTP, built by `createWorker()` (`src/create-worker.ts`), plus pg-boss (`JobQueue`, `src/jobs/`). It uses two connections: business data as `app_user` through `TenantRunner`, one business per short transaction, never bypassing RLS (it learns the businesses from `list_business_ids()` and runs each one in its own tenant transaction); and the queue as `queue_user`, which can reach only the `pgboss` schema. pg-boss's tables are created and upgraded by `pnpm queue:migrate` as the migration role; the worker never migrates and runs no DDL (queues are never partitioned). SIGTERM stops fetching and lets the running job finish. No sender call (push, SMS, email) inside a database transaction.
 - The API never calls SMS, push or Daraja inside a request transaction. It writes a row; the worker acts on it.
 - Errors: Sentry on the server, Crashlytics on the phone. Details in section 11.
 
@@ -323,22 +324,26 @@ Responses: 201 new order, 200 duplicate `external_id` (idempotent), 401 bad key,
 
 ## 10. Notifications
 
-**DECIDED.** A notification row is written in the same transaction as the event that causes it. The worker sends it, retries 3 times with growing delays, marks dead push tokens, and writes an `error_event` on final failure. The `notification` table needs: type, recipient membership, channel, payload, status, attempts, last error, sent time.
+**DECIDED in Phase F** (`docs/phase-f-design.md` sections 5 to 7, which win where they differ).
 
-| Event | Who | Channel |
-|---|---|---|
-| New online order | staff with orders.manage | push |
-| Order still new after 15 minutes | same | push (once) |
-| Payment arrived at till | staff with payments.confirm | push |
-| Payment unmatched for about 10 minutes | owner | push |
-| Flagged sale (oversell) | owner | in-app |
-| Carton broken into pieces | owner | in-app |
-| Low stock | owner | daily digest |
-| Subscription ending (7, 3, 1 days) | owner | SMS and push |
-| Device has not synced for days | owner | in-app |
-| Login code | user | SMS |
+- **Creating.** A notification row is written in the same transaction as the event that causes it, one row per recipient and channel, with a `dedupe_key` identifying the event (`INSERT ... ON CONFLICT DO NOTHING` on the unique `(business_id, recipient_membership_id, channel, dedupe_key)`), so a retried command makes one row and a rolled-back event makes none. `data` holds ids and counts only. Recipients are live, active members; never the person who caused the event unless stated. Notifying never makes a command fail.
+- **Channels.** `IN_APP` rows are created `SENT` and listed online (`GET /notifications`); `PUSH`, `SMS` and `EMAIL` rows start `PENDING` and are delivered by the worker through sender interfaces in `src/integrations/`. Fake senders until real accounts exist (open item 70).
+- **Delivering.** One atomic claim (`PENDING` to `SENDING`, attempts + 1) commits before the sender is called outside any transaction; the result is saved in a new short transaction. Retries: 3 attempts, after 30 seconds, 2 minutes and 10 minutes; a final failure makes the row `DEAD` and writes one `error_event`. A dead push token is cleared and the row is `DEAD` without retries. A sweeper every minute picks up due `PENDING` rows and `SENDING` rows stuck for more than 5 minutes. Delivery is at least once: a crash after the sender returned can send twice (open item 75).
+- **Retention.** Notifications and error events are kept 90 days (`purge_old_notifications()`, `purge_old_error_events()`).
 
-Retention for notifications: 90 days.
+| Event | Who | Channel | When built |
+|---|---|---|---|
+| `sale.flagged` (any flag) | active owners | in-app | Phase F |
+| `stock.converted` | active owners except the converter | in-app | Phase F |
+| `approval.used` (convert or void) | the approver; owners other than approver and requester | push and in-app; in-app | Phase F |
+| `settlement.variance` | active owners except the closer | push and in-app | Phase F |
+| `device.stale` (3 days without sync) | active owners | in-app | Phase F |
+| Integrity mismatch | support (`error_event`), not shops | none | Phase F |
+| Login code | user | SMS (Phase A, same sender interface) | Phase A |
+| New online order, order still new after 15 minutes | staff with orders.manage | push | Phase G |
+| Payment arrived at till, payment unmatched | staff with payments.confirm, owner | push | Phase M |
+| Low stock | owner | daily digest | later (needs reorder levels) |
+| Subscription ending (7, 3, 1 days) | owner | SMS and push | Phase G |
 
 ## 11. Errors, logging, time
 
@@ -396,9 +401,11 @@ Table list (exact columns are designed during the build and reviewed by Ian befo
 | sync_command | every received command: UUID unique, result, status, `occurred_at` (phone) and `received_at` (server) |
 | change_log | what changed, for `sync/changes`; each row carries its transaction id (`txid`, Phase D) |
 | subscription | plan, state, trial end, grace end, payments |
-| notification | see section 10 |
+| notification | see section 10. Built in F1: type, recipient membership (composite key), channel, `data` (jsonb object of ids and counts), status (`PENDING`, `SENDING`, `SENT`, `DEAD`), attempts, next attempt, last error (a code, at most 60 characters), sent and read times, dedupe key (unique per business, recipient and channel). Forced RLS; `app_user` may update only the delivery and read columns, never delete |
 | audit_log | see section 11. Built in Phase A: actor membership, action, target type and id, metadata (never secrets), ip, occurred_at. Append-only |
-| error_event | see section 11 |
+| error_event | support-only record of background failures (Phase F1): source, code, detail (at most 200 characters, no secrets), a plain nullable `business_id`. No RLS, a deliberate exception approved by Ian: `app_user` may only INSERT it (never read it, so no `RETURNING`), and the API never reads it; support reads it as the migration role |
+
+Functions of Phase F1 (`SECURITY DEFINER`, EXECUTE for `app_user` only): `list_business_ids(p_after, p_limit)` (owner `identity_owner`; business ids only, in id order, for the worker before any tenant is known), `purge_old_notifications(p_before)` and `purge_old_error_events(p_before)` (owner the migration role; the only deletes of those tables, using owner-only policies on `notification`, the `change_log_prune` pattern). `device.push_token` (from A1) is updatable by `app_user` so a dead token can be cleared. The `pgboss` schema belongs to pg-boss (migration role owns it; `queue_user` reads and writes it; `app_user` has no USAGE).
 
 Standard columns on tenant tables: `id uuid`, `business_id uuid`, `created_at timestamptz`, `updated_at timestamptz`. Primary keys are UUIDs. Records created offline use phone-generated UUIDs.
 
@@ -439,7 +446,8 @@ All under `/v1`, JSON, access token required unless stated.
 - **stock** (Phase C, `stock.view`, any active member; writes are sync commands only): `GET /stock?location_id=&product_id=&include_zero=&include_archived=&limit=&cursor=` (balances; zero rows hidden by default, negative rows shown), `GET /stock/movements?location_id=&pack_type_id=&product_id=&type=&from=&to=&limit=&cursor=` (newest first; the `unit_cost` key absent without `costs.view`), `GET /stock/approvers` (active members with `stock.convert`, names only), `POST /stock/approvals` (`{ approver_membership_id, approver_pin, purpose }`, 201 `{ approval_id, valid_until }`; every refusal is the same `403 APPROVAL_DENIED`; 10 per minute per IP)
 - **sales** (Phase E; writes are sync commands only): `GET /sales?from=&to=&location_id=&status=&created_by=&limit=&cursor=` (newest first; members without `sales.void` see only their own sales, and `created_by` is ignored for them), `GET /sales/:id` (items, payments, void details; `cost_price` only with `costs.view`; another member's sale is `404` for an attendant). Approvals keep their Phase C routes: `GET /stock/approvers?purpose=` (default `STOCK_CONVERT`, or `SALE_VOID`) and `POST /stock/approvals` with `purpose: "SALE_VOID"`; moving them to a neutral prefix was not worth the break
 - **field settlements** (Phase T, `field.settle`; the close is the `settlement.close` sync command): `GET /field/settlements/preview?location_id=` (the figures a close would store, read only), `GET /field/settlements?location_id=&limit=&cursor=` (newest first, signed cursor), `GET /field/settlements/:id` (with lines). Location reads, the stock reads and sync follow the field attendant's location scope. `POST /locations` takes `kind` and, for `FIELD`, `assigned_membership_id` (a `FIELD_ATTENDANT`); a field location is reassigned by archiving it and creating a new one.
-- **reads**: `/payments/pending`, `/orders`, `/reports/*`, `/audit-log`, `/notifications`, `/subscription`
+- **notifications** (Phase F, the recipient only, active member on an active device; no business parameter): `GET /notifications?unread=&limit=&cursor=` (only the caller's `IN_APP` rows, newest first by `(created_at, id)`, signed cursor, limit 20 by default, at most 100; rows `id, type, data, message, created_at, read_at`), `GET /notifications/unread-count` (`{ unread }`), `POST /notifications/read` (`{ ids: [...] }` 1 to 100, or `{ all: true }`; marks only the caller's, ignores other ids without saying which; idempotent)
+- **reads**: `/payments/pending`, `/orders`, `/reports/*`, `/audit-log`, `/subscription`
 - **sync**: `POST /sync/commands` (Phase B), `GET /sync/snapshot?table=&cursor=&limit=` (Phase D, any active member; `start_cursor` on the first page; cost fields only with `costs.view`, balances only with `stock.view`), `GET /sync/changes?cursor=&limit=` (Phase D; `410 SNAPSHOT_REQUIRED` for a cursor older than the retained history or issued under another cost visibility)
 - **manager actions**: voids are the `sale.void` sync command (Phase E), not a REST route; `POST /payments/:id/approve` (Phase M)
 - **orders**: `PATCH /orders/:id`; `POST /orders-inbox/key` (create or regenerate the shop key)
@@ -574,3 +582,16 @@ Found in the Phase T design (`docs/phase-t-design.md` section 14):
 67. Whether a field attendant's offline outbox is empty cannot be known by the server; `ATTENDANT_NOT_SYNCED` and `AFTER_SETTLEMENT` reduce the risk but do not remove it.
 68. Settlement in a long offline day: the attendant's phone may need days of sales synced first.
 69. Notifying the manager of large variances (Phase F).
+
+Found in the Phase F design (`docs/phase-f-design.md` section 15):
+
+70. Real adapters: Firebase push, Africa's Talking SMS, an email provider and sending domain (accounts needed; none exist yet). Until then login codes and pushes are fakes.
+71. Notification events for orders, payments at the till and unmatched payments (Phase M and G), the low-stock digest (needs reorder levels), subscription reminders (Phase G).
+72. A busy shop with many flagged sales makes many notifications; throttling or grouping is not built.
+73. Notifications are not in `snapshot` and `changes`; the app fetches them online.
+74. Worker health and alerting, and Sentry (Phase H). A dead worker is not noticed by anything yet.
+75. Push delivery is at least once (a duplicate push is possible after a crash).
+76. The per-business fan-out is fine for hundreds of businesses; measure before thousands (Phase H).
+77. Retention for `sync_command` and `audit_log` is undecided (`change_log` 30 days, notifications and error events 90 days).
+78. Notification language (Swahili) and quiet hours are the phone's job or later.
+79. Approval notifications go to the approver and owners; notifying a requester on refusal is not built.

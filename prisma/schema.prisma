@@ -41,6 +41,7 @@ model Business {
   stockTransfers    StockTransfer[]
   fieldSettlements  FieldSettlement[]
   fieldSettlementLines FieldSettlementLine[]
+  notifications     Notification[]
 
   @@map("business")
 }
@@ -448,6 +449,7 @@ model Membership {
   salesVoided           Sale[]            @relation("SaleVoidedBy")
   saleVoidsApproved     Sale[]            @relation("SaleVoidApprovedBy")
   paymentsCreated       Payment[]         @relation("PaymentCreatedBy")
+  notifications         Notification[]
   // Phase T.
   locationsAssigned     Location[]        @relation("LocationAssignee")
   transfersCreated      StockTransfer[]   @relation("TransferCreatedBy")
@@ -880,4 +882,62 @@ model FieldSettlementLine {
   @@unique([businessId, id])
   @@unique([businessId, settlementId, packTypeId])
   @@map("field_settlement_line")
+}
+
+// Phase F1 (docs/phase-f-design.md section 3): one notification per event,
+// recipient and channel. IN_APP rows are created SENT and only listed; PUSH,
+// SMS and EMAIL rows start PENDING and are delivered by the worker (F3).
+// app_user may update only the delivery and read columns; no DELETE (the
+// 90-day purge is purge_old_notifications()).
+model Notification {
+  id                    String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId            String     @map("business_id") @db.Uuid
+  // sale.flagged, stock.converted, approval.used, settlement.variance or device.stale.
+  type                  String
+  recipientMembershipId String     @map("recipient_membership_id") @db.Uuid
+  // IN_APP, PUSH, SMS or EMAIL.
+  channel               String
+  // Ids and counts only: never names, notes, phone numbers, PINs, codes or a customer's payment amounts.
+  data                  Json
+  // PENDING, SENDING, SENT or DEAD.
+  status                String
+  attempts              Int        @default(0)
+  nextAttemptAt         DateTime?  @map("next_attempt_at") @db.Timestamptz(6)
+  // An error code (at most 60 characters), never message text.
+  lastError             String?    @map("last_error")
+  sentAt                DateTime?  @map("sent_at") @db.Timestamptz(6)
+  readAt                DateTime?  @map("read_at") @db.Timestamptz(6)
+  // Identifies the event (for example "sale.flagged:<sale id>"): the same event twice makes one row.
+  dedupeKey             String     @map("dedupe_key")
+  createdAt             DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  business              Business   @relation(fields: [businessId], references: [id])
+  recipient             Membership @relation(fields: [businessId, recipientMembershipId], references: [businessId, id])
+
+  @@unique([businessId, id])
+  @@unique([businessId, recipientMembershipId, channel, dedupeKey])
+  // The recipient's list, newest first.
+  @@index([businessId, recipientMembershipId, createdAt(sort: Desc), id(sort: Desc)])
+  // The sweeper: due PENDING rows and stuck SENDING rows.
+  @@index([businessId, status, nextAttemptAt])
+  @@map("notification")
+}
+
+// Phase F1: support-only record of background failures (a final delivery
+// failure, an integrity mismatch, a failed business job). Not a tenant table:
+// business_id is a plain column (null for failures outside any business),
+// there is no read path in the API, and app_user may only INSERT (no RLS, an
+// exception approved by Ian; see the migration). Support reads it as the
+// migrator. Kept 90 days (purge_old_error_events()).
+model ErrorEvent {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // A job or component name.
+  source     String
+  code       String
+  // Short, no secrets, at most 200 characters.
+  detail     String?
+  businessId String?  @map("business_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([createdAt])
+  @@map("error_event")
 }

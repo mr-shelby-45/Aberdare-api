@@ -56,7 +56,7 @@ describe('step 4: migrations keep hand-written SQL', () => {
 
   describe('the database after all migrations', () => {
     it('every table with a business_id has RLS enabled and forced with the NULLIF shop_only policy', async () => {
-      const rows = await asAppUser(async (c) =>
+      const all = await asAppUser(async (c) =>
         (
           await c.query<{
             tbl: string;
@@ -75,6 +75,8 @@ describe('step 4: migrations keep hand-written SQL', () => {
             ORDER BY 1`)
         ).rows,
       );
+      const exception = all.filter((r) => r.tbl === 'error_event');
+      const rows = all.filter((r) => r.tbl !== 'error_event');
       const nullif = "(business_id = (NULLIF(current_setting('app.business_id'::text, true), ''::text))::uuid)";
       expect(rows.map((r) => r.tbl)).toEqual([
         'approval',
@@ -86,6 +88,7 @@ describe('step 4: migrations keep hand-written SQL', () => {
         'field_settlement_line',
         'location',
         'membership',
+        'notification', // Phase F1
         'pack_type',
         'payment',
         'product',
@@ -103,6 +106,9 @@ describe('step 4: migrations keep hand-written SQL', () => {
       for (const r of rows) {
         expect(r, r.tbl).toEqual({ tbl: r.tbl, rls: true, forced: true, using_expr: nullif, check_expr: nullif });
       }
+      // The one deliberate exception (Phase F1, approved by Ian): error_event has a business_id but no RLS.
+      // app_user may only INSERT it and nothing reads it in the API (the grants inventory in B5 pins that).
+      expect(exception).toEqual([{ tbl: 'error_event', rls: false, forced: false, using_expr: null, check_expr: null }]);
     });
 
     it('the triggers, their functions, the extension and the hand-written indexes exist', async () => {

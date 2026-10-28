@@ -18,7 +18,9 @@
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "start:worker": "node dist/worker",
+    "queue:migrate": "nest build && node dist/queue-migrate"
   },
   "dependencies": {
     "@fastify/helmet": "13.2.0",
@@ -33,6 +35,7 @@
     "class-validator": "0.15.1",
     "fastify": "5.12.7",
     "pg": "8.23.1",
+    "pg-boss": "12.38.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"
   },

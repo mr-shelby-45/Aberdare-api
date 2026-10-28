@@ -300,13 +300,12 @@ describe('D1: change_log, cursor, prune and device stamp', { timeout: 180_000 },
           return (e as Error).message;
         }
       });
-    for (const [column, value] of [['name', "'x'"], ['is_shared', 'true'], ['status', "'ACTIVE'"], ['last_seen_at', 'now()'], ['last_sync_at', 'now()']]) {
+    for (const [column, value] of [['name', "'x'"], ['is_shared', 'true'], ['status', "'ACTIVE'"], ['last_seen_at', 'now()'], ['last_sync_at', 'now()'], ['push_token', "'x'"] /* Phase F1: a dead token is cleared */]) {
       expect(await tryUpdate(column, value), column).toBe('allowed');
     }
     for (const [column, value] of [
       ['secret_hash', "'x'"],
       ['platform', "'ios'"],
-      ['push_token', "'x'"],
       ['business_id', `'${randomUUID()}'`],
       ['registered_by_membership_id', `'${w.owner.membershipId}'`],
       ['created_at', 'now()'],

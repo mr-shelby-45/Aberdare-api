@@ -1,6 +1,7 @@
 import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import pg from 'pg';
+import { migrateQueueSchema } from '../src/jobs/queue-schema.js';
 
 // Runs once before all test files: applies every migration to the test
 // database as migrator, exactly as a deploy would.
@@ -12,6 +13,8 @@ export default async function setup(): Promise<void> {
     env: { ...process.env, MIGRATION_DATABASE_URL: url },
     stdio: 'inherit',
   });
+  // pg-boss's own tables, as migrator, as a deploy does (pnpm queue:migrate; Phase F1).
+  await migrateQueueSchema(url);
   await fastCommitsForTests(url);
 }
 

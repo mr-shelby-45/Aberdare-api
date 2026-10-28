@@ -59,7 +59,7 @@ export async function resetTables(): Promise<void> {
     c.query(
       `TRUNCATE audit_log, otp_challenge, refresh_token, device_membership, device, membership, person,
                 change_log, sync_command, stock_conversion, stock_movement,
-                stock_balance, pack_type, location, product, business CASCADE`,
+                stock_balance, pack_type, location, product, business, error_event CASCADE`,
     ),
   );
   // Phase D1: the prune horizon back to "nothing removed".

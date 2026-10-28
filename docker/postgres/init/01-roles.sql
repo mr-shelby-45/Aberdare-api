@@ -6,17 +6,23 @@
 --           here; each migration grants exactly what the app needs per table.
 -- identity_owner: no login. Owns only the identity lookup functions of the
 --           non-tenant access path (docs/phase-a-design.md section 5).
+-- queue_user: used by pg-boss in the worker (Phase F1). Reads and writes only
+--           the pgboss schema; the f1_queue_schema migration grants it that.
 --
 -- On a hosted database an administrator runs the CREATE ROLE and GRANT
 -- statements below once, by hand (this script does not run there).
 
 \getenv migrator_password MIGRATOR_PASSWORD
 \getenv app_user_password APP_USER_PASSWORD
+\getenv queue_user_password QUEUE_USER_PASSWORD
 
 CREATE ROLE migrator LOGIN PASSWORD :'migrator_password'
   NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 
 CREATE ROLE app_user LOGIN PASSWORD :'app_user_password'
+  NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT;
+
+CREATE ROLE queue_user LOGIN PASSWORD :'queue_user_password'
   NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT;
 
 CREATE ROLE identity_owner NOLOGIN

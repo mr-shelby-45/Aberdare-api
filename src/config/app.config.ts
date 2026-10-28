@@ -2,6 +2,7 @@ import {
   IsBoolean,
   IsIn,
   IsInt,
+  IsOptional,
   IsString,
   Max,
   Min,
@@ -36,6 +37,8 @@ export const CHANGE_LOG_RETENTION_DAYS = 30;
 export const SALES_SNAPSHOT_DAYS = 30;
 /** A field settlement needs the attendant's devices to have synced this recently (Phase T4, docs/phase-t-design.md section 6). */
 export const FIELD_SYNC_MAX_AGE_MINUTES = 10;
+/** How long the worker waits for running jobs when it shuts down (Phase F1, docs/phase-f-design.md section 4). */
+export const WORKER_SHUTDOWN_TIMEOUT_MS = 30_000;
 
 export class AppConfig {
   @IsIn(APP_ENVS)
@@ -100,6 +103,17 @@ export class AppConfig {
   @IsInt()
   @Min(1)
   changeLogRetentionDays!: number;
+
+  // Phase F1: pg-boss's connection, as the queue_user role (it can reach only
+  // the pgboss schema). Only the worker needs it; the worker refuses to start
+  // without it.
+  @IsOptional()
+  @IsString()
+  queueDatabaseUrl?: string;
+
+  @IsInt()
+  @Min(1000)
+  workerShutdownTimeoutMs!: number;
 }
 
 /** Reads and validates the configuration. Throws, listing the bad settings, if invalid. */
@@ -119,6 +133,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     rateLimitMax: toInt(env.RATE_LIMIT_MAX, 100),
     rateLimitWindowMs: toInt(env.RATE_LIMIT_WINDOW_MS, 60_000),
     changeLogRetentionDays: CHANGE_LOG_RETENTION_DAYS,
+    queueDatabaseUrl: env.QUEUE_DATABASE_URL?.trim() || undefined,
+    workerShutdownTimeoutMs: WORKER_SHUTDOWN_TIMEOUT_MS,
   });
   const errors = validateSync(config);
   if (errors.length > 0) {

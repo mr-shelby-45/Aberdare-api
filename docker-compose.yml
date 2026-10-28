@@ -6,9 +6,10 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_dev_only}
-      # Read by docker/postgres/init/01-roles.sql to create the two roles.
+      # Read by docker/postgres/init/01-roles.sql to create the login roles.
       MIGRATOR_PASSWORD: ${MIGRATOR_PASSWORD:-migrator_dev_only}
       APP_USER_PASSWORD: ${APP_USER_PASSWORD:-app_user_dev_only}
+      QUEUE_USER_PASSWORD: ${QUEUE_USER_PASSWORD:-queue_user_dev_only}
     ports:
       # 5432 is inside a port range Windows (Hyper-V/WSL) often reserves, so the
       # host side defaults to 15432. Inside the container Postgres still uses 5432.
