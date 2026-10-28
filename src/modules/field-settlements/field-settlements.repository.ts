@@ -21,6 +21,7 @@ export interface SettlementRow {
   saleCount: number;
   voidedCount: number;
   unpaidTotal: string;
+  earlierSalesCash: string;
   note: string | null;
 }
 
@@ -54,6 +55,7 @@ export interface SettlementInsert {
   saleCount: number;
   voidedCount: number;
   unpaidTotal: string;
+  earlierSalesCash: string;
   snapshot: string;
   note: string | null;
 }
@@ -76,6 +78,7 @@ interface RawSettlement {
   sale_count: number;
   voided_count: number;
   unpaid_total: string;
+  earlier_sales_cash: string;
   note: string | null;
 }
 
@@ -125,7 +128,7 @@ export class FieldSettlementsRepository {
              period_start, period_end, period_end::text AS period_end_key, expected_cash::text AS expected_cash,
              cash_received::text AS cash_received, cash_variance::text AS cash_variance,
              mpesa_verified_total::text AS mpesa_verified_total, mpesa_unverified_total::text AS mpesa_unverified_total,
-             sale_count, voided_count, unpaid_total::text AS unpaid_total, note
+             sale_count, voided_count, unpaid_total::text AS unpaid_total, earlier_sales_cash::text AS earlier_sales_cash, note
         FROM field_settlement
        WHERE business_id = ${currentBusinessId()}::uuid
          AND (${f.locationId}::uuid IS NULL OR field_location_id = ${f.locationId}::uuid)
@@ -142,7 +145,7 @@ export class FieldSettlementsRepository {
              period_start, period_end, period_end::text AS period_end_key, expected_cash::text AS expected_cash,
              cash_received::text AS cash_received, cash_variance::text AS cash_variance,
              mpesa_verified_total::text AS mpesa_verified_total, mpesa_unverified_total::text AS mpesa_unverified_total,
-             sale_count, voided_count, unpaid_total::text AS unpaid_total, note
+             sale_count, voided_count, unpaid_total::text AS unpaid_total, earlier_sales_cash::text AS earlier_sales_cash, note
         FROM field_settlement WHERE id = ${id}::uuid AND business_id = ${currentBusinessId()}::uuid`;
     if (rows.length === 0) return null;
     const lines = await currentTx().fieldSettlementLine.findMany({
@@ -173,6 +176,7 @@ function settlementRow(r: RawSettlement): SettlementRow {
     saleCount: r.sale_count,
     voidedCount: r.voided_count,
     unpaidTotal: r.unpaid_total,
+    earlierSalesCash: r.earlier_sales_cash,
     note: r.note,
   };
 }

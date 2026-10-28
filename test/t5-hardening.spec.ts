@@ -32,6 +32,7 @@ interface Attendant {
   vans: string[]; // every van ever assigned, the active one last
   seen: Set<string>; // every location id this attendant ever received
   cursor: string;
+  sales: string[]; // Phase T6: their own accepted sales, for payment.attach
 }
 interface Shop {
   w: World;
@@ -124,7 +125,7 @@ describe('T5: field hardening', { timeout: 900_000 }, () => {
       const v = await van(w, member, `Van ${i + 1}`);
       const issue = api.command('stock.issue', { from_location_id: w.loc, to_location_id: v, lines: [{ pack_type_id: w.maize.piece, quantity: 30 }, { pack_type_id: w.maize.carton, quantity: 4 }] });
       expect((await api.sendOne(w.manager.token, issue)).status).toBe('ACCEPTED');
-      const a: Attendant = { member, vans: [v], seen: new Set(), cursor: '' };
+      const a: Attendant = { member, vans: [v], seen: new Set(), cursor: '', sales: [] };
       await snapshot(a);
       list.push(a);
     }
@@ -153,21 +154,35 @@ describe('T5: field hardening', { timeout: 900_000 }, () => {
         const f1 = a.attendants[0];
         await ok('PATCH', `/v1/locations/${f1.vans[0]}`, a.w.owner.token, { archived: true });
         const nv = await van(a.w, f1.member, 'Van 1b');
-        expect((await api.sendOne(a.w.manager.token, api.command('stock.issue', { from_location_id: a.w.loc, to_location_id: nv, lines: [{ pack_type_id: a.w.maize.piece, quantity: 20 }, { pack_type_id: a.w.maize.carton, quantity: 3 }] }))).status).toBe('ACCEPTED');
+        // Its own stock first. Random counts apply the phone's difference (counted minus its expected, C3), so the
+        // shop can be far below zero, depending on how earlier waves interleaved (seen after T6): receive the shortfall.
+        const shopStock = await asAdmin(async (c) => (await c.query<{ pack_type_id: string; quantity: number }>('SELECT pack_type_id, quantity FROM stock_balance WHERE location_id = $1', [a.w.loc])).rows);
+        const has = (pack: string) => shopStock.find((r) => r.pack_type_id === pack)?.quantity ?? 0;
+        const short = [{ pack_type_id: a.w.maize.piece, quantity: 20 - has(a.w.maize.piece) }, { pack_type_id: a.w.maize.carton, quantity: 3 - has(a.w.maize.carton) }].filter((l) => l.quantity > 0);
+        if (short.length > 0) expect((await api.sendOne(a.w.manager.token, api.command('stock.receive', { location_id: a.w.loc, lines: short }))).status).toBe('ACCEPTED');
+        const reissue = await api.sendOne(a.w.manager.token, api.command('stock.issue', { from_location_id: a.w.loc, to_location_id: nv, lines: [{ pack_type_id: a.w.maize.piece, quantity: 20 }, { pack_type_id: a.w.maize.carton, quantity: 3 }] }));
+        expect(reissue.status, JSON.stringify(reissue)).toBe('ACCEPTED');
         f1.vans.push(nv);
       }
-      const work: Promise<{ kind: string; result: Result; sale?: { shop: Shop; id: string } }>[] = [];
+      const work: Promise<{ kind: string; result: Result; sale?: { shop: Shop; at: Attendant; id: string } }>[] = [];
       for (let i = 0; i < 20; i++) {
         const s = rnd.next() < 0.85 ? a : b;
         const at = rnd.pick(s.attendants);
         const active = at.vans[at.vans.length - 1];
         const someVan = rnd.next() < 0.8 ? active : rnd.pick(at.vans);
         const roll = rnd.next();
-        if (roll < 0.35) {
+        if (roll < 0.29) {
           const id = randomUUID();
           const lines = [{ pack_type_id: rnd.pick([s.w.maize.piece, s.w.maize.carton]), quantity: rnd.int(1, 3), unit_price: rnd.pick(['180', '4200', '99.50']) }];
           const cmd = api.command('sale.create', { sale_id: id, local_ref: `T5-${wave}-${i}`, location_id: someVan, lines, payments: payments() });
-          work.push(api.sendOne(at.member.token, cmd).then((result) => ({ kind: 'sale', result, sale: { shop: s, id } })));
+          work.push(api.sendOne(at.member.token, cmd).then((result) => ({ kind: 'sale', result, sale: { shop: s, at, id } })));
+        } else if (roll < 0.35) {
+          // Phase T6: a later payment, by the attendant on their phone (counted) or by the manager (not).
+          const byManager = rnd.next() < 0.3;
+          const pool = byManager ? s.sales : at.sales;
+          if (pool.length === 0) continue;
+          const cmd = api.command('payment.attach', { sale_id: rnd.pick(pool), payments: [{ method: rnd.pick(['CASH', 'CASH', 'MPESA']), amount: `${rnd.int(1, 200)}` }].map((p) => (p.method === 'MPESA' ? { ...p, mpesa_code: `T6${seed}${String(++codeSeq).padStart(5, '0')}` } : p)) });
+          work.push(api.sendOne(byManager ? s.w.manager.token : at.member.token, cmd).then((result) => ({ kind: 'attach', result })));
         } else if (roll < 0.47) {
           const cmd = api.command('stock.issue', { from_location_id: rnd.pick([s.w.loc, s.store]), to_location_id: active, lines: [{ pack_type_id: rnd.pick([s.w.maize.piece, s.w.maize.carton]), quantity: rnd.int(1, 5) }] });
           work.push(api.sendOne(s.w.manager.token, cmd).then((result) => ({ kind: 'issue', result })));
@@ -202,7 +217,10 @@ describe('T5: field hardening', { timeout: 900_000 }, () => {
       }
       for (const o of await Promise.all(work)) {
         outcomes.push({ kind: o.kind, result: o.result });
-        if (o.sale && (o.result.status === 'ACCEPTED' || o.result.status === 'FLAGGED')) o.sale.shop.sales.push(o.sale.id);
+        if (o.sale && (o.result.status === 'ACCEPTED' || o.result.status === 'FLAGGED')) {
+          o.sale.shop.sales.push(o.sale.id);
+          o.sale.at.sales.push(o.sale.id);
+        }
       }
     }
     expect(outcomes.length, `seed ${seed}`).toBeGreaterThan(150);
@@ -214,6 +232,7 @@ describe('T5: field hardening', { timeout: 900_000 }, () => {
       issue: ['ACCEPTED', 'REJECTED:STOCK_INSUFFICIENT'],
       return: ['ACCEPTED', 'REJECTED:STOCK_INSUFFICIENT'],
       void: ['ACCEPTED', 'REJECTED:SALE_ALREADY_VOIDED'],
+      attach: ['ACCEPTED', 'FLAGGED', 'REJECTED:SALE_VOIDED'],
       settle: ['ACCEPTED'],
       stock: ['ACCEPTED', 'FLAGGED'],
       sync: ['ACCEPTED'],
@@ -223,7 +242,7 @@ describe('T5: field hardening', { timeout: 900_000 }, () => {
       const key = o.result.status === 'REJECTED' ? `REJECTED:${o.result.reason}` : o.result.status;
       expect(allowed[o.kind], `seed ${seed}: ${o.kind} ended ${key} ${JSON.stringify(o.result).slice(0, 200)}`).toContain(key);
     }
-    for (const kind of ['sale', 'issue', 'return', 'void', 'settle']) {
+    for (const kind of ['sale', 'attach', 'issue', 'return', 'void', 'settle']) {
       expect(outcomes.some((o) => o.kind === kind && o.result.status !== 'REJECTED'), `seed ${seed}: no successful ${kind}`).toBe(true);
     }
 
@@ -280,6 +299,42 @@ describe('T5: field hardening', { timeout: 900_000 }, () => {
           ).rows,
       );
       expect(broken, `seed ${seed}: settlement identities`).toEqual([]);
+      // Phase T6: every settlement's cash figures, recomputed independently: each payment of the
+      // attendant on one of their personal devices (registered by them, not shared) counts + in the
+      // settlement that first sees it and - in the one that first sees its reversal.
+      const cashWrong = await asAdmin(
+        async (c) =>
+          (
+            await c.query(
+              `WITH st AS (
+                 SELECT fs.id, fs.field_location_id, fs.attendant_membership_id, fs.expected_cash, fs.mpesa_unverified_total, fs.earlier_sales_cash,
+                        fs.snapshot::pg_snapshot AS snap,
+                        lag(fs.snapshot) OVER (PARTITION BY fs.field_location_id ORDER BY fs.sequence)::pg_snapshot AS prev
+                   FROM field_settlement fs WHERE fs.business_id = $1),
+               pay AS (
+                 SELECT st.id AS settlement_id, p.method,
+                        pg_visible_in_snapshot(s.txid, st.snap) AND (st.prev IS NULL OR NOT pg_visible_in_snapshot(s.txid, st.prev)) AS sale_in_window,
+                        (CASE WHEN pg_visible_in_snapshot(p.txid, st.snap) AND (st.prev IS NULL OR NOT pg_visible_in_snapshot(p.txid, st.prev)) THEN p.amount ELSE 0 END)
+                      - (CASE WHEN p.reversed_txid IS NOT NULL AND pg_visible_in_snapshot(p.reversed_txid, st.snap)
+                                   AND (st.prev IS NULL OR NOT pg_visible_in_snapshot(p.reversed_txid, st.prev)) THEN p.amount ELSE 0 END) AS net
+                   FROM st JOIN payment p ON p.location_id = st.field_location_id AND p.created_by_membership_id = st.attendant_membership_id
+                   JOIN device d ON d.id = p.recorded_by_device_id AND d.registered_by_membership_id = st.attendant_membership_id AND NOT d.is_shared
+                   JOIN sale s ON s.id = p.sale_id),
+               sums AS (
+                 SELECT settlement_id,
+                        coalesce(sum(net) FILTER (WHERE method = 'CASH'), 0) AS cash,
+                        coalesce(sum(net) FILTER (WHERE method = 'MPESA'), 0) AS mpesa,
+                        coalesce(sum(net) FILTER (WHERE method = 'CASH' AND NOT sale_in_window), 0) AS earlier
+                   FROM pay GROUP BY settlement_id)
+               SELECT st.id, st.expected_cash, st.mpesa_unverified_total, st.earlier_sales_cash, x.cash, x.mpesa, x.earlier
+                 FROM st LEFT JOIN sums x ON x.settlement_id = st.id
+                WHERE st.expected_cash <> coalesce(x.cash, 0) OR st.mpesa_unverified_total <> coalesce(x.mpesa, 0)
+                   OR st.earlier_sales_cash <> coalesce(x.earlier, 0)`,
+              [biz],
+            )
+          ).rows,
+      );
+      expect(cashWrong, `seed ${seed}: settlement cash figures`).toEqual([]);
       // Field attendants never received another location.
       for (const at of s.attendants) {
         await syncPhone(at);
@@ -287,6 +342,8 @@ describe('T5: field hardening', { timeout: 900_000 }, () => {
         for (const id of at.seen) expect(assigned, `seed ${seed}: ${at.member.membershipId} saw ${id}`).toContain(id);
       }
     }
+    // Phase T6: the run really had late payments or refunds (cash of earlier sales in a settlement).
+    expect(await count('SELECT count(*) AS n FROM field_settlement WHERE business_id = $1 AND earlier_sales_cash <> 0', [a.w.owner.businessId]), `seed ${seed}: late payments`).toBeGreaterThan(0);
     expect(await count("SELECT count(*) AS n FROM field_settlement WHERE business_id = $1", [a.w.owner.businessId]), `seed ${seed}: settlements ran`).toBeGreaterThan(0);
     // Nothing crossed businesses.
     const crossed = await count(`

@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { MAX_CENTS, fromCents, toCents } from '../../common/money/cents.js';
+import { MAX_CENTS, fromCents, signedCents, toCents } from '../../common/money/cents.js';
 import { ApiError } from '../../common/errors/api.error.js';
 import { type CursorValues, SignedCursor, cursorUuid } from '../../common/paging/signed-cursor.js';
 import { Clock } from '../../common/time/clock.js';
@@ -57,6 +57,8 @@ export interface WindowFigures {
   saleCount: number;
   voidedCount: number;
   unpaidTotal: string;
+  // Phase T6: the part of expectedCash that belongs to sales of earlier windows.
+  earlierSalesCash: string;
 }
 
 // The field attendant's day-end settlement (Phase T4, docs/phase-t-design.md
@@ -89,7 +91,7 @@ export class FieldService {
     const latest = await this.settlements.latest(locationId);
     const snapshot = await this.settlements.currentSnapshot();
     const balances = new Map((await this.stock.balancesAt(locationId)).map((b) => [b.packTypeId, b.quantity]));
-    const figures = await this.figures(locationId, snapshot, latest?.snapshot ?? null, balances);
+    const figures = await this.figures(locationId, location.assignedMembershipId!, snapshot, latest?.snapshot ?? null, balances);
     return {
       location,
       periodStart: latest?.periodEnd ?? (await this.locations.createdAt(locationId)),
@@ -131,10 +133,10 @@ export class FieldService {
     }
 
     const latest = await this.settlements.latest(location.id);
-    const figures = await this.figures(location.id, snapshot, latest?.snapshot ?? null, locked);
+    const figures = await this.figures(location.id, attendant, snapshot, latest?.snapshot ?? null, locked);
     const lines = this.checkLines(dto, figures.lines, locked);
 
-    const expectedCents = toCents(figures.expectedCash)!;
+    const expectedCents = signedCents(figures.expectedCash);
     const cashVariance = fromCents(cashCents - expectedCents);
     const names = await this.staff.displayNames([attendant]);
     // Fix found in T5: the order and the period follow the lock, not the command's arrival.
@@ -167,6 +169,7 @@ export class FieldService {
         saleCount: figures.saleCount,
         voidedCount: figures.voidedCount,
         unpaidTotal: figures.unpaidTotal,
+        earlierSalesCash: figures.earlierSalesCash,
         snapshot,
         note,
       },
@@ -205,7 +208,7 @@ export class FieldService {
   }
 
   /** The window's figures under one snapshot. `balances` are the expected quantities (locked for a close). */
-  private async figures(locationId: string, snapshot: string, previous: string | null, balances: ReadonlyMap<string, number>): Promise<WindowFigures> {
+  private async figures(locationId: string, attendant: string, snapshot: string, previous: string | null, balances: ReadonlyMap<string, number>): Promise<WindowFigures> {
     const flows = await this.stock.windowFlows(locationId, snapshot, previous);
     const packIds = new Set([...balances.keys(), ...flows.map((f) => f.packTypeId)]);
     const byPack = new Map(flows.map((f) => [f.packTypeId, f]));
@@ -223,8 +226,11 @@ export class FieldService {
     });
     const windowSales = await this.sales.inSettlementWindow(locationId, snapshot, previous);
     const completed = windowSales.filter((s) => s.status === 'COMPLETED');
-    // Payments of the window's completed sales; reversed payments are excluded.
-    const totals = await this.payments.totalsForSales(completed.map((s) => s.id));
+    // Phase T6: payments by the snapshot rule (in when recorded, out when reversed, so a late
+    // payment or refund counts in the window that first sees it), and only the attendant's
+    // own payments on their personal devices: other cash never passed through their hands.
+    const payer = { membershipId: attendant, deviceIds: await this.devices.personalDeviceIdsOf(attendant) };
+    const totals = await this.payments.windowTotals(locationId, payer, snapshot, previous, windowSales.map((s) => s.id));
     const unpaid = completed.reduce((sum, s) => sum + toCents(s.balanceDue)!, 0n);
     return {
       lines,
@@ -234,6 +240,7 @@ export class FieldService {
       saleCount: windowSales.length,
       voidedCount: windowSales.length - completed.length,
       unpaidTotal: fromCents(unpaid),
+      earlierSalesCash: totals.earlierSalesCash,
     };
   }
 

@@ -35,6 +35,7 @@ export class FieldController {
       sale_count: p.figures.saleCount,
       voided_count: p.figures.voidedCount,
       unpaid_total: p.figures.unpaidTotal,
+      earlier_sales_cash: p.figures.earlierSalesCash,
     };
   }
 
@@ -70,6 +71,7 @@ function settlementJson(s: SettlementRow) {
     sale_count: s.saleCount,
     voided_count: s.voidedCount,
     unpaid_total: s.unpaidTotal,
+    earlier_sales_cash: s.earlierSalesCash,
     note: s.note,
   };
 }

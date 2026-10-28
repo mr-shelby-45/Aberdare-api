@@ -72,6 +72,11 @@ export class DevicesService {
     return this.repo.lastSyncOf(membershipId);
   }
 
+  /** Phase T6: the member's personal devices (registered by them, not shared), in any status. */
+  async personalDeviceIdsOf(membershipId: string): Promise<string[]> {
+    return this.repo.personalDeviceIdsOf(membershipId);
+  }
+
   // Data operations for the team module (device endpoints, staff lifecycle).
   list() {
     return this.repo.list();

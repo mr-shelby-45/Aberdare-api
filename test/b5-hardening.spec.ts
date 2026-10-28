@@ -513,18 +513,19 @@ describe('B5: hardening', { timeout: 120_000 }, () => {
       { table_name: 'location', privilege_type: 'INSERT', columns: 'archived_at,assigned_membership_id,business_id,created_at,id,is_default,kind,name,updated_at' },
       { table_name: 'location', privilege_type: 'SELECT', columns: 'archived_at,assigned_membership_id,business_id,created_at,id,is_default,kind,name,updated_at' },
       { table_name: 'location', privilege_type: 'UPDATE', columns: 'archived_at,name,updated_at' },
-      // Phase E1: payments are only ever reversed (status).
+      // Phase E1: payments are only ever reversed (status). Phase T6: location, device and txid columns.
       {
         table_name: 'payment',
         privilege_type: 'INSERT',
-        columns: 'amount,business_id,created_at,created_by_membership_id,duplicate_of_payment_id,id,method,mpesa_code,occurred_at,sale_id,status,verified',
+        columns: 'amount,business_id,created_at,created_by_membership_id,duplicate_of_payment_id,id,location_id,method,mpesa_code,occurred_at,recorded_by_device_id,reversed_txid,sale_id,status,txid,verified',
       },
       {
         table_name: 'payment',
         privilege_type: 'SELECT',
-        columns: 'amount,business_id,created_at,created_by_membership_id,duplicate_of_payment_id,id,method,mpesa_code,occurred_at,sale_id,status,verified',
+        columns: 'amount,business_id,created_at,created_by_membership_id,duplicate_of_payment_id,id,location_id,method,mpesa_code,occurred_at,recorded_by_device_id,reversed_txid,sale_id,status,txid,verified',
       },
-      { table_name: 'payment', privilege_type: 'UPDATE', columns: 'status' },
+      // Phase T6: the void sets reversed_txid with the status.
+      { table_name: 'payment', privilege_type: 'UPDATE', columns: 'reversed_txid,status' },
       { table_name: 'person', privilege_type: 'SELECT', columns: 'created_at,email,email_verified_at,id,phone,phone_verified_at' },
       // Phase E1: a sale changes only by payments and the void; the counter only by its number.
       // Phase T4: txid (the writing transaction) is readable and filled by its default, never updatable.

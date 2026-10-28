@@ -14,6 +14,14 @@ export function toCents(value: string): bigint | null {
   return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, '0'));
 }
 
+/** Cents of a canonical money string that may be negative ("-30.00"), as the database returns it (Phase T6). */
+export function signedCents(value: string): bigint {
+  const negative = value.startsWith('-');
+  const cents = toCents(negative ? value.slice(1) : value);
+  if (cents === null) throw new Error('not a money string');
+  return negative ? -cents : cents;
+}
+
 /** The canonical string with two decimals: 9999n -> "99.99", 5n -> "0.05". */
 export function fromCents(cents: bigint): string {
   const sign = cents < 0n ? '-' : '';

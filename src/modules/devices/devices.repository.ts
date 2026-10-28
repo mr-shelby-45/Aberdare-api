@@ -49,6 +49,16 @@ export class DevicesRepository {
     return rows[0]?.last ?? null;
   }
 
+  /**
+   * Phase T6: the member's personal devices, in any status: registered by
+   * them (device.registered_by_membership_id) and not shared (device.is_shared
+   * = false). A revoked phone still counts for what was recorded on it.
+   */
+  async personalDeviceIdsOf(membershipId: string): Promise<string[]> {
+    const rows = await currentTx().device.findMany({ where: { registeredByMembershipId: membershipId, isShared: false }, select: { id: true } });
+    return rows.map((r) => r.id);
+  }
+
   async findForSession(deviceId: string): Promise<DeviceForSession | null> {
     return currentTx().device.findUnique({
       where: { id: deviceId },

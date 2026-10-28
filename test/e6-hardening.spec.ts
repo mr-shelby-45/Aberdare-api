@@ -463,7 +463,7 @@ describe('E6: hardening', { timeout: 600_000 }, () => {
         updateNote: await attempt("UPDATE sale SET note = 'x' WHERE id = $1", [open]),
         updateItem: await attempt('UPDATE sale_item SET quantity = 2 WHERE sale_id = $1', [open]),
         updateAmount: await attempt('UPDATE payment SET amount = 1 WHERE sale_id = $1', [open]),
-        reversePayment: await attempt("UPDATE payment SET status = 'REVERSED' WHERE sale_id = $1", [open]),
+        reversePayment: await attempt("UPDATE payment SET status = 'REVERSED', reversed_txid = pg_current_xact_id() WHERE sale_id = $1", [open]), // reversed_txid since T6
         touchVoided: await attempt('UPDATE sale SET paid_total = paid_total WHERE id = $1', [voided]),
         unVoid: await attempt("UPDATE sale SET status = 'COMPLETED' WHERE id = $1", [voided]),
       };

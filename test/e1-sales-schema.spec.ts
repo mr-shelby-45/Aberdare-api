@@ -112,6 +112,8 @@ describe('E1: sales schema', { timeout: 120_000 }, () => {
       status: 'RECORDED',
       occurred_at: '2026-10-26T08:00:00Z',
       created_by_membership_id: w.member,
+      location_id: w.loc, // Phase T6
+      recorded_by_device_id: w.device, // Phase T6
       ...over,
     };
     const cols = Object.keys(row);
@@ -165,7 +167,7 @@ describe('E1: sales schema', { timeout: 120_000 }, () => {
     }
     // The allowed ones.
     expect(await asApp(w.biz, 'UPDATE sale SET paid_total = 10, balance_due = 90')).toBe('ok 1');
-    expect(await asApp(w.biz, "UPDATE payment SET status = 'REVERSED'")).toBe('ok 1');
+    expect(await asApp(w.biz, "UPDATE payment SET status = 'REVERSED', reversed_txid = pg_current_xact_id()")).toBe('ok 1');
     expect(await asApp(w.biz, 'UPDATE sale_counter SET last_number = last_number + 1')).toBe('ok 1');
     expect(await asApp(w.biz, "UPDATE sale SET status = 'VOIDED', voided_at = now(), voided_by_membership_id = $1, void_reason = 'OTHER', void_approved_by_membership_id = $1, void_note = 'x'", [w.member])).toBe('ok 1');
   });
@@ -253,7 +255,7 @@ describe('E1: sales schema', { timeout: 120_000 }, () => {
       ["a void approved by B's member", () => insertSale(a, randomUUID(), { sale_number: 6, ...voidFields(a), void_approved_by_membership_id: b.member }), /sale_business_id_void_approved_by_membership_id_fkey/],
       ["an item of B's pack type", () => insertItem(a, saleA, { pack_type_id: b.piece }), /sale_item_business_id_pack_type_id_fkey/],
       ["an item of B's sale", () => insertItem(a, saleB), /sale_item_business_id_sale_id_fkey/],
-      ["a payment of B's sale", () => insertPayment(a, saleB), /payment_business_id_sale_id_fkey/],
+      ["a payment of B's sale", () => insertPayment(a, saleB), /payment_business_id_sale_id_location_id_fkey/ /* the sale key includes the location since Phase T6 */],
       ["a payment by B's member", () => insertPayment(a, saleA, { created_by_membership_id: b.member }), /payment_business_id_created_by_membership_id_fkey/],
       ["a movement of B's sale", () => insertMovement(a, { sale_id: saleB }), /stock_movement_business_id_sale_id_fkey/],
     ];
@@ -286,7 +288,7 @@ describe('E1: sales schema', { timeout: 120_000 }, () => {
     expect(await insertPayment(a, saleA, { method: 'MPESA', mpesa_code: code, duplicate_of_payment_id: first })).toBe('ok 1');
     expect(await insertPayment(b, saleB, { method: 'MPESA', mpesa_code: code })).toBe('ok 1');
     // Reversed payments keep their code: a reversed original still blocks a new original.
-    expect(await asApp(a.biz, "UPDATE payment SET status = 'REVERSED' WHERE id = $1", [first])).toBe('ok 1');
+    expect(await asApp(a.biz, "UPDATE payment SET status = 'REVERSED', reversed_txid = pg_current_xact_id() WHERE id = $1", [first])).toBe('ok 1');
     expect(await insertPayment(a, saleA, { method: 'MPESA', mpesa_code: code })).toMatch(/payment_mpesa_code_unique/);
     // A payment cannot be a duplicate of itself.
     const self = randomUUID();
@@ -309,7 +311,7 @@ describe('E1: sales schema', { timeout: 120_000 }, () => {
     expect(await insertItem(w, sale)).toBe('ok 1');
     expect(await insertPayment(w, sale)).toBe('ok 1');
     expect(await asApp(w.biz, 'UPDATE sale SET paid_total = 10, balance_due = 90')).toBe('ok 1');
-    expect(await asApp(w.biz, "UPDATE payment SET status = 'REVERSED'")).toBe('ok 1');
+    expect(await asApp(w.biz, "UPDATE payment SET status = 'REVERSED', reversed_txid = pg_current_xact_id()")).toBe('ok 1');
     const ids = await asAdmin(async (c) => ({
       item: (await c.query<{ id: string }>('SELECT id FROM sale_item WHERE sale_id = $1', [sale])).rows[0].id,
       payment: (await c.query<{ id: string }>('SELECT id FROM payment WHERE sale_id = $1', [sale])).rows[0].id,

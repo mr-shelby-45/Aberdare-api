@@ -40,6 +40,8 @@ export interface SaleActor {
 /** Who attaches payments: attendants (no sales.void) only to their own sales. */
 export interface PaymentActor {
   membershipId: string;
+  // Phase T6: the device the payments are recorded on.
+  deviceId: string;
   seesAllSales: boolean;
   occurredAt: Date;
 }
@@ -193,7 +195,12 @@ export class SalesService {
       { occurredAt: actor.occurredAt, createdByMembershipId: actor.membershipId, syncCommandId: actor.syncCommandId },
     );
 
-    const { duplicates } = await this.payments.record(dto.sale_id, payments, { occurredAt: actor.occurredAt, createdByMembershipId: actor.membershipId });
+    const { duplicates } = await this.payments.record(dto.sale_id, payments, {
+      occurredAt: actor.occurredAt,
+      createdByMembershipId: actor.membershipId,
+      locationId: dto.location_id,
+      recordedByDeviceId: actor.deviceId,
+    });
 
     const flags = inFlagOrder({
       TOTAL_MISMATCH: totalMismatch,
@@ -252,7 +259,12 @@ export class SalesService {
     // A void committed between the read and the update.
     if (!paid) throw voided();
 
-    const { duplicates } = await this.payments.record(dto.sale_id, payments, { occurredAt: actor.occurredAt, createdByMembershipId: actor.membershipId });
+    const { duplicates } = await this.payments.record(dto.sale_id, payments, {
+      occurredAt: actor.occurredAt,
+      createdByMembershipId: actor.membershipId,
+      locationId: sale.locationId,
+      recordedByDeviceId: actor.deviceId,
+    });
     const flags = inFlagOrder({
       DUPLICATE_MPESA_CODE: duplicates > 0,
       OVERPAYMENT: toCents(paid.paidTotal)! > toCents(paid.total)!,

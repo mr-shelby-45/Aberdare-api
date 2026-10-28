@@ -248,8 +248,8 @@ describe('E3: payments', { timeout: 240_000 }, () => {
     let committed = false;
     try {
       const inserted = await held.query<{ id: string }>(
-        `INSERT INTO payment (business_id, sale_id, method, amount, mpesa_code, status, occurred_at, created_by_membership_id)
-         VALUES ($1, $2, 'MPESA', 1, 'HELDCODE01', 'RECORDED', now(), $3) RETURNING id`,
+        `INSERT INTO payment (business_id, sale_id, method, amount, mpesa_code, status, occurred_at, created_by_membership_id, location_id, recorded_by_device_id)
+         SELECT $1, $2, 'MPESA', 1, 'HELDCODE01', 'RECORDED', now(), $3, s.location_id, s.device_id FROM sale s WHERE s.id = $2 RETURNING id`,
         [w.owner.businessId, sales[0], w.attendant.membershipId],
       );
       const pending = sales.slice(1).map((id) => api.sendOne(w.manager.token, attach(id, [mpesa('10', 'HELDCODE01')])));

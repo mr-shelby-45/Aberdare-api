@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { MAX_CENTS, fromCents, toCents } from '../../common/money/cents.js';
 import type { PaymentDto } from './dto/payment.dto.js';
-import { type PaymentReadRow, PaymentsRepository } from './payments.repository.js';
+import { type PaymentReadRow, PaymentsRepository, type WindowPayer, type WindowPaymentTotals } from './payments.repository.js';
 
 export type PaymentReason = 'AMOUNT_INVALID' | 'METHOD_INVALID' | 'MPESA_CODE_MISSING' | 'MPESA_CODE_INVALID' | 'MPESA_CODE_NOT_ALLOWED';
 
@@ -48,7 +48,11 @@ export class PaymentsService {
    * the original payment (the sale is never refused). Returns how many were
    * duplicates.
    */
-  async record(saleId: string, payments: readonly ValidPayment[], ctx: { occurredAt: Date; createdByMembershipId: string }): Promise<{ duplicates: number }> {
+  async record(
+    saleId: string,
+    payments: readonly ValidPayment[],
+    ctx: { occurredAt: Date; createdByMembershipId: string; locationId: string; recordedByDeviceId: string },
+  ): Promise<{ duplicates: number }> {
     let duplicates = 0;
     // One after another: queries on one transaction cannot run in parallel.
     for (const p of payments) {
@@ -70,9 +74,9 @@ export class PaymentsService {
   // Reads (Phase E4). The sales module decides which sales a reader may see;
   // these only fetch the payments of the sales it names, or by id.
 
-  /** Phase T4: cash and M-Pesa totals of these sales' RECORDED payments (a settlement's window). */
-  async totalsForSales(saleIds: string[]) {
-    return this.repo.totalsForSales(saleIds);
+  /** Phase T6: what a field settlement's window expects from the attendant (see the repository). */
+  async windowTotals(locationId: string, payer: WindowPayer, snapshot: string, previous: string | null, windowSaleIds: string[]): Promise<WindowPaymentTotals> {
+    return this.repo.windowTotals(locationId, payer, snapshot, previous, windowSaleIds);
   }
 
   async forSales(saleIds: string[]): Promise<PaymentReadRow[]> {

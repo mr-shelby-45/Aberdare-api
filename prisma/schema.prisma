@@ -483,6 +483,7 @@ model Device {
   refreshTokens            RefreshToken[]
   approvals                Approval[]
   sales                    Sale[]
+  payments                 Payment[]
 
   @@unique([businessId, id])
   @@map("device")
@@ -679,6 +680,8 @@ model Sale {
   movements                  StockMovement[]
 
   @@unique([businessId, id])
+  // Phase T6: the target of payment's foreign key (sale, location).
+  @@unique([businessId, id, locationId])
   @@unique([businessId, saleNumber])
   // An approval voids at most one sale.
   @@unique([businessId, voidApprovalId])
@@ -736,15 +739,30 @@ model Payment {
   status                String
   occurredAt            DateTime   @map("occurred_at") @db.Timestamptz(6)
   createdByMembershipId String     @map("created_by_membership_id") @db.Uuid
+  // Phase T6: the sale's location, copied at insert; the foreign key below
+  // includes it, so it can never differ from the sale's.
+  locationId            String     @map("location_id") @db.Uuid
+  // Phase T6: the device the payment was recorded on (a field settlement
+  // expects only cash recorded on the attendant's own phones).
+  recordedByDeviceId    String     @map("recorded_by_device_id") @db.Uuid
+  // Phase T6: the transaction that recorded the payment, and the one that
+  // reversed it (set exactly when status is REVERSED). A settlement counts a
+  // payment in, and a reversal out, in the settlement whose snapshot first sees
+  // it (as sale.txid). Read as text; Prisma has no xid8 type.
+  txid                  Unsupported("xid8") @default(dbgenerated("pg_current_xact_id()"))
+  reversedTxid          Unsupported("xid8")? @map("reversed_txid")
   createdAt             DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
   business              Business   @relation(fields: [businessId], references: [id])
-  sale                  Sale       @relation(fields: [businessId, saleId], references: [businessId, id])
+  sale                  Sale       @relation(fields: [businessId, saleId, locationId], references: [businessId, id, locationId])
+  recordedByDevice      Device     @relation(fields: [businessId, recordedByDeviceId], references: [businessId, id])
   createdBy             Membership @relation("PaymentCreatedBy", fields: [businessId, createdByMembershipId], references: [businessId, id])
   duplicateOf           Payment?   @relation("PaymentDuplicateOf", fields: [businessId, duplicateOfPaymentId], references: [businessId, id])
   duplicates            Payment[]  @relation("PaymentDuplicateOf")
 
   @@unique([businessId, id])
   @@index([businessId, saleId])
+  // Phase T6: a settlement's payments, by the sale's location.
+  @@index([businessId, locationId])
   @@map("payment")
 }
 
@@ -815,6 +833,9 @@ model FieldSettlement {
   saleCount             Int                   @map("sale_count")
   voidedCount           Int                   @map("voided_count")
   unpaidTotal           Decimal               @map("unpaid_total") @db.Decimal(14, 2)
+  // Phase T6: the part of expected_cash (net of reversals) that belongs to
+  // sales of earlier settlements: late payments and late refunds.
+  earlierSalesCash      Decimal               @map("earlier_sales_cash") @db.Decimal(14, 2)
   // Phase T4: pg_current_snapshot() at the close, as text. With the previous
   // settlement's, it decides which sales and movements this one covers.
   snapshot              String

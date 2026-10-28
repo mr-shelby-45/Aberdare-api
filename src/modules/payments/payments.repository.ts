@@ -9,6 +9,24 @@ export interface PaymentRow {
   mpesaCode: string | null;
   occurredAt: Date;
   createdByMembershipId: string;
+  // Phase T6: the sale's location and the device the payment was recorded on.
+  locationId: string;
+  recordedByDeviceId: string;
+}
+
+/** The cash and M-Pesa a field settlement expects (Phase T6). Money as canonical text, possibly negative. */
+export interface WindowPaymentTotals {
+  cash: string;
+  mpesaVerified: string;
+  mpesaUnverified: string;
+  // The part of cash that belongs to sales outside the window (late payments and late refunds).
+  earlierSalesCash: string;
+}
+
+/** Whose payments a field settlement counts: the attendant's own, on their personal devices. */
+export interface WindowPayer {
+  membershipId: string;
+  deviceIds: string[];
 }
 
 /** A payment as reads and sync show it (Phase E4). Money as canonical text. */
@@ -63,9 +81,9 @@ export class PaymentsRepository {
    */
   async insertOriginal(p: PaymentRow): Promise<string | null> {
     const rows = await currentTx().$queryRaw<{ id: string }[]>`
-      INSERT INTO payment (business_id, sale_id, method, amount, mpesa_code, status, occurred_at, created_by_membership_id)
+      INSERT INTO payment (business_id, sale_id, method, amount, mpesa_code, status, occurred_at, created_by_membership_id, location_id, recorded_by_device_id)
       VALUES (${currentBusinessId()}::uuid, ${p.saleId}::uuid, ${p.method}, ${p.amount}::numeric, ${p.mpesaCode},
-              'RECORDED', ${p.occurredAt}, ${p.createdByMembershipId}::uuid)
+              'RECORDED', ${p.occurredAt}, ${p.createdByMembershipId}::uuid, ${p.locationId}::uuid, ${p.recordedByDeviceId}::uuid)
       ON CONFLICT (business_id, mpesa_code) WHERE mpesa_code IS NOT NULL AND duplicate_of_payment_id IS NULL
       DO NOTHING
       RETURNING id`;
@@ -81,23 +99,46 @@ export class PaymentsRepository {
     return rows[0]?.id ?? null;
   }
 
-  /** Phase E5, sale.void: every RECORDED payment of the sale becomes REVERSED (its code stays used). */
+  /**
+   * Phase E5, sale.void: every RECORDED payment of the sale becomes REVERSED
+   * (its code stays used). Phase T6: in the same statement, reversed_txid
+   * records the transaction, so settlements count the refund in their window.
+   */
   async reverseForSale(saleId: string): Promise<number> {
     return currentTx().$executeRaw`
-      UPDATE payment SET status = 'REVERSED'
+      UPDATE payment SET status = 'REVERSED', reversed_txid = pg_current_xact_id()
        WHERE business_id = ${currentBusinessId()}::uuid AND sale_id = ${saleId}::uuid AND status = 'RECORDED'`;
   }
 
-  /** Phase T4: RECORDED (not reversed) totals of these sales' payments, by method and verified or not. */
-  async totalsForSales(saleIds: string[]): Promise<{ cash: string; mpesaVerified: string; mpesaUnverified: string }> {
-    if (saleIds.length === 0) return { cash: '0.00', mpesaVerified: '0.00', mpesaUnverified: '0.00' };
-    const rows = await currentTx().$queryRaw<{ cash: string; mpesa_verified: string; mpesa_unverified: string }[]>`
-      SELECT coalesce(sum(amount) FILTER (WHERE method = 'CASH'), 0)::numeric(14,2)::text AS cash,
-             coalesce(sum(amount) FILTER (WHERE method = 'MPESA' AND verified), 0)::numeric(14,2)::text AS mpesa_verified,
-             coalesce(sum(amount) FILTER (WHERE method = 'MPESA' AND NOT verified), 0)::numeric(14,2)::text AS mpesa_unverified
-        FROM payment
-       WHERE business_id = ${currentBusinessId()}::uuid AND sale_id = ANY(${saleIds}::uuid[]) AND status = 'RECORDED'`;
-    return { cash: rows[0].cash, mpesaVerified: rows[0].mpesa_verified, mpesaUnverified: rows[0].mpesa_unverified };
+  /**
+   * Phase T6: the payments a field settlement expects, by the snapshot rule.
+   * A payment counts in (+) in the settlement whose snapshot first sees its
+   * txid, and its reversal out (-) in the one that first sees reversed_txid;
+   * both in one window cancel out. Only the attendant's own payments on their
+   * personal devices count (payer). Sums by method, M-Pesa verified or not, and
+   * the cash of sales outside the window (windowSaleIds). Never the status now.
+   */
+  async windowTotals(locationId: string, payer: WindowPayer, snapshot: string, previous: string | null, windowSaleIds: string[]): Promise<WindowPaymentTotals> {
+    const rows = await currentTx().$queryRaw<{ cash: string; mpesa_verified: string; mpesa_unverified: string; earlier_cash: string }[]>`
+      WITH w AS (
+        SELECT p.method, p.verified, p.sale_id,
+               (CASE WHEN pg_visible_in_snapshot(p.txid, ${snapshot}::pg_snapshot)
+                      AND (${previous}::text IS NULL OR NOT pg_visible_in_snapshot(p.txid, ${previous}::pg_snapshot))
+                     THEN p.amount ELSE 0 END)
+             - (CASE WHEN p.reversed_txid IS NOT NULL AND pg_visible_in_snapshot(p.reversed_txid, ${snapshot}::pg_snapshot)
+                      AND (${previous}::text IS NULL OR NOT pg_visible_in_snapshot(p.reversed_txid, ${previous}::pg_snapshot))
+                     THEN p.amount ELSE 0 END) AS net
+          FROM payment p
+         WHERE p.business_id = ${currentBusinessId()}::uuid AND p.location_id = ${locationId}::uuid
+           AND p.created_by_membership_id = ${payer.membershipId}::uuid
+           AND p.recorded_by_device_id = ANY(${payer.deviceIds}::uuid[]))
+      SELECT coalesce(sum(net) FILTER (WHERE method = 'CASH'), 0)::numeric(14,2)::text AS cash,
+             coalesce(sum(net) FILTER (WHERE method = 'MPESA' AND verified), 0)::numeric(14,2)::text AS mpesa_verified,
+             coalesce(sum(net) FILTER (WHERE method = 'MPESA' AND NOT verified), 0)::numeric(14,2)::text AS mpesa_unverified,
+             coalesce(sum(net) FILTER (WHERE method = 'CASH' AND sale_id <> ALL(${windowSaleIds}::uuid[])), 0)::numeric(14,2)::text AS earlier_cash
+        FROM w`;
+    const r = rows[0];
+    return { cash: r.cash, mpesaVerified: r.mpesa_verified, mpesaUnverified: r.mpesa_unverified, earlierSalesCash: r.earlier_cash };
   }
 
   /** Payments of these sales (Phase E4 reads). */
@@ -140,8 +181,8 @@ export class PaymentsRepository {
   /** A payment whose code was already used: saved, pointing at the original, outside the unique index. */
   async insertDuplicate(p: PaymentRow, originalId: string): Promise<void> {
     await currentTx().$executeRaw`
-      INSERT INTO payment (business_id, sale_id, method, amount, mpesa_code, duplicate_of_payment_id, status, occurred_at, created_by_membership_id)
+      INSERT INTO payment (business_id, sale_id, method, amount, mpesa_code, duplicate_of_payment_id, status, occurred_at, created_by_membership_id, location_id, recorded_by_device_id)
       VALUES (${currentBusinessId()}::uuid, ${p.saleId}::uuid, ${p.method}, ${p.amount}::numeric, ${p.mpesaCode},
-              ${originalId}::uuid, 'RECORDED', ${p.occurredAt}, ${p.createdByMembershipId}::uuid)`;
+              ${originalId}::uuid, 'RECORDED', ${p.occurredAt}, ${p.createdByMembershipId}::uuid, ${p.locationId}::uuid, ${p.recordedByDeviceId}::uuid)`;
   }
 }

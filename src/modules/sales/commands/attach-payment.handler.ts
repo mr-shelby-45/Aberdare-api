@@ -21,6 +21,7 @@ export class AttachPaymentHandler implements CommandHandler<AttachPaymentDto> {
     try {
       const r = await this.sales.attachPayments(payload, {
         membershipId: ctx.actor.membershipId,
+        deviceId: ctx.actor.deviceId,
         seesAllSales: ctx.actor.permissions.has('sales.void'),
         occurredAt: ctx.occurredAt,
       });
