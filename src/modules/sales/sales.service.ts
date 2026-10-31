@@ -5,6 +5,7 @@ import { ApprovalsService } from '../approvals/approvals.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { FieldSettlementsService } from '../field-settlements/field-settlements.service.js';
 import { LocationsService } from '../locations/locations.service.js';
+import { NotificationEvents } from '../notifications/notification-events.js';
 import { PaymentsService, type ValidPayment, paymentsTotal } from '../payments/payments.service.js';
 import type { PackTypeForSale } from '../products/pack-types.repository.js';
 import { ProductsService } from '../products/products.service.js';
@@ -93,6 +94,7 @@ export class SalesService {
     private readonly payments: PaymentsService,
     private readonly approvals: ApprovalsService,
     private readonly fieldSettlements: FieldSettlementsService,
+    private readonly events: NotificationEvents,
   ) {}
 
   /**
@@ -228,6 +230,8 @@ export class SalesService {
       },
       actorMembershipId: actor.membershipId,
     });
+    // Phase F4: owners are told of a flagged sale, in this transaction.
+    await this.events.saleFlagged({ saleId: dto.sale_id, saleNumber, flags }, actor.membershipId);
     return { saleId: dto.sale_id, saleNumber, total, paidTotal, balanceDue, flags };
   }
 
@@ -358,6 +362,10 @@ export class SalesService {
       metadata: { sale_id: dto.sale_id, sale_number: sale.saleNumber, reason: dto.reason, approver_membership_id: approvedBy, approval_id: approvalId },
       actorMembershipId: actor.membershipId,
     });
+    // Phase F4: a PIN approval was used for this void.
+    if (approvalId) {
+      await this.events.approvalUsed({ approvalId, purpose: 'SALE_VOID', requesterMembershipId: actor.membershipId, approverMembershipId: approvedBy, targetId: dto.sale_id });
+    }
     return { saleId: dto.sale_id, voidedAt: actor.occurredAt, approvedByMembershipId: approvedBy };
   }
 

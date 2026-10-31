@@ -3,6 +3,7 @@ import { MONEY_PATTERN, normalizeMoney } from '../../common/validation/money.js'
 import { ApprovalsService } from '../approvals/approvals.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { LocationsService } from '../locations/locations.service.js';
+import { NotificationEvents } from '../notifications/notification-events.js';
 import { ProductsService } from '../products/products.service.js';
 import type { AdjustStockDto } from './dto/adjust-stock.dto.js';
 import type { ConvertStockDto } from './dto/convert-stock.dto.js';
@@ -51,6 +52,7 @@ export class StockCommandsService {
     private readonly locations: LocationsService,
     private readonly audit: AuditService,
     private readonly approvals: ApprovalsService,
+    private readonly events: NotificationEvents,
   ) {}
 
   /**
@@ -202,6 +204,11 @@ export class StockCommandsService {
       },
       actorMembershipId: actor.membershipId,
     });
+    // Phase F4: owners (not the converter) are told; the approver too when a PIN was used.
+    await this.events.stockConverted(r.conversionId, actor.membershipId);
+    if (approval && approvedByMembershipId) {
+      await this.events.approvalUsed({ approvalId: approval.approvalId, purpose: 'STOCK_CONVERT', requesterMembershipId: actor.membershipId, approverMembershipId: approvedByMembershipId, targetId: r.conversionId });
+    }
     return r;
   }
 

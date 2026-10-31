@@ -4,6 +4,7 @@ import { ApprovalsModule } from '../approvals/approvals.module.js';
 import { AuditModule } from '../audit/audit.module.js';
 import { FieldSettlementsModule } from '../field-settlements/field-settlements.module.js';
 import { LocationsModule } from '../locations/locations.module.js';
+import { NotificationsModule } from '../notifications/notifications.module.js';
 import { PaymentsModule } from '../payments/payments.module.js';
 import { ProductsModule } from '../products/products.module.js';
 import { StaffModule } from '../staff/staff.module.js';
@@ -21,7 +22,7 @@ import { SalesService } from './sales.service.js';
 // (none of them imports it); the sync module imports the command handlers
 // and, from E4, the reads for its sync tables.
 @Module({
-  imports: [StockModule, ProductsModule, LocationsModule, PaymentsModule, StaffModule, ApprovalsModule, FieldSettlementsModule, AuditModule],
+  imports: [StockModule, ProductsModule, LocationsModule, PaymentsModule, StaffModule, ApprovalsModule, FieldSettlementsModule, AuditModule, NotificationsModule],
   controllers: [SalesController],
   providers: [SalesService, SalesRepository, SalesReadsService, SalesReadsRepository, SignedCursor, CreateSaleHandler, AttachPaymentHandler, VoidSaleHandler],
   exports: [CreateSaleHandler, AttachPaymentHandler, VoidSaleHandler, SalesReadsService],

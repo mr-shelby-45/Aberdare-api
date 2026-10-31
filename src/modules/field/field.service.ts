@@ -9,6 +9,7 @@ import { DevicesService } from '../devices/devices.service.js';
 import { FieldSettlementsService } from '../field-settlements/field-settlements.service.js';
 import type { SettlementLineRow } from '../field-settlements/field-settlements.repository.js';
 import { LocationsService } from '../locations/locations.service.js';
+import { NotificationEvents } from '../notifications/notification-events.js';
 import { PaymentsService } from '../payments/payments.service.js';
 import { ProductsService } from '../products/products.service.js';
 import { SalesReadsService } from '../sales/sales-reads.service.js';
@@ -82,6 +83,7 @@ export class FieldService {
     private readonly audit: AuditService,
     private readonly cursor: SignedCursor,
     private readonly clock: Clock,
+    private readonly events: NotificationEvents,
   ) {}
 
   /** GET /v1/field/settlements/preview: what a close now would store. Read only, no locks. */
@@ -296,6 +298,14 @@ export class FieldService {
         variance_lines: rows.filter((r) => r.variance !== 0).length,
       },
       actorMembershipId: actor.membershipId,
+    });
+    // Phase F4: owners (not the closer) are told of a cash or count difference.
+    await this.events.settlementVariance({
+      settlementId: dto.settlement_id,
+      attendantMembershipId: attendant,
+      closerMembershipId: actor.membershipId,
+      cashVariance,
+      linesWithVariance: rows.filter((r) => r.variance !== 0).length,
     });
     return {
       settlementId: dto.settlement_id,

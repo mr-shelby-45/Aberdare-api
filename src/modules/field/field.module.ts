@@ -4,6 +4,7 @@ import { AuditModule } from '../audit/audit.module.js';
 import { DevicesModule } from '../devices/devices.module.js';
 import { FieldSettlementsModule } from '../field-settlements/field-settlements.module.js';
 import { LocationsModule } from '../locations/locations.module.js';
+import { NotificationsModule } from '../notifications/notifications.module.js';
 import { PaymentsModule } from '../payments/payments.module.js';
 import { ProductsModule } from '../products/products.module.js';
 import { SalesModule } from '../sales/sales.module.js';
@@ -17,7 +18,7 @@ import { FieldService } from './field.service.js';
 // every module it reads through (none of them imports it); the sync module
 // imports the close handler.
 @Module({
-  imports: [FieldSettlementsModule, LocationsModule, StockModule, ProductsModule, SalesModule, PaymentsModule, DevicesModule, StaffModule, AuditModule],
+  imports: [FieldSettlementsModule, LocationsModule, StockModule, ProductsModule, SalesModule, PaymentsModule, DevicesModule, StaffModule, AuditModule, NotificationsModule],
   controllers: [FieldController],
   providers: [FieldService, CloseSettlementHandler, SignedCursor],
   exports: [CloseSettlementHandler],

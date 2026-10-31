@@ -5,6 +5,7 @@ import { MessagingModule } from '../../integrations/messaging.module.js';
 import { DevicesModule } from '../devices/devices.module.js';
 import { StaffModule } from '../staff/staff.module.js';
 import { NotificationDeliveryService } from './notification-delivery.service.js';
+import { NotificationEvents } from './notification-events.js';
 import { NotificationsController } from './notifications.controller.js';
 import { NotificationsRepository } from './notifications.repository.js';
 import { NotificationsService } from './notifications.service.js';
@@ -15,7 +16,7 @@ import { NotificationsService } from './notifications.service.js';
 @Module({
   imports: [DatabaseModule, StaffModule, DevicesModule, MessagingModule],
   controllers: [NotificationsController],
-  providers: [NotificationsService, NotificationDeliveryService, NotificationsRepository, SignedCursor],
-  exports: [NotificationsService, NotificationDeliveryService],
+  providers: [NotificationsService, NotificationDeliveryService, NotificationEvents, NotificationsRepository, SignedCursor],
+  exports: [NotificationsService, NotificationDeliveryService, NotificationEvents],
 })
 export class NotificationsModule {}
