@@ -6,6 +6,7 @@ import { SessionsModule } from '../sessions/sessions.module.js';
 import { StaffModule } from '../staff/staff.module.js';
 import { DeviceAdminService } from './device-admin.service.js';
 import { DevicesController } from './devices.controller.js';
+import { PushTokenController } from './push-token.controller.js';
 import { StaffController } from './staff.controller.js';
 import { StaffLifecycleService } from './staff-lifecycle.service.js';
 
@@ -15,7 +16,7 @@ import { StaffLifecycleService } from './staff-lifecycle.service.js';
 // other avoids a circular import).
 @Module({
   imports: [DatabaseModule, AuditModule, StaffModule, DevicesModule, SessionsModule],
-  controllers: [StaffController, DevicesController],
+  controllers: [StaffController, DevicesController, PushTokenController],
   providers: [StaffLifecycleService, DeviceAdminService],
 })
 export class TeamModule {}

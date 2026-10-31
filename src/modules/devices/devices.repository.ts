@@ -59,6 +59,34 @@ export class DevicesRepository {
     return rows.map((r) => r.id);
   }
 
+  /**
+   * Phase F3: where a member's pushes go: their active personal devices
+   * (registered by them, not shared) that have a push token. A shared tablet
+   * never gets a member's push.
+   */
+  async pushTargetsOf(membershipIds: string[]): Promise<{ deviceId: string; membershipId: string; token: string }[]> {
+    if (membershipIds.length === 0) return [];
+    const rows = await currentTx().device.findMany({
+      where: { registeredByMembershipId: { in: membershipIds }, isShared: false, status: 'ACTIVE', pushToken: { not: null } },
+      orderBy: { id: 'asc' },
+      select: { id: true, registeredByMembershipId: true, pushToken: true },
+    });
+    return rows.map((r) => ({ deviceId: r.id, membershipId: r.registeredByMembershipId, token: r.pushToken! }));
+  }
+
+  /** Phase F3: clears a dead token, only if the device still holds that same token (a newly set one is kept). */
+  async clearPushToken(deviceId: string, token: string): Promise<void> {
+    await currentTx().device.updateMany({ where: { id: deviceId, pushToken: token }, data: { pushToken: null } });
+  }
+
+  /** Phase F3: sets (or clears, with null) this device's token; any other device of the business holding it loses it. */
+  async setPushToken(deviceId: string, token: string | null): Promise<void> {
+    if (token !== null) {
+      await currentTx().device.updateMany({ where: { pushToken: token, id: { not: deviceId } }, data: { pushToken: null } });
+    }
+    await currentTx().device.updateMany({ where: { id: deviceId }, data: { pushToken: token } });
+  }
+
   async findForSession(deviceId: string): Promise<DeviceForSession | null> {
     return currentTx().device.findUnique({
       where: { id: deviceId },

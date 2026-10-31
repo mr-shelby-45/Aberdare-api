@@ -26,6 +26,9 @@ const SECRET_FIELDS = [
   'access_token',
   'refresh_token',
   'device_secret',
+  // Phase F3: a phone's push token.
+  'push_token',
+  'pushToken',
 ];
 const PHONE_FIELDS = ['phone', 'phoneNumber', 'msisdn'];
 

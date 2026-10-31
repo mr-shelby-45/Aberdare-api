@@ -67,6 +67,21 @@ export class DevicesService {
     return this.repo.stampSync(deviceId, this.clock.now(), SYNC_STAMP_MINUTES);
   }
 
+  /** Phase F3: the active personal devices with a push token of these members (see the repository). */
+  async pushTargetsOf(membershipIds: string[]) {
+    return this.repo.pushTargetsOf([...new Set(membershipIds)]);
+  }
+
+  /** Phase F3: clears a token the push provider called dead, unless the device has a new one. */
+  async clearPushToken(deviceId: string, token: string): Promise<void> {
+    await this.repo.clearPushToken(deviceId, token);
+  }
+
+  /** Phase F3: PUT /v1/devices/me/push-token, for the caller's own device only. */
+  async setPushToken(deviceId: string, token: string | null): Promise<void> {
+    await this.repo.setPushToken(deviceId, token);
+  }
+
   /** Phase T4: when any of the member's active devices last synced (the settlement's sync check). */
   async lastSyncOf(membershipId: string): Promise<Date | null> {
     return this.repo.lastSyncOf(membershipId);

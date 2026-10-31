@@ -39,6 +39,15 @@ export const SALES_SNAPSHOT_DAYS = 30;
 export const FIELD_SYNC_MAX_AGE_MINUTES = 10;
 /** How long the worker waits for running jobs when it shuts down (Phase F1, docs/phase-f-design.md section 4). */
 export const WORKER_SHUTDOWN_TIMEOUT_MS = 30_000;
+/** Push delivery (Phase F3, docs/phase-f-design.md section 5): 3 attempts, waiting 30 seconds after the first and 2 minutes after the second. */
+export const NOTIFY_MAX_ATTEMPTS = 3;
+export const NOTIFY_RETRY_DELAYS_MS: readonly number[] = [30_000, 120_000];
+/** A claimed (SENDING) push is taken back by the sweeper after this long. */
+export const NOTIFY_LEASE_MS = 5 * 60_000;
+/** A push sender that has not answered by then counts as a retry. */
+export const PUSH_SEND_TIMEOUT_MS = 10_000;
+/** Pushes claimed by one dispatch job at most. */
+export const NOTIFY_CLAIM_BATCH = 50;
 
 export class AppConfig {
   @IsIn(APP_ENVS)
