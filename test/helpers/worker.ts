@@ -21,7 +21,10 @@ export interface TestWorker extends Worker {
  * with the given fake clock (share the API test app's, so both agree on
  * "now") and its log lines captured. Phase F3.
  */
-export async function startTestWorker(clock: FakeClock, options: CreateWorkerOptions = {}): Promise<TestWorker> {
+export async function startTestWorker(
+  clock: FakeClock,
+  options: CreateWorkerOptions & { configurePush?: (push: FakePushSender) => void } = {},
+): Promise<TestWorker> {
   const queueUrl = process.env.QUEUE_DATABASE_URL;
   if (!queueUrl) throw new Error('TEST_QUEUE_DATABASE_URL is not set (see .env.example)');
   const config = loadConfig({ ...TEST_ENV, QUEUE_DATABASE_URL: queueUrl });
@@ -38,6 +41,8 @@ export async function startTestWorker(clock: FakeClock, options: CreateWorkerOpt
     .compile();
   moduleRef.useLogger(false);
   await moduleRef.init();
+  // Before the worker fetches anything: jobs left queued by an earlier worker run at once.
+  options.configurePush?.(moduleRef.get(PushSender) as FakePushSender);
   const worker = await startWorker(moduleRef, config, { ...options, logStream: sink });
   return Object.assign(worker, { push: moduleRef.get(PushSender) as FakePushSender, lines: () => chunks.join('') });
 }

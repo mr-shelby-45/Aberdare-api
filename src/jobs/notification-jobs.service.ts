@@ -51,6 +51,8 @@ export class NotificationJobs {
     await queue.work<{ businessId?: unknown }>(DISPATCH_QUEUE, async (data) => {
       if (typeof data.businessId !== 'string' || !UUID.test(data.businessId)) return; // never trust a job's data
       const r = await this.delivery.dispatchBusiness(data.businessId);
+      // One masked line per push (ids and the outcome; never the token or the text), then the totals.
+      for (const p of r.pushes) log.info({ job: DISPATCH_QUEUE, businessId: data.businessId, notificationId: p.notificationId, deviceId: p.deviceId, outcome: p.outcome }, 'push delivered');
       log.info({ job: DISPATCH_QUEUE, businessId: data.businessId, claimed: r.claimed, sent: r.sent, retried: r.retried, dead: r.dead }, 'pushes dispatched');
       if (r.more) await this.enqueueDispatch(data.businessId);
     });

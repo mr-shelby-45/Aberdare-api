@@ -18,6 +18,8 @@ export interface DispatchResult {
   dead: number;
   // A full batch was claimed: there may be more due now.
   more: boolean;
+  // Phase F6: every device answer, for the worker's per-push log line (ids and the outcome only).
+  pushes: { notificationId: string; deviceId: string; outcome: string }[];
 }
 
 // Push delivery (Phase F3, docs/phase-f-design.md section 5), run by the
@@ -41,7 +43,7 @@ export class NotificationDeliveryService {
       const rows = await this.repo.claimDuePush(claimedAt, new Date(claimedAt.getTime() + NOTIFY_LEASE_MS), NOTIFY_CLAIM_BATCH);
       return { claimed: rows, targets: await this.devices.pushTargetsOf(rows.map((r) => r.recipientMembershipId)) };
     });
-    const result: DispatchResult = { claimed: claimed.length, sent: 0, retried: 0, dead: 0, more: claimed.length === NOTIFY_CLAIM_BATCH };
+    const result: DispatchResult = { claimed: claimed.length, sent: 0, retried: 0, dead: 0, more: claimed.length === NOTIFY_CLAIM_BATCH, pushes: [] };
     if (claimed.length === 0) return result;
 
     // (2) No transaction is open here.
@@ -52,6 +54,9 @@ export class NotificationDeliveryService {
         return { row, outcomes };
       }),
     );
+    for (const { row, outcomes } of sends) {
+      for (const o of outcomes) result.pushes.push({ notificationId: row.id, deviceId: o.device.deviceId, outcome: o.outcome });
+    }
 
     // (3) The results, each only if the row is still in this claim.
     const savedAt = this.clock.now();
