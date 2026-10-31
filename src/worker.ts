@@ -10,7 +10,7 @@ async function bootstrap(): Promise<void> {
   if (existsSync('.env')) process.loadEnvFile('.env');
   const config = loadConfig();
   const worker = await createWorker(WorkerModule, config);
-  // Job handlers and schedules are registered here from F3 and F5 on.
+  // createWorker() registered the job handlers, the sweep schedule and the wake-up listener (F3).
   worker.log.info('worker ready');
 
   // SIGTERM (a platform stopping the container) and SIGINT (Ctrl+C): stop

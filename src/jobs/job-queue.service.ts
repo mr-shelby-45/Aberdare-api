@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import type { FastifyBaseLogger } from 'fastify';
-import { PgBoss } from 'pg-boss';
+import { PgBoss, type QueuePolicy } from 'pg-boss';
 import { AppConfig } from '../config/app.config.js';
 import { errorCodeForLog } from '../database/db-errors.js';
 import { QUEUE_SCHEMA } from './queue-schema.js';
@@ -35,14 +35,22 @@ export class JobQueue {
     this.log = log;
   }
 
-  /** Creates the queue if it does not exist (idempotent). Never partitioned. */
-  async ensureQueue(name: string): Promise<void> {
-    await this.started().createQueue(name);
+  /** Creates the queue if it does not exist (idempotent), with its policy. Never partitioned. */
+  async ensureQueue(name: string, policy?: QueuePolicy): Promise<void> {
+    await this.started().createQueue(name, policy ? { policy } : {});
   }
 
-  /** Adds a job; returns its id. */
-  async send(name: string, data: object): Promise<string | null> {
-    return this.started().send(name, data);
+  /**
+   * Adds a job; returns its id, or null when the queue policy refused it (for
+   * example a stately queue that already has one job queued for singletonKey).
+   */
+  async send(name: string, data: object, options: { singletonKey?: string } = {}): Promise<string | null> {
+    return this.started().send(name, data, options);
+  }
+
+  /** A cron schedule (UTC), stored by pg-boss in the database: one schedule per name, however many workers run. */
+  async schedule(name: string, cron: string): Promise<void> {
+    await this.started().schedule(name, cron, {}, { tz: 'UTC' });
   }
 
   /** Handles jobs of this queue one at a time, logging job, id, duration and outcome (never the data). */

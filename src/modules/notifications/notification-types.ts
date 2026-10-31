@@ -8,6 +8,8 @@ export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
 
 export const CHANNELS = ['IN_APP', 'PUSH', 'SMS', 'EMAIL'] as const;
 export type Channel = (typeof CHANNELS)[number];
+/** The channels notify() accepts in Phase F (F3 decision): no event uses SMS or EMAIL yet. */
+export const NOTIFY_CHANNELS: readonly Channel[] = ['IN_APP', 'PUSH'];
 
 export const DATA_KEYS: Record<NotificationType, readonly string[]> = {
   'sale.flagged': ['sale_id', 'sale_number', 'flags'],

@@ -77,7 +77,7 @@ export function stockApi(t: TestApp, ip: string, phoneBase: number) {
   const sms = () => t.app.get(SmsSender) as FakeSmsSender;
   const mail = () => t.app.get(EmailSender) as FakeEmailSender;
 
-  const call = (method: 'GET' | 'POST' | 'PATCH' | 'DELETE', url: string, token?: string, payload?: unknown) =>
+  const call = (method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE', url: string, token?: string, payload?: unknown) =>
     t.app.inject({ method, url, payload: payload as object, headers: token ? { authorization: `Bearer ${token}` } : {}, remoteAddress: ip });
   const post = (url: string, payload: unknown, token?: string) => call('POST', url, token, payload);
   const json = <T>(res: LightMyRequestResponse) => res.json() as T;

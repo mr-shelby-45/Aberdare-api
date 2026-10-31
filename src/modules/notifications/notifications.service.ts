@@ -7,7 +7,7 @@ import { ErrorEventLog } from '../../database/error-event-log.js';
 import { currentBusinessId, withSavepoint } from '../../database/tenant.js';
 import { StaffService } from '../staff/staff.service.js';
 import { notificationMessage } from './notification-messages.js';
-import { type Channel, type NotificationData, checkNotification } from './notification-types.js';
+import { type Channel, NOTIFY_CHANNELS, type NotificationData, checkNotification } from './notification-types.js';
 import { type NotificationInsert, NotificationsRepository } from './notifications.repository.js';
 import type { ListNotificationsQueryDto } from './dto/list-notifications.dto.js';
 import type { MarkReadDto } from './dto/mark-read.dto.js';
@@ -57,6 +57,7 @@ export class NotificationsService {
     try {
       return await withSavepoint(async () => {
         checkNotification(event.type, event.dedupeKey, event.data);
+        for (const t of targets) for (const c of t.channels) if (!NOTIFY_CHANNELS.includes(c)) throw new Error('notification channel not built yet: ' + c);
         const type = event.type;
         const active = await this.staff.listActive();
         const exclude = new Set(options.exclude ?? []);

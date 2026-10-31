@@ -5,13 +5,14 @@ import { type PushMessage, type PushResult, PushSender } from './push.sender.js'
 /** A scripted answer: a result, a thrown error, or never answering. */
 export type FakePushAnswer = PushResult | 'THROW' | 'HANG';
 
-// Keeps pushes in memory for tests to read and never logs them (a push holds
-// a device token). Tests script answers per token; the default is OK. It
-// records a violation if it is ever called inside a database transaction,
-// which a sender must never be (docs/phase-f-design.md section 9).
+// Keeps every push it was asked to send, with the answer it gave, in memory
+// for tests to read, and never logs them (a push holds a device token). Tests
+// script answers per token; the default is OK. It records a violation if it
+// is ever called inside a database transaction, which a sender must never be
+// (docs/phase-f-design.md section 9).
 @Injectable()
 export class FakePushSender extends PushSender {
-  readonly outbox: { token: string; push: PushMessage }[] = [];
+  readonly outbox: { token: string; push: PushMessage; answer: PushResult }[] = [];
   readonly calledInsideTransaction: string[] = [];
   private readonly scripts = new Map<string, FakePushAnswer[]>();
 
@@ -31,7 +32,7 @@ export class FakePushSender extends PushSender {
     const answer = this.scripts.get(token)?.shift() ?? 'OK';
     if (answer === 'THROW') throw new Error('fake push provider failed');
     if (answer === 'HANG') return new Promise<PushResult>(() => undefined);
-    this.outbox.push({ token, push });
+    this.outbox.push({ token, push, answer });
     return answer;
   }
 }
