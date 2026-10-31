@@ -48,6 +48,13 @@ export const NOTIFY_LEASE_MS = 5 * 60_000;
 export const PUSH_SEND_TIMEOUT_MS = 10_000;
 /** Pushes claimed by one dispatch job at most. */
 export const NOTIFY_CLAIM_BATCH = 50;
+/** Scheduled jobs (Phase F5, docs/phase-f-design.md section 7). */
+export const STALE_DEVICE_DAYS = 3;
+export const NOTIFICATION_RETENTION_DAYS = 90;
+export const ERROR_EVENT_RETENTION_DAYS = 90;
+/** Per-business jobs of a fan-out: this many at once per worker, each expiring after this long. */
+export const FANOUT_CONCURRENCY = 3;
+export const BUSINESS_JOB_EXPIRE_SECONDS = 300;
 
 export class AppConfig {
   @IsIn(APP_ENVS)

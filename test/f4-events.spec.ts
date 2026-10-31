@@ -84,7 +84,7 @@ describe('F4: notification events', { timeout: 240_000 }, () => {
     expect((await api.sendOne(w.attendant.token, negative)).status).toBe('FLAGGED');
     const all = await notes(w.owner.businessId);
     expect(all.map((n) => [n.type, n.recipient, n.channel])).toEqual(Array.from({ length: 4 }, () => ['sale.flagged', w.owner.membershipId, 'IN_APP']));
-    expect(all.map(flagsOf).sort()).toEqual([['DUPLICATE_MPESA_CODE'], ['OVERPAYMENT'], ['STOCK_NEGATIVE'], ['TOTAL_MISMATCH']]);
+    expect(all.map(flagsOf).sort((a, b) => a.join().localeCompare(b.join()))).toEqual([['DUPLICATE_MPESA_CODE'], ['OVERPAYMENT'], ['STOCK_NEGATIVE'], ['TOTAL_MISMATCH']]);
     // The same command again, and 20 copies of a new one at once: one each.
     expect((await api.sendOne(w.attendant.token, negative)).status).toBe('FLAGGED');
     const copy = saleCmd(w, {}, 50);
@@ -163,12 +163,13 @@ describe('F4: notification events', { timeout: 240_000 }, () => {
     const id = await approval(w.attendant, w.manager, 'SALE_VOID');
     expect((await api.sendOne(w.attendant.token, api.command('sale.void', { sale_id: saleId, reason: 'MISTAKE', approval_id: id }))).status).toBe('ACCEPTED');
     const used = (await notes(w.owner.businessId)).filter((n) => n.type === 'approval.used');
-    expect(used.map((n) => [n.recipient, n.channel]).sort()).toEqual(
+    const byPair = (a: string[], b: string[]) => a.join().localeCompare(b.join());
+    expect(used.map((n) => [n.recipient, n.channel]).sort(byPair)).toEqual(
       [
         [w.manager.membershipId, 'IN_APP'],
         [w.manager.membershipId, 'PUSH'],
         [w.owner.membershipId, 'IN_APP'],
-      ].sort(),
+      ].sort(byPair),
     );
     expect(used[0].data).toMatchObject({ purpose: 'SALE_VOID', target_id: saleId });
     // The worker delivers the approver's push.

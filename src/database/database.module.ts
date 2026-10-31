@@ -5,6 +5,7 @@ import { ErrorEventLog } from './error-event-log.js';
 import { IdentityLookup } from './identity-lookup.js';
 import { NotificationDueListener } from './notification-due-listener.js';
 import { PrismaService } from './prisma.service.js';
+import { RetentionMaintenance } from './retention-maintenance.js';
 import { TenantRunner } from './tenant.js';
 
 // PrismaService is provided here but NOT exported. A class in any other module
@@ -13,9 +14,10 @@ import { TenantRunner } from './tenant.js';
 // IdentityLookup (the non-tenant access path for login lookups) and
 // ChangeLogMaintenance (the non-tenant change_log prune, Phase D1) and
 // ErrorEventLog (the support-only error_event writer, Phase F2), and for the
-// worker BusinessDirectory and NotificationDueListener (Phase F3).
+// worker BusinessDirectory and NotificationDueListener (Phase F3) and
+// RetentionMaintenance (the 90-day purges, Phase F5).
 @Module({
-  providers: [PrismaService, TenantRunner, IdentityLookup, ChangeLogMaintenance, ErrorEventLog, BusinessDirectory, NotificationDueListener],
-  exports: [TenantRunner, IdentityLookup, ChangeLogMaintenance, ErrorEventLog, BusinessDirectory, NotificationDueListener],
+  providers: [PrismaService, TenantRunner, IdentityLookup, ChangeLogMaintenance, ErrorEventLog, BusinessDirectory, NotificationDueListener, RetentionMaintenance],
+  exports: [TenantRunner, IdentityLookup, ChangeLogMaintenance, ErrorEventLog, BusinessDirectory, NotificationDueListener, RetentionMaintenance],
 })
 export class DatabaseModule {}

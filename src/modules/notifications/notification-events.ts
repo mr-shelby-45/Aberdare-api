@@ -48,6 +48,18 @@ export class NotificationEvents {
     );
   }
 
+  /**
+   * Phase F5, the stale-device job: active owners, in-app. The key holds the
+   * last sync time (or "never"), so the job running twice notifies once and a
+   * device that syncs and goes stale again is a new episode.
+   */
+  async deviceStale(d: { deviceId: string; membershipId: string; lastSyncAt: Date | null; days: number }): Promise<void> {
+    await this.notifications.notify(
+      { type: 'device.stale', dedupeKey: `device.stale:${d.deviceId}:${d.lastSyncAt ? d.lastSyncAt.toISOString() : 'never'}`, data: { device_id: d.deviceId, membership_id: d.membershipId, days: d.days } },
+      [{ to: 'OWNERS', channels: ['IN_APP'] }],
+    );
+  }
+
   /** settlement.close with a cash or line variance: active owners except the closer, in-app and by push. */
   async settlementVariance(s: { settlementId: string; attendantMembershipId: string; closerMembershipId: string; cashVariance: string; linesWithVariance: number }): Promise<void> {
     if (signedCents(s.cashVariance) === 0n && s.linesWithVariance === 0) return;

@@ -20,9 +20,11 @@ import { SyncRepository } from './sync.repository.js';
 import { SyncService } from './sync.service.js';
 
 // Phone commands (Phase B) and, from Phase D, the change feed for the sync reads.
+// ChangeFeedService is exported for the worker's daily prune (Phase F5).
 @Module({
   imports: [DatabaseModule, ProductsModule, StockCommandsModule, StockModule, LocationsModule, DevicesModule, SalesModule, FieldModule],
   controllers: [SyncController],
   providers: [SyncService, SyncRepository, CommandHandlers, SignedCursor, ChangesCursor, ChangeLogRepository, ChangeFeedService, SyncTables, SnapshotService, ChangesService],
+  exports: [ChangeFeedService],
 })
 export class SyncModule {}

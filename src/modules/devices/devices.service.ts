@@ -72,6 +72,11 @@ export class DevicesService {
     return this.repo.pushTargetsOf([...new Set(membershipIds)]);
   }
 
+  /** Phase F5: the active devices that last synced (or, never synced, were created) before the cutoff. */
+  async staleDevices(cutoff: Date) {
+    return this.repo.staleDevices(cutoff);
+  }
+
   /** Phase F3: clears a token the push provider called dead, unless the device has a new one. */
   async clearPushToken(deviceId: string, token: string): Promise<void> {
     await this.repo.clearPushToken(deviceId, token);

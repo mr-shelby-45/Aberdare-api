@@ -46,7 +46,7 @@ export class NotificationJobs {
   async register(queue: JobQueue, log: FastifyBaseLogger, options: NotificationJobsOptions = {}): Promise<void> {
     this.queue = queue;
     this.log = log;
-    await queue.ensureQueue(DISPATCH_QUEUE, 'stately');
+    await queue.ensureQueue(DISPATCH_QUEUE, { policy: 'stately' });
     await queue.ensureQueue(SWEEP_QUEUE);
     await queue.work<{ businessId?: unknown }>(DISPATCH_QUEUE, async (data) => {
       if (typeof data.businessId !== 'string' || !UUID.test(data.businessId)) return; // never trust a job's data

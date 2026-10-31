@@ -7,6 +7,7 @@ import type { AppConfig } from './config/app.config.js';
 import { withCore } from './create-app.js';
 import { JobQueue } from './jobs/job-queue.service.js';
 import { NotificationJobs, type NotificationJobsOptions } from './jobs/notification-jobs.service.js';
+import { ScheduledJobs } from './jobs/scheduled-jobs.service.js';
 
 export interface CreateWorkerOptions extends NotificationJobsOptions {
   // Where log lines go (tests capture them). Default: stdout.
@@ -19,6 +20,7 @@ export interface Worker {
   app: INestApplicationContext;
   queue: JobQueue;
   jobs: NotificationJobs;
+  scheduled: ScheduledJobs;
   log: FastifyBaseLogger;
   /** Stops listening and fetching jobs, waits for running ones (up to the timeout), closes everything. Safe to call twice. */
   shutdown(): Promise<void>;
@@ -47,13 +49,16 @@ export async function startWorker(app: INestApplicationContext, config: AppConfi
   const log = createWorkerLogger(config.logLevel, options.logStream);
   const queue = app.get(JobQueue);
   const jobs = app.get(NotificationJobs);
+  const scheduled = app.get(ScheduledJobs);
   await queue.start(log);
   await jobs.register(queue, log, options);
+  await scheduled.register(queue, log, options);
   let closing: Promise<void> | null = null;
   return {
     app,
     queue,
     jobs,
+    scheduled,
     log,
     shutdown() {
       closing ??= (async () => {

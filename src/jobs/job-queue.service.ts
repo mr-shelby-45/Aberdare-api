@@ -35,9 +35,9 @@ export class JobQueue {
     this.log = log;
   }
 
-  /** Creates the queue if it does not exist (idempotent), with its policy. Never partitioned. */
-  async ensureQueue(name: string, policy?: QueuePolicy): Promise<void> {
-    await this.started().createQueue(name, policy ? { policy } : {});
+  /** Creates the queue if it does not exist (idempotent), with its policy and job expiry. Never partitioned. */
+  async ensureQueue(name: string, options: { policy?: QueuePolicy; expireInSeconds?: number } = {}): Promise<void> {
+    await this.started().createQueue(name, options);
   }
 
   /**
@@ -53,12 +53,12 @@ export class JobQueue {
     await this.started().schedule(name, cron, {}, { tz: 'UTC' });
   }
 
-  /** Handles jobs of this queue one at a time, logging job, id, duration and outcome (never the data). */
-  async work<T extends object>(name: string, handler: JobHandler<T>): Promise<void> {
+  /** Handles jobs of this queue (one at a time, or localConcurrency at once), logging job, id, duration and outcome (never the data). */
+  async work<T extends object>(name: string, handler: JobHandler<T>, options: { localConcurrency?: number } = {}): Promise<void> {
     const boss = this.started();
     const log = this.log!;
     await boss.createQueue(name);
-    await boss.work<T>(name, { batchSize: 1 }, async ([job]) => {
+    await boss.work<T>(name, { batchSize: 1, ...options }, async ([job]) => {
       const startedAt = performance.now();
       try {
         await handler(job.data, job.id);

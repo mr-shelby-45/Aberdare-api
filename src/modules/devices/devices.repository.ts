@@ -87,6 +87,20 @@ export class DevicesRepository {
     await currentTx().device.updateMany({ where: { id: deviceId }, data: { pushToken: token } });
   }
 
+  /**
+   * Phase F5: active devices last synced before the cutoff, or never synced
+   * and created before it. Shared tablets count too; the member is who
+   * registered the device. Revoked devices are never stale.
+   */
+  async staleDevices(cutoff: Date): Promise<{ deviceId: string; membershipId: string; lastSyncAt: Date | null; createdAt: Date }[]> {
+    const rows = await currentTx().device.findMany({
+      where: { status: 'ACTIVE', OR: [{ lastSyncAt: { lt: cutoff } }, { lastSyncAt: null, createdAt: { lt: cutoff } }] },
+      orderBy: { id: 'asc' },
+      select: { id: true, registeredByMembershipId: true, lastSyncAt: true, createdAt: true },
+    });
+    return rows.map((r) => ({ deviceId: r.id, membershipId: r.registeredByMembershipId, lastSyncAt: r.lastSyncAt, createdAt: r.createdAt }));
+  }
+
   async findForSession(deviceId: string): Promise<DeviceForSession | null> {
     return currentTx().device.findUnique({
       where: { id: deviceId },
