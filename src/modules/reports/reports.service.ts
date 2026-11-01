@@ -3,16 +3,20 @@ import { ApiError } from '../../common/errors/api.error.js';
 import { type CursorValues, SignedCursor, cursorUuid } from '../../common/paging/signed-cursor.js';
 import { Clock } from '../../common/time/clock.js';
 import { daysBetween, nairobiDay, nairobiDayEnd, nairobiDayStart, parseDay } from '../../common/time/nairobi.js';
-import { AppConfig, MY_DAY_MAX_DAYS, REPORT_MAX_RANGE_DAYS } from '../../config/app.config.js';
+import { AppConfig, EXPORT_MAX_ROWS, MY_DAY_MAX_DAYS, REPORT_MAX_RANGE_DAYS } from '../../config/app.config.js';
 import { isQueryCanceled } from '../../database/db-errors.js';
+import { AuditService } from '../audit/audit.service.js';
 import { StaffService } from '../staff/staff.service.js';
+import { type CsvCell, type CsvColumn, CsvWriter } from './csv-writer.js';
 import type { ExceptionsQueryDto } from './dto/exceptions-query.dto.js';
 import type { FieldReportQueryDto } from './dto/field-report-query.dto.js';
 import type { MyDayQueryDto } from './dto/my-day-query.dto.js';
 import type { ProfitQueryDto } from './dto/profit-query.dto.js';
 import type { ReceivablesQueryDto } from './dto/receivables-query.dto.js';
+import type { SalesExportQueryDto } from './dto/sales-export-query.dto.js';
 import type { SalesReportQueryDto } from './dto/sales-report-query.dto.js';
 import type { ShrinkageQueryDto } from './dto/shrinkage-query.dto.js';
+import type { StockExportQueryDto } from './dto/stock-export-query.dto.js';
 import type { StockReportQueryDto } from './dto/stock-report-query.dto.js';
 import type { TopProductsQueryDto } from './dto/top-products-query.dto.js';
 import {
@@ -141,6 +145,12 @@ export interface FieldReport {
   names: Map<string, string>;
 }
 
+/** A CSV export: the file name (report name and dates only) and the file. */
+export interface CsvExport {
+  filename: string;
+  csv: string;
+}
+
 export interface ProfitReport extends ProfitReportRows {
   range: ReportRange;
   groupBy: ProfitGroupBy;
@@ -160,6 +170,8 @@ export class ReportsService {
     private readonly config: AppConfig,
     private readonly clock: Clock,
     private readonly cursor: SignedCursor,
+    private readonly audit: AuditService,
+    private readonly csv: CsvWriter,
   ) {}
 
   async sales(query: SalesReportQueryDto): Promise<SalesReport> {
@@ -394,6 +406,81 @@ export class ReportsService {
     return this.cursor.sign(kind, { ...filters, after_at: k.at, after_id: k.id, ...(k.line === undefined ? {} : { after_line: String(k.line) }) });
   }
 
+  /**
+   * The completed sales of a range as CSV, one row per sale. Reads at most
+   * one row more than the cap (one statement), refuses a bigger export,
+   * writes the audit row, then builds the file; a failure after the audit
+   * insert rolls it back with the request's transaction.
+   */
+  async salesExport(query: SalesExportQueryDto): Promise<CsvExport> {
+    const range = reportRange(query.from, query.to);
+    const rows = await this.timed(() =>
+      this.repo.salesExport({
+        from: range.start,
+        to: range.end,
+        locationId: query.location_id ?? null,
+        attendantId: query.attendant_id ?? null,
+        limit: EXPORT_MAX_ROWS + 1,
+      }),
+    );
+    exportFits(rows.length);
+    const names = await this.staff.displayNames(rows.map((r) => r.attendantId));
+    await this.audit.record({
+      action: 'report.exported',
+      targetType: 'report',
+      targetId: null,
+      metadata: { report: 'sales', from: range.from, to: range.to, row_count: rows.length, with_costs: false },
+    });
+    const columns: CsvColumn[] = [
+      { name: 'sale_number', kind: 'formatted' },
+      { name: 'date', kind: 'formatted' },
+      { name: 'time', kind: 'formatted' },
+      { name: 'location', kind: 'text' },
+      { name: 'attendant', kind: 'text' },
+      { name: 'total', kind: 'formatted' },
+      { name: 'paid_total', kind: 'formatted' },
+      { name: 'balance_due', kind: 'formatted' },
+    ];
+    const cells = rows.map((r): CsvCell[] => [r.saleNumber, r.date, r.time, r.locationName, names.get(r.attendantId) ?? '', r.total, r.paidTotal, r.balanceDue]);
+    return { filename: `sales_${range.from}_${range.to}.csv`, csv: this.csv.write(columns, cells) };
+  }
+
+  /** Stock on hand as CSV, one row per pool; cost columns only with costs.view. */
+  async stockExport(query: StockExportQueryDto, canSeeCosts: boolean): Promise<CsvExport> {
+    const rows = await this.timed(() =>
+      this.repo.stockExport({
+        locationId: query.location_id ?? null,
+        includeZero: query.include_zero === 'true',
+        includeArchived: query.include_archived === 'true',
+        limit: EXPORT_MAX_ROWS + 1,
+      }),
+    );
+    exportFits(rows.length);
+    await this.audit.record({
+      action: 'report.exported',
+      targetType: 'report',
+      targetId: null,
+      metadata: { report: 'stock', row_count: rows.length, with_costs: canSeeCosts },
+    });
+    const columns: CsvColumn[] = [
+      { name: 'product', kind: 'text' },
+      { name: 'pack_type', kind: 'text' },
+      { name: 'units_per_pack', kind: 'formatted' },
+      { name: 'location', kind: 'text' },
+      { name: 'quantity', kind: 'formatted' },
+      ...(canSeeCosts ? ([{ name: 'cost_price', kind: 'formatted' }, { name: 'value_at_cost', kind: 'formatted' }] as CsvColumn[]) : []),
+    ];
+    const cells = rows.map((r): CsvCell[] => [
+      r.productName,
+      r.packTypeName,
+      r.unitsPerPack,
+      r.locationName,
+      r.quantity,
+      ...(canSeeCosts ? [r.costPrice, r.valueAtCost] : []),
+    ]);
+    return { filename: `stock_${nairobiDay(this.clock.now())}.csv`, csv: this.csv.write(columns, cells) };
+  }
+
   private async timed<T>(fn: () => Promise<T>): Promise<T> {
     await this.repo.limitStatementTime(this.config.reportStatementTimeoutMs);
     try {
@@ -427,6 +514,13 @@ function topProductsLimit(raw: string | undefined): number {
     throw new ApiError(422, 'VALIDATION_FAILED', `limit must be 1 to ${TOP_PRODUCTS_MAX_LIMIT}.`);
   }
   return n;
+}
+
+/** One row more than the cap was asked for: getting it means the export is too big. */
+function exportFits(rowCount: number): void {
+  if (rowCount > EXPORT_MAX_ROWS) {
+    throw new ApiError(422, 'EXPORT_TOO_LARGE', `An export holds at most ${EXPORT_MAX_ROWS} rows. Narrow the range or the filters.`);
+  }
 }
 
 function listLimit(raw: string | undefined): number {

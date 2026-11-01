@@ -246,6 +246,30 @@ export interface FieldReportRows {
   rows: FieldGroupRow[];
 }
 
+/** One completed sale of the sales export; date and time are Nairobi wall time, money NUMERIC text. */
+export interface SalesExportRow {
+  saleNumber: number;
+  date: string;
+  time: string;
+  locationName: string;
+  attendantId: string;
+  total: string;
+  paidTotal: string;
+  balanceDue: string;
+}
+
+/** One pool of the stock export. costPrice and valueAtCost are cost figures (null when absent). */
+export interface StockExportRow {
+  productName: string;
+  packTypeName: string;
+  unitsPerPack: number;
+  locationName: string;
+  quantity: number;
+  costPrice: string | null;
+  // quantity x cost for a positive balance with a cost; otherwise null.
+  valueAtCost: string | null;
+}
+
 interface RawFieldRow {
   is_total: number;
   k: string | null;
@@ -889,6 +913,74 @@ export class ReportsRepository {
       totals: fieldSums(raw.find((r) => r.is_total === 1)),
       rows: raw.filter((r) => r.is_total === 0).map((r) => ({ attendantId: r.k!, ...fieldSums(r) })),
     };
+  }
+
+  /**
+   * Completed sales placed in [from, to), oldest first, at most `limit`
+   * rows (the caller asks for one more than the export cap). The Nairobi
+   * date and time are formatted here, from the stored UTC instant.
+   */
+  async salesExport(f: { from: Date; to: Date; locationId: string | null; attendantId: string | null; limit: number }): Promise<SalesExportRow[]> {
+    const biz = currentBusinessId();
+    const raw = await currentTx().$queryRaw<
+      { sale_number: number; d: string; tm: string; location_name: string; attendant_id: string; total: string; paid_total: string; balance_due: string }[]
+    >`
+      SELECT s.sale_number,
+             to_char(s.occurred_at AT TIME ZONE 'Africa/Nairobi', 'YYYY-MM-DD') AS d,
+             to_char(s.occurred_at AT TIME ZONE 'Africa/Nairobi', 'HH24:MI:SS') AS tm,
+             l.name AS location_name, s.created_by_membership_id::text AS attendant_id,
+             s.total::text AS total, s.paid_total::text AS paid_total, s.balance_due::text AS balance_due
+        FROM sale s
+        JOIN location l ON l.business_id = s.business_id AND l.id = s.location_id
+       WHERE s.business_id = ${biz}::uuid AND s.status = 'COMPLETED'
+         AND s.occurred_at >= ${f.from} AND s.occurred_at < ${f.to}
+         AND (${f.locationId}::uuid IS NULL OR s.location_id = ${f.locationId}::uuid)
+         AND (${f.attendantId}::uuid IS NULL OR s.created_by_membership_id = ${f.attendantId}::uuid)
+       ORDER BY s.occurred_at, s.id
+       LIMIT ${f.limit}`;
+    return raw.map((r) => ({
+      saleNumber: r.sale_number,
+      date: r.d,
+      time: r.tm,
+      locationName: r.location_name,
+      attendantId: r.attendant_id,
+      total: r.total,
+      paidTotal: r.paid_total,
+      balanceDue: r.balance_due,
+    }));
+  }
+
+  /**
+   * The pools of GET /v1/stock for the same filters and defaults, in its
+   * order (product name, pack type id, location id), at most `limit` rows.
+   */
+  async stockExport(f: { locationId: string | null; includeZero: boolean; includeArchived: boolean; limit: number }): Promise<StockExportRow[]> {
+    const biz = currentBusinessId();
+    const raw = await currentTx().$queryRaw<
+      { product_name: string; pack_type_name: string; units_per_pack: number; location_name: string; quantity: number; cost_price: string | null; value_at_cost: string | null }[]
+    >`
+      SELECT p.name AS product_name, pt.name AS pack_type_name, pt.units_per_pack, l.name AS location_name, b.quantity,
+             pt.cost_price::text AS cost_price,
+             CASE WHEN b.quantity > 0 THEN (b.quantity * pt.cost_price)::text END AS value_at_cost
+        FROM stock_balance b
+        JOIN pack_type pt ON pt.business_id = b.business_id AND pt.id = b.pack_type_id
+        JOIN product p ON p.business_id = pt.business_id AND p.id = pt.product_id
+        JOIN location l ON l.business_id = b.business_id AND l.id = b.location_id
+       WHERE b.business_id = ${biz}::uuid
+         AND (${f.locationId}::uuid IS NULL OR b.location_id = ${f.locationId}::uuid)
+         AND (${f.includeZero}::boolean OR b.quantity <> 0)
+         AND (${f.includeArchived}::boolean OR p.archived_at IS NULL)
+       ORDER BY p.name, b.pack_type_id, b.location_id
+       LIMIT ${f.limit}`;
+    return raw.map((r) => ({
+      productName: r.product_name,
+      packTypeName: r.pack_type_name,
+      unitsPerPack: r.units_per_pack,
+      locationName: r.location_name,
+      quantity: r.quantity,
+      costPrice: r.cost_price,
+      valueAtCost: r.value_at_cost,
+    }));
   }
 }
 

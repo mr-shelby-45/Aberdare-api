@@ -72,6 +72,8 @@ export const REPORT_RATE_LIMIT_WINDOW_MS = 60_000;
 export const REPORT_MAX_RANGE_DAYS = 92;
 /** "My day" reaches this many Nairobi days back, today included. */
 export const MY_DAY_MAX_DAYS = 7;
+/** CSV exports: at most this many rows; one more is 422 EXPORT_TOO_LARGE. */
+export const EXPORT_MAX_ROWS = 50_000;
 
 export class AppConfig {
   @IsIn(APP_ENVS)

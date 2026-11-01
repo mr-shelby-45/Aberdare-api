@@ -1,4 +1,5 @@
-import { Controller, Get, Query, Req, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query, Req, Res, UseGuards } from '@nestjs/common';
+import type { FastifyReply } from 'fastify';
 import type { AuthedRequest } from '../../common/auth/request-auth.js';
 import { RequirePermission } from '../../common/auth/require-permission.decorator.js';
 import { TransactionTimeout } from '../../common/auth/transaction-timeout.decorator.js';
@@ -8,13 +9,15 @@ import { FieldReportQueryDto } from './dto/field-report-query.dto.js';
 import { MyDayQueryDto } from './dto/my-day-query.dto.js';
 import { ProfitQueryDto } from './dto/profit-query.dto.js';
 import { ReceivablesQueryDto } from './dto/receivables-query.dto.js';
+import { SalesExportQueryDto } from './dto/sales-export-query.dto.js';
 import { SalesReportQueryDto } from './dto/sales-report-query.dto.js';
 import { ShrinkageQueryDto } from './dto/shrinkage-query.dto.js';
+import { StockExportQueryDto } from './dto/stock-export-query.dto.js';
 import { StockReportQueryDto } from './dto/stock-report-query.dto.js';
 import { TopProductsQueryDto } from './dto/top-products-query.dto.js';
 import { ReportRateLimitGuard } from './report-rate-limit.guard.js';
 import type { PaymentSplit, ProfitSums, SalesSums } from './reports.repository.js';
-import { type FieldFigures, type ReportRange, type ShrinkageFigures, type StockFigures, ReportsService } from './reports.service.js';
+import { type CsvExport, type FieldFigures, type ReportRange, type ShrinkageFigures, type StockFigures, ReportsService } from './reports.service.js';
 
 // Reports (Phase G1, docs/phase-g1-design.md section 5). Online only, never
 // synced. Each route: the per-member report limit (the guard), a 10 second
@@ -234,6 +237,20 @@ export class ReportsController {
     };
   }
 
+  // CSV exports (G1e). One audit row each, in the request's transaction.
+  @Get('sales/export.csv')
+  @RequirePermission('reports.view')
+  async salesExport(@Query() query: SalesExportQueryDto, @Res({ passthrough: true }) reply: FastifyReply) {
+    return csvReply(reply, await this.reports.salesExport(query));
+  }
+
+  // cost_price and value_at_cost columns only with costs.view.
+  @Get('stock/export.csv')
+  @RequirePermission('reports.view')
+  async stockExport(@Req() request: AuthedRequest, @Query() query: StockExportQueryDto, @Res({ passthrough: true }) reply: FastifyReply) {
+    return csvReply(reply, await this.reports.stockExport(query, request.session!.permissions.has('costs.view')));
+  }
+
   // Attendants and field attendants too: only the caller's own sales, no costs.
   @Get('my-day')
   @RequirePermission('sales.create')
@@ -280,6 +297,14 @@ function shrinkageJson(s: ShrinkageFigures) {
         }
       : {}),
   };
+}
+
+// The file as an attachment. The name holds only the report name and dates
+// (built by the service, never from user text), so it needs no escaping.
+function csvReply(reply: FastifyReply, file: CsvExport): string {
+  void reply.header('content-type', 'text/csv; charset=utf-8');
+  void reply.header('content-disposition', `attachment; filename="${file.filename}"`);
+  return file.csv;
 }
 
 function rangeJson(range: ReportRange | null) {
