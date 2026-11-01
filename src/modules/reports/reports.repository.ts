@@ -80,6 +80,98 @@ export interface ProfitReportRows {
   rows: ProfitGroupRow[];
 }
 
+export type StockGroupBy = 'product' | 'location';
+export type ShrinkageGroupBy = 'reason' | 'person' | 'location' | 'product';
+
+/**
+ * Stock on hand. pieces = quantity x units_per_pack, negative balances
+ * included. valueAtCost and poolsWithoutCost are cost figures (positive
+ * balances only): the service drops them without costs.view.
+ */
+export interface StockSums {
+  pieces: number;
+  pools: number;
+  negativePools: number;
+  valueAtCost: string;
+  poolsWithoutCost: number;
+}
+
+/** One pack type of a product, summed over the locations in the report. */
+export interface StockPackRow {
+  packTypeId: string;
+  name: string;
+  unitsPerPack: number;
+  quantity: number;
+}
+
+/** One group of the stock report: a product id or a location id, with its current name. */
+export interface StockGroupRow extends StockSums {
+  key: string;
+  name: string;
+  // Grouped by product: its pack types, in id order. Otherwise empty.
+  packs: StockPackRow[];
+}
+
+export interface StockReportRows {
+  totals: StockSums;
+  rows: StockGroupRow[];
+}
+
+/**
+ * Shrinkage in pieces (quantity_change x units_per_pack, whatever the pack
+ * type). The value figures are at the pack type's current cost and are cost
+ * figures: the service drops them without costs.view. A movement whose pack
+ * type has no cost is counted in movementsWithoutCost and valued at nothing.
+ */
+export interface ShrinkageSums {
+  unitsLost: number;
+  unitsFound: number;
+  netUnits: number;
+  valueLostAtCost: string;
+  valueFoundAtCost: string;
+  netValueAtCost: string;
+  movementsWithoutCost: number;
+}
+
+/** One group of shrinkage: a reason key, a membership id, a location id or a product id. */
+export interface ShrinkageGroupRow extends ShrinkageSums {
+  key: string;
+  // The current location or product name when grouped by those; otherwise null.
+  name: string | null;
+}
+
+export interface ShrinkageReportRows {
+  totals: ShrinkageSums;
+  rows: ShrinkageGroupRow[];
+}
+
+interface RawStockRow {
+  kind: 'group' | 'total' | 'pack';
+  k: string | null;
+  name: string | null;
+  pieces: string | null;
+  pools: number | null;
+  negative_pools: number | null;
+  value_at_cost: string | null;
+  pools_without_cost: number | null;
+  pack_type_id: string | null;
+  units_per_pack: number | null;
+  quantity: string | null;
+}
+
+interface RawShrinkageRow {
+  is_total: number;
+  k: string | null;
+  name: string | null;
+  lost: string;
+  found: string;
+  net: string;
+  value_lost: string;
+  value_found: string;
+  net_value: string;
+  without_cost: number;
+}
+
 interface RawProfitRow {
   is_total: number;
   k: string | null;
@@ -295,6 +387,132 @@ export class ReportsRepository {
       rows: raw
         .filter((r) => r.is_total === 0)
         .map((r) => ({ key: r.k!, productName: f.groupBy === 'product' ? r.name : null, ...profitSums(r) })),
+    };
+  }
+
+  /**
+   * Stock on hand from stock_balance, with the same filters and defaults as
+   * GET /v1/stock (zero balances and archived products left out unless
+   * asked), grouped by product or location with a totals row (ROLLUP). By
+   * product, also each pack type's quantity over the locations.
+   */
+  async stock(f: { groupBy: StockGroupBy; locationId: string | null; includeZero: boolean; includeArchived: boolean }): Promise<StockReportRows> {
+    const biz = currentBusinessId();
+    const raw = await currentTx().$queryRaw<RawStockRow[]>`
+      WITH b AS (
+        SELECT CASE ${f.groupBy} WHEN 'product' THEN p.id::text ELSE b.location_id::text END AS k,
+               CASE ${f.groupBy} WHEN 'product' THEN p.name ELSE l.name END AS name,
+               b.pack_type_id, pt.name AS pack_type_name, pt.units_per_pack, b.quantity, pt.cost_price
+          FROM stock_balance b
+          JOIN pack_type pt ON pt.business_id = b.business_id AND pt.id = b.pack_type_id
+          JOIN product p ON p.business_id = pt.business_id AND p.id = pt.product_id
+          JOIN location l ON l.business_id = b.business_id AND l.id = b.location_id
+         WHERE b.business_id = ${biz}::uuid
+           AND (${f.locationId}::uuid IS NULL OR b.location_id = ${f.locationId}::uuid)
+           AND (${f.includeZero}::boolean OR b.quantity <> 0)
+           AND (${f.includeArchived}::boolean OR p.archived_at IS NULL)
+      ), g AS (
+        SELECT grouping(k) AS is_total, k, min(name) AS name,
+               sum(quantity::bigint * units_per_pack) AS pieces, count(*)::int AS pools,
+               count(*) FILTER (WHERE quantity < 0)::int AS negative_pools,
+               coalesce(sum(quantity * cost_price) FILTER (WHERE quantity > 0), 0.00) AS value_at_cost,
+               count(*) FILTER (WHERE quantity > 0 AND cost_price IS NULL)::int AS pools_without_cost
+          FROM b GROUP BY ROLLUP (k)
+      ), pk AS (
+        SELECT k, pack_type_id, min(pack_type_name) AS name, min(units_per_pack) AS units_per_pack, sum(quantity) AS quantity
+          FROM b WHERE ${f.groupBy} = 'product'
+         GROUP BY k, pack_type_id
+      )
+      SELECT CASE WHEN is_total = 1 THEN 'total' ELSE 'group' END AS kind, k, name, coalesce(pieces, 0)::text AS pieces,
+             pools, negative_pools, value_at_cost::text AS value_at_cost, pools_without_cost,
+             NULL::text AS pack_type_id, NULL::int AS units_per_pack, NULL::text AS quantity
+        FROM g
+      UNION ALL
+      SELECT 'pack', k, name, NULL, NULL, NULL, NULL, NULL, pack_type_id::text, units_per_pack, quantity::text FROM pk`;
+    const stockSums = (r: RawStockRow | undefined): StockSums => ({
+      pieces: wholeNumber(r?.pieces ?? '0'),
+      pools: r?.pools ?? 0,
+      negativePools: r?.negative_pools ?? 0,
+      valueAtCost: r?.value_at_cost ?? '0.00',
+      poolsWithoutCost: r?.pools_without_cost ?? 0,
+    });
+    const packs = raw
+      .filter((r) => r.kind === 'pack')
+      .sort((a, b) => (a.pack_type_id! < b.pack_type_id! ? -1 : a.pack_type_id! > b.pack_type_id! ? 1 : 0));
+    return {
+      totals: stockSums(raw.find((r) => r.kind === 'total')),
+      rows: raw
+        .filter((r) => r.kind === 'group')
+        .map((r) => ({
+          key: r.k!,
+          name: r.name!,
+          ...stockSums(r),
+          packs: packs
+            .filter((p) => p.k === r.k)
+            .map((p) => ({ packTypeId: p.pack_type_id!, name: p.name!, unitsPerPack: p.units_per_pack!, quantity: wholeNumber(p.quantity!) })),
+        })),
+    };
+  }
+
+  /**
+   * Shrinkage: movements placed by occurred_at in [from, to) that lose or
+   * recover stock. ADJUST with DAMAGED, EXPIRED, LOST or FOUND; COUNT
+   * differences; and every settlement adjustment (key SETTLEMENT, counted
+   * against the settlement's attendant, never the member who closed it).
+   * SUPPLIER_RETURN, CORRECTION and OTHER are not shrinkage. Grouped with a
+   * totals row (ROLLUP); always in pieces.
+   */
+  async shrinkage(f: { from: Date; to: Date; groupBy: ShrinkageGroupBy }): Promise<ShrinkageReportRows> {
+    const biz = currentBusinessId();
+    const raw = await currentTx().$queryRaw<RawShrinkageRow[]>`
+      WITH m AS (
+        SELECT m.quantity_change::bigint * pt.units_per_pack AS pieces,
+               m.quantity_change * pt.cost_price AS value,
+               CASE ${f.groupBy}
+                 WHEN 'reason' THEN CASE WHEN m.settlement_id IS NOT NULL THEN 'SETTLEMENT'
+                                         WHEN m.movement_type = 'COUNT' THEN 'COUNT'
+                                         ELSE m.reason END
+                 WHEN 'person' THEN (CASE WHEN m.settlement_id IS NOT NULL THEN fs.attendant_membership_id
+                                          ELSE m.created_by_membership_id END)::text
+                 WHEN 'location' THEN m.location_id::text
+                 ELSE pt.product_id::text
+               END AS k
+          FROM stock_movement m
+          JOIN pack_type pt ON pt.business_id = m.business_id AND pt.id = m.pack_type_id
+          LEFT JOIN field_settlement fs ON fs.business_id = m.business_id AND fs.id = m.settlement_id
+         WHERE m.business_id = ${biz}::uuid
+           AND m.occurred_at >= ${f.from} AND m.occurred_at < ${f.to}
+           AND ((m.movement_type = 'ADJUST' AND (m.settlement_id IS NOT NULL OR m.reason IN ('DAMAGED', 'EXPIRED', 'LOST', 'FOUND')))
+                OR (m.movement_type = 'COUNT' AND m.quantity_change <> 0))
+      ), g AS (
+        SELECT grouping(k) AS is_total, k,
+               coalesce(-sum(pieces) FILTER (WHERE pieces < 0), 0) AS lost,
+               coalesce(sum(pieces) FILTER (WHERE pieces > 0), 0) AS found,
+               coalesce(sum(pieces), 0) AS net,
+               coalesce(-sum(value) FILTER (WHERE pieces < 0), 0.00) AS value_lost,
+               coalesce(sum(value) FILTER (WHERE pieces > 0), 0.00) AS value_found,
+               coalesce(sum(value), 0.00) AS net_value,
+               count(*) FILTER (WHERE value IS NULL)::int AS without_cost
+          FROM m GROUP BY ROLLUP (k)
+      )
+      SELECT g.is_total, g.k, coalesce(l.name, p.name) AS name,
+             g.lost::text AS lost, g.found::text AS found, g.net::text AS net,
+             g.value_lost::text AS value_lost, g.value_found::text AS value_found, g.net_value::text AS net_value, g.without_cost
+        FROM g
+        LEFT JOIN location l ON ${f.groupBy} = 'location' AND g.is_total = 0 AND l.business_id = ${biz}::uuid AND l.id::text = g.k
+        LEFT JOIN product p ON ${f.groupBy} = 'product' AND g.is_total = 0 AND p.business_id = ${biz}::uuid AND p.id::text = g.k`;
+    const shrinkSums = (r: RawShrinkageRow | undefined): ShrinkageSums => ({
+      unitsLost: wholeNumber(r?.lost ?? '0'),
+      unitsFound: wholeNumber(r?.found ?? '0'),
+      netUnits: wholeNumber(r?.net ?? '0'),
+      valueLostAtCost: r?.value_lost ?? '0.00',
+      valueFoundAtCost: r?.value_found ?? '0.00',
+      netValueAtCost: r?.net_value ?? '0.00',
+      movementsWithoutCost: r?.without_cost ?? 0,
+    });
+    return {
+      totals: shrinkSums(raw.find((r) => r.is_total === 1)),
+      rows: raw.filter((r) => r.is_total === 0).map((r) => ({ key: r.k!, name: r.name, ...shrinkSums(r) })),
     };
   }
 }
