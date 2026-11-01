@@ -4,9 +4,11 @@ import { RequirePermission } from '../../common/auth/require-permission.decorato
 import { TransactionTimeout } from '../../common/auth/transaction-timeout.decorator.js';
 import { REPORT_TRANSACTION_TIMEOUT_MS } from '../../config/app.config.js';
 import { MyDayQueryDto } from './dto/my-day-query.dto.js';
+import { ProfitQueryDto } from './dto/profit-query.dto.js';
 import { SalesReportQueryDto } from './dto/sales-report-query.dto.js';
+import { TopProductsQueryDto } from './dto/top-products-query.dto.js';
 import { ReportRateLimitGuard } from './report-rate-limit.guard.js';
-import type { PaymentSplit, SalesSums } from './reports.repository.js';
+import type { PaymentSplit, ProfitSums, SalesSums } from './reports.repository.js';
 import { ReportsService } from './reports.service.js';
 
 // Reports (Phase G1, docs/phase-g1-design.md section 5). Online only, never
@@ -39,6 +41,47 @@ export class ReportsController {
     };
   }
 
+  // Cost keys (cost, profit, value_without_cost) only with costs.view; absent otherwise.
+  @Get('top-products')
+  @RequirePermission('reports.view')
+  async topProducts(@Req() request: AuthedRequest, @Query() query: TopProductsQueryDto) {
+    const r = await this.reports.topProducts(query, request.session!.permissions.has('costs.view'));
+    return {
+      range: { from: r.range.from, to: r.range.to },
+      by: r.by,
+      rows: r.rows.map((row) => ({
+        product: { id: row.productId, name: row.name },
+        pieces: row.pieces,
+        value: row.value,
+        ...(row.costs
+          ? { cost: row.costs.cost, profit: row.costs.profit, value_without_cost: row.costs.valueWithoutCost }
+          : {}),
+      })),
+    };
+  }
+
+  // Refused (403) without costs.view: every figure here is a cost figure.
+  @Get('profit')
+  @RequirePermission('reports.view', 'costs.view')
+  async profit(@Query() query: ProfitQueryDto) {
+    const r = await this.reports.profit(query);
+    return {
+      range: { from: r.range.from, to: r.range.to },
+      group_by: r.groupBy,
+      totals: { revenue: r.totals.revenue, cost: r.totals.cost, profit: r.totals.profit },
+      lines_without_cost: r.totals.linesWithoutCost,
+      revenue_without_cost: r.totals.revenueWithoutCost,
+      rows: r.rows.map((row) => ({
+        ...(r.groupBy === 'day'
+          ? { date: row.key }
+          : r.groupBy === 'attendant'
+            ? { attendant: { membership_id: row.key, display_name: r.names.get(row.key) ?? null } }
+            : { product: { id: row.key, name: row.productName } }),
+        ...profitJson(row),
+      })),
+    };
+  }
+
   // Attendants and field attendants too: only the caller's own sales, no costs.
   @Get('my-day')
   @RequirePermission('sales.create')
@@ -50,6 +93,16 @@ export class ReportsController {
 
 function sumsJson(s: SalesSums) {
   return { sale_count: s.saleCount, total: s.total, paid_total: s.paidTotal, balance_due: s.balanceDue };
+}
+
+function profitJson(p: ProfitSums) {
+  return {
+    revenue: p.revenue,
+    cost: p.cost,
+    profit: p.profit,
+    lines_without_cost: p.linesWithoutCost,
+    revenue_without_cost: p.revenueWithoutCost,
+  };
 }
 
 function paymentsJson(p: PaymentSplit) {

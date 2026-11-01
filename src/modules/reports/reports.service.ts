@@ -6,8 +6,21 @@ import { AppConfig, MY_DAY_MAX_DAYS, REPORT_MAX_RANGE_DAYS } from '../../config/
 import { isQueryCanceled } from '../../database/db-errors.js';
 import { StaffService } from '../staff/staff.service.js';
 import type { MyDayQueryDto } from './dto/my-day-query.dto.js';
+import type { ProfitQueryDto } from './dto/profit-query.dto.js';
 import type { SalesReportQueryDto } from './dto/sales-report-query.dto.js';
-import { type MyDayRows, ReportsRepository, type SalesGroupBy, type SalesReportRows } from './reports.repository.js';
+import type { TopProductsQueryDto } from './dto/top-products-query.dto.js';
+import {
+  type MyDayRows,
+  type ProfitGroupBy,
+  type ProfitReportRows,
+  ReportsRepository,
+  type SalesGroupBy,
+  type SalesReportRows,
+  type TopProductsBy,
+} from './reports.repository.js';
+
+const TOP_PRODUCTS_DEFAULT_LIMIT = 10;
+const TOP_PRODUCTS_MAX_LIMIT = 50;
 
 /** Inclusive Nairobi days and the half-open instants they cover. */
 export interface ReportRange {
@@ -26,6 +39,28 @@ export interface SalesReport extends SalesReportRows {
 
 export interface MyDay extends MyDayRows {
   date: string;
+}
+
+/** One top product; costs only for a member with costs.view (absent, not null, otherwise). */
+export interface TopProduct {
+  productId: string;
+  name: string;
+  pieces: number;
+  value: string;
+  costs?: { cost: string; profit: string; valueWithoutCost: string };
+}
+
+export interface TopProducts {
+  range: ReportRange;
+  by: TopProductsBy;
+  rows: TopProduct[];
+}
+
+export interface ProfitReport extends ProfitReportRows {
+  range: ReportRange;
+  groupBy: ProfitGroupBy;
+  // Display names of the attendants in rows (group_by attendant only).
+  names: Map<string, string>;
 }
 
 // Reports (Phase G1, docs/phase-g1-design.md). Live queries in Nairobi days;
@@ -69,6 +104,43 @@ export class ReportsService {
     return { ...r, date };
   }
 
+  /**
+   * The best-selling products by pieces or by value. Cost figures only with
+   * costs.view (the caller passes the live permission).
+   */
+  async topProducts(query: TopProductsQueryDto, canSeeCosts: boolean): Promise<TopProducts> {
+    const range = reportRange(query.from, query.to);
+    const by = query.by ?? 'quantity';
+    const limit = topProductsLimit(query.limit);
+    const r = await this.timed(() =>
+      this.repo.topProducts({ from: range.start, to: range.end, by, limit, locationId: query.location_id ?? null }),
+    );
+    const rows = r.map(
+      (x): TopProduct => ({
+        productId: x.productId,
+        name: x.name,
+        pieces: x.pieces,
+        value: x.value,
+        ...(canSeeCosts ? { costs: { cost: x.cost, profit: x.profit, valueWithoutCost: x.valueWithoutCost } } : {}),
+      }),
+    );
+    return { range, by, rows };
+  }
+
+  /** Profit over lines with a recorded cost. The route requires costs.view. */
+  async profit(query: ProfitQueryDto): Promise<ProfitReport> {
+    const range = reportRange(query.from, query.to);
+    const groupBy = query.group_by ?? 'day';
+    const r = await this.timed(() => this.repo.profit({ from: range.start, to: range.end, groupBy }));
+    const names = groupBy === 'attendant' ? await this.staff.displayNames(r.rows.map((x) => x.key)) : new Map<string, string>();
+    // Same order as the sales report: days ascending, products and attendants
+    // by name, then id, in code point order.
+    const label = (x: ProfitReportRows['rows'][number]) =>
+      groupBy === 'attendant' ? (names.get(x.key) ?? '') : groupBy === 'product' ? (x.productName ?? '') : x.key;
+    const rows = [...r.rows].sort((a, b) => compare(label(a), label(b)) || compare(a.key, b.key));
+    return { ...r, rows, range, groupBy, names };
+  }
+
   private async timed<T>(fn: () => Promise<T>): Promise<T> {
     await this.repo.limitStatementTime(this.config.reportStatementTimeoutMs);
     try {
@@ -93,6 +165,15 @@ export function reportRange(fromText: string, toText: string): ReportRange {
   if (span < 1) throw new ApiError(422, 'VALIDATION_FAILED', 'from must not be after to.');
   if (span > REPORT_MAX_RANGE_DAYS) throw new ApiError(422, 'RANGE_TOO_LARGE', `A report covers at most ${REPORT_MAX_RANGE_DAYS} days.`);
   return { from, to, start: nairobiDayStart(from), end: nairobiDayEnd(to) };
+}
+
+function topProductsLimit(raw: string | undefined): number {
+  if (raw === undefined) return TOP_PRODUCTS_DEFAULT_LIMIT;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > TOP_PRODUCTS_MAX_LIMIT) {
+    throw new ApiError(422, 'VALIDATION_FAILED', `limit must be 1 to ${TOP_PRODUCTS_MAX_LIMIT}.`);
+  }
+  return n;
 }
 
 function compare(a: string, b: string): number {
