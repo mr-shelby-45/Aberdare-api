@@ -3,15 +3,18 @@ import type { AuthedRequest } from '../../common/auth/request-auth.js';
 import { RequirePermission } from '../../common/auth/require-permission.decorator.js';
 import { TransactionTimeout } from '../../common/auth/transaction-timeout.decorator.js';
 import { REPORT_TRANSACTION_TIMEOUT_MS } from '../../config/app.config.js';
+import { ExceptionsQueryDto } from './dto/exceptions-query.dto.js';
+import { FieldReportQueryDto } from './dto/field-report-query.dto.js';
 import { MyDayQueryDto } from './dto/my-day-query.dto.js';
 import { ProfitQueryDto } from './dto/profit-query.dto.js';
+import { ReceivablesQueryDto } from './dto/receivables-query.dto.js';
 import { SalesReportQueryDto } from './dto/sales-report-query.dto.js';
 import { ShrinkageQueryDto } from './dto/shrinkage-query.dto.js';
 import { StockReportQueryDto } from './dto/stock-report-query.dto.js';
 import { TopProductsQueryDto } from './dto/top-products-query.dto.js';
 import { ReportRateLimitGuard } from './report-rate-limit.guard.js';
 import type { PaymentSplit, ProfitSums, SalesSums } from './reports.repository.js';
-import { type ShrinkageFigures, type StockFigures, ReportsService } from './reports.service.js';
+import { type FieldFigures, type ReportRange, type ShrinkageFigures, type StockFigures, ReportsService } from './reports.service.js';
 
 // Reports (Phase G1, docs/phase-g1-design.md section 5). Online only, never
 // synced. Each route: the per-member report limit (the guard), a 10 second
@@ -130,6 +133,107 @@ export class ReportsController {
     };
   }
 
+  // Paged. No cost figures in either list, for anyone.
+  @Get('exceptions')
+  @RequirePermission('reports.view')
+  async exceptions(@Query() query: ExceptionsQueryDto) {
+    const r = await this.reports.exceptions(query);
+    const member = (id: string) => memberJson(id, r.names);
+    if (r.type === 'voids') {
+      return {
+        type: r.type,
+        range: rangeJson(r.range),
+        totals: { count: r.count, total: r.sum },
+        rows: r.rows.map((row) => ({
+          sale_id: row.saleId,
+          sale_number: row.saleNumber,
+          occurred_at: row.occurredAt.toISOString(),
+          voided_at: row.voidedAt.toISOString(),
+          total: row.total,
+          reason: row.reason,
+          location: { id: row.locationId, name: row.locationName },
+          attendant: member(row.attendantId),
+          voided_by: member(row.voidedById),
+          approved_by: row.approvedById ? member(row.approvedById) : null,
+        })),
+        next_cursor: r.nextCursor,
+      };
+    }
+    return {
+      type: r.type,
+      range: rangeJson(r.range),
+      totals: { lines: r.count, difference: r.sum },
+      rows: r.rows.map((row) => ({
+        sale_id: row.saleId,
+        sale_number: row.saleNumber,
+        occurred_at: row.occurredAt.toISOString(),
+        line_no: row.lineNo,
+        attendant: member(row.attendantId),
+        product_name: row.productName,
+        pack_type_name: row.packTypeName,
+        quantity: row.quantity,
+        unit_price: row.unitPrice,
+        list_price: row.listPrice,
+        difference: row.difference,
+      })),
+      next_cursor: r.nextCursor,
+    };
+  }
+
+  // Paged. The M-Pesa code is shown to members with reports.view; it is never logged.
+  @Get('receivables')
+  @RequirePermission('reports.view')
+  async receivables(@Query() query: ReceivablesQueryDto) {
+    const r = await this.reports.receivables(query);
+    const member = (id: string) => memberJson(id, r.names);
+    if (r.type === 'unpaid') {
+      return {
+        type: r.type,
+        range: rangeJson(r.range),
+        totals: { count: r.count, balance_due: r.sum },
+        rows: r.rows.map((row) => ({
+          sale_id: row.saleId,
+          sale_number: row.saleNumber,
+          occurred_at: row.occurredAt.toISOString(),
+          age_days: row.ageDays,
+          attendant: member(row.attendantId),
+          location: { id: row.locationId, name: row.locationName },
+          total: row.total,
+          balance_due: row.balanceDue,
+        })),
+        next_cursor: r.nextCursor,
+      };
+    }
+    return {
+      type: r.type,
+      range: rangeJson(r.range),
+      totals: { count: r.count, amount: r.sum },
+      rows: r.rows.map((row) => ({
+        payment_id: row.paymentId,
+        sale_id: row.saleId,
+        sale_number: row.saleNumber,
+        occurred_at: row.occurredAt.toISOString(),
+        amount: row.amount,
+        mpesa_code: row.mpesaCode,
+        attendant: member(row.attendantId),
+        duplicate: row.duplicate,
+      })),
+      next_cursor: r.nextCursor,
+    };
+  }
+
+  // shortage_value_at_cost and shortage_lines_without_cost only with costs.view.
+  @Get('field')
+  @RequirePermission('reports.view')
+  async field(@Req() request: AuthedRequest, @Query() query: FieldReportQueryDto) {
+    const r = await this.reports.field(query, request.session!.permissions.has('costs.view'));
+    return {
+      range: rangeJson(r.range),
+      totals: fieldJson(r.totals),
+      rows: r.rows.map((row) => ({ attendant: memberJson(row.attendantId, r.names), ...fieldJson(row) })),
+    };
+  }
+
   // Attendants and field attendants too: only the caller's own sales, no costs.
   @Get('my-day')
   @RequirePermission('sales.create')
@@ -174,6 +278,30 @@ function shrinkageJson(s: ShrinkageFigures) {
           net_value_at_cost: s.costs.netValueAtCost,
           movements_without_cost: s.costs.movementsWithoutCost,
         }
+      : {}),
+  };
+}
+
+function rangeJson(range: ReportRange | null) {
+  return range ? { from: range.from, to: range.to } : null;
+}
+
+function memberJson(id: string, names: Map<string, string>) {
+  return { membership_id: id, display_name: names.get(id) ?? null };
+}
+
+function fieldJson(s: FieldFigures) {
+  return {
+    settlement_count: s.settlementCount,
+    expected_cash: s.expectedCash,
+    cash_received: s.cashReceived,
+    cash_variance: s.cashVariance,
+    mpesa_unverified_total: s.mpesaUnverifiedTotal,
+    unpaid_total: s.unpaidTotal,
+    shortage_units: s.shortageUnits,
+    surplus_units: s.surplusUnits,
+    ...(s.costs
+      ? { shortage_value_at_cost: s.costs.shortageValueAtCost, shortage_lines_without_cost: s.costs.shortageLinesWithoutCost }
       : {}),
   };
 }

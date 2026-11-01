@@ -145,6 +145,122 @@ export interface ShrinkageReportRows {
   rows: ShrinkageGroupRow[];
 }
 
+/**
+ * One page of a list report, with the count and sum of the whole filtered
+ * set (not just the page), read in the same statement.
+ */
+export interface ListPage<T> {
+  count: number;
+  sum: string;
+  rows: T[];
+}
+
+/** Where the previous page ended: its last row's time (timestamptz text, full precision) and id, and line for below-list. */
+export interface ListAfter {
+  at: string;
+  id: string;
+  line?: number;
+}
+
+export interface VoidRow {
+  saleId: string;
+  saleNumber: number;
+  occurredAt: Date;
+  voidedAt: Date;
+  atKey: string;
+  total: string;
+  reason: string;
+  locationId: string;
+  locationName: string;
+  attendantId: string;
+  voidedById: string;
+  // The approver when an approval was used; null when the voider held sales.void.
+  approvedById: string | null;
+}
+
+export interface BelowListRow {
+  saleId: string;
+  saleNumber: number;
+  occurredAt: Date;
+  atKey: string;
+  lineNo: number;
+  attendantId: string;
+  productName: string;
+  packTypeName: string;
+  quantity: number;
+  unitPrice: string;
+  listPrice: string;
+  // (list_price - unit_price) x quantity.
+  difference: string;
+}
+
+export interface UnpaidRow {
+  saleId: string;
+  saleNumber: number;
+  occurredAt: Date;
+  atKey: string;
+  attendantId: string;
+  locationId: string;
+  locationName: string;
+  total: string;
+  balanceDue: string;
+}
+
+export interface UnverifiedMpesaRow {
+  paymentId: string;
+  saleId: string;
+  saleNumber: number;
+  occurredAt: Date;
+  atKey: string;
+  amount: string;
+  mpesaCode: string;
+  attendantId: string;
+  duplicate: boolean;
+}
+
+/**
+ * Field settlements per attendant. Shortage and surplus in pieces
+ * (variance x units_per_pack). shortageValueAtCost and
+ * shortageLinesWithoutCost are cost figures: the service drops them without
+ * costs.view.
+ */
+export interface FieldSums {
+  settlementCount: number;
+  expectedCash: string;
+  cashReceived: string;
+  cashVariance: string;
+  mpesaUnverifiedTotal: string;
+  unpaidTotal: string;
+  shortageUnits: number;
+  surplusUnits: number;
+  shortageValueAtCost: string;
+  shortageLinesWithoutCost: number;
+}
+
+export interface FieldGroupRow extends FieldSums {
+  attendantId: string;
+}
+
+export interface FieldReportRows {
+  totals: FieldSums;
+  rows: FieldGroupRow[];
+}
+
+interface RawFieldRow {
+  is_total: number;
+  k: string | null;
+  n: number;
+  expected_cash: string;
+  cash_received: string;
+  cash_variance: string;
+  mpesa_unverified: string;
+  unpaid: string;
+  shortage: string | null;
+  surplus: string | null;
+  shortage_value: string | null;
+  shortage_without_cost: number | null;
+}
+
 interface RawStockRow {
   kind: 'group' | 'total' | 'pack';
   k: string | null;
@@ -513,6 +629,265 @@ export class ReportsRepository {
     return {
       totals: shrinkSums(raw.find((r) => r.is_total === 1)),
       rows: raw.filter((r) => r.is_total === 0).map((r) => ({ key: r.k!, name: r.name, ...shrinkSums(r) })),
+    };
+  }
+
+  // The four list reports share one shape: a CTE of the filtered set, its
+  // count and sum, and LEFT JOIN LATERAL the page (keyset after the cursor),
+  // so a statement always returns the totals row even for an empty page.
+
+  /** Voided sales whose voided_at is in [from, to), newest void first. */
+  async voids(f: { from: Date; to: Date; after: ListAfter | null; limit: number }): Promise<ListPage<VoidRow>> {
+    const biz = currentBusinessId();
+    const raw = await currentTx().$queryRaw<
+      ({ n: number; sum_total: string } & Partial<{ id: string; sale_number: number; occurred_at: Date; voided_at: Date; at_key: string; total: string; void_reason: string; location_id: string; location_name: string; created_by_membership_id: string; voided_by_membership_id: string; approved_by: string | null }>)[]
+    >`
+      WITH s AS (
+        SELECT s.id, s.sale_number, s.occurred_at, s.voided_at, s.voided_at::text AS at_key, s.total::text AS total, s.void_reason,
+               s.location_id::text AS location_id, l.name AS location_name,
+               s.created_by_membership_id::text AS created_by_membership_id, s.voided_by_membership_id::text AS voided_by_membership_id,
+               CASE WHEN s.void_approval_id IS NOT NULL THEN s.void_approved_by_membership_id::text END AS approved_by,
+               s.total AS amount
+          FROM sale s
+          JOIN location l ON l.business_id = s.business_id AND l.id = s.location_id
+         WHERE s.business_id = ${biz}::uuid AND s.status = 'VOIDED'
+           AND s.voided_at >= ${f.from} AND s.voided_at < ${f.to}
+      )
+      SELECT t.n, t.sum_total, p.id::text AS id, p.sale_number, p.occurred_at, p.voided_at, p.at_key, p.total, p.void_reason,
+             p.location_id, p.location_name, p.created_by_membership_id, p.voided_by_membership_id, p.approved_by
+        FROM (SELECT count(*)::int AS n, coalesce(sum(amount), 0.00)::text AS sum_total FROM s) t
+        LEFT JOIN LATERAL (
+          SELECT * FROM s
+           WHERE (${f.after?.at ?? null}::timestamptz IS NULL
+                  OR (voided_at, id) < (${f.after?.at ?? null}::timestamptz, ${f.after?.id ?? null}::uuid))
+           ORDER BY voided_at DESC, id DESC
+           LIMIT ${f.limit}
+        ) p ON true
+       ORDER BY p.voided_at DESC, p.id DESC`;
+    return {
+      count: raw[0]?.n ?? 0,
+      sum: raw[0]?.sum_total ?? '0.00',
+      rows: raw
+        .filter((r) => r.id)
+        .map((r) => ({
+          saleId: r.id!,
+          saleNumber: r.sale_number!,
+          occurredAt: r.occurred_at!,
+          voidedAt: r.voided_at!,
+          atKey: r.at_key!,
+          total: r.total!,
+          reason: r.void_reason!,
+          locationId: r.location_id!,
+          locationName: r.location_name!,
+          attendantId: r.created_by_membership_id!,
+          voidedById: r.voided_by_membership_id!,
+          approvedById: r.approved_by ?? null,
+        })),
+    };
+  }
+
+  /** Lines of completed sales placed in [from, to) sold below list price, newest sale first, then line order. */
+  async belowList(f: { from: Date; to: Date; after: ListAfter | null; limit: number }): Promise<ListPage<BelowListRow>> {
+    const biz = currentBusinessId();
+    const raw = await currentTx().$queryRaw<
+      ({ n: number; sum_diff: string } & Partial<{ sale_id: string; sale_number: number; occurred_at: Date; at_key: string; line_no: number; created_by_membership_id: string; product_name: string; pack_type_name: string; quantity: number; unit_price: string; list_price: string; difference: string }>)[]
+    >`
+      WITH x AS (
+        SELECT s.id AS sid, s.sale_number, s.occurred_at, s.occurred_at::text AS at_key, s.created_by_membership_id::text AS created_by_membership_id,
+               li.line_no, li.product_name, li.pack_type_name, li.quantity, li.unit_price::text AS unit_price, li.list_price::text AS list_price,
+               (li.list_price - li.unit_price) * li.quantity AS diff
+          FROM sale s
+          JOIN sale_item li ON li.business_id = s.business_id AND li.sale_id = s.id
+         WHERE s.business_id = ${biz}::uuid AND s.status = 'COMPLETED'
+           AND s.occurred_at >= ${f.from} AND s.occurred_at < ${f.to}
+           AND li.unit_price < li.list_price
+      )
+      SELECT t.n, t.sum_diff, p.sid::text AS sale_id, p.sale_number, p.occurred_at, p.at_key, p.line_no, p.created_by_membership_id,
+             p.product_name, p.pack_type_name, p.quantity, p.unit_price, p.list_price, p.diff::text AS difference
+        FROM (SELECT count(*)::int AS n, coalesce(sum(diff), 0.00)::text AS sum_diff FROM x) t
+        LEFT JOIN LATERAL (
+          SELECT * FROM x
+           WHERE ${f.after?.at ?? null}::timestamptz IS NULL
+              OR occurred_at < ${f.after?.at ?? null}::timestamptz
+              OR (occurred_at = ${f.after?.at ?? null}::timestamptz
+                  AND (sid < ${f.after?.id ?? null}::uuid
+                       OR (sid = ${f.after?.id ?? null}::uuid AND line_no > ${f.after?.line ?? null}::int)))
+           ORDER BY occurred_at DESC, sid DESC, line_no
+           LIMIT ${f.limit}
+        ) p ON true
+       ORDER BY p.occurred_at DESC, p.sid DESC, p.line_no`;
+    return {
+      count: raw[0]?.n ?? 0,
+      sum: raw[0]?.sum_diff ?? '0.00',
+      rows: raw
+        .filter((r) => r.sale_id)
+        .map((r) => ({
+          saleId: r.sale_id!,
+          saleNumber: r.sale_number!,
+          occurredAt: r.occurred_at!,
+          atKey: r.at_key!,
+          lineNo: r.line_no!,
+          attendantId: r.created_by_membership_id!,
+          productName: r.product_name!,
+          packTypeName: r.pack_type_name!,
+          quantity: r.quantity!,
+          unitPrice: r.unit_price!,
+          listPrice: r.list_price!,
+          difference: r.difference!,
+        })),
+    };
+  }
+
+  /** Completed sales with balance_due > 0, placed in [from, to) or ever (null), oldest first. */
+  async unpaid(f: { from: Date | null; to: Date | null; after: ListAfter | null; limit: number }): Promise<ListPage<UnpaidRow>> {
+    const biz = currentBusinessId();
+    const raw = await currentTx().$queryRaw<
+      ({ n: number; sum_due: string } & Partial<{ id: string; sale_number: number; occurred_at: Date; at_key: string; created_by_membership_id: string; location_id: string; location_name: string; total: string; balance_due: string }>)[]
+    >`
+      WITH s AS (
+        SELECT s.id, s.sale_number, s.occurred_at, s.occurred_at::text AS at_key, s.created_by_membership_id::text AS created_by_membership_id,
+               s.location_id::text AS location_id, l.name AS location_name, s.total::text AS total, s.balance_due::text AS balance_due,
+               s.balance_due AS due
+          FROM sale s
+          JOIN location l ON l.business_id = s.business_id AND l.id = s.location_id
+         WHERE s.business_id = ${biz}::uuid AND s.status = 'COMPLETED' AND s.balance_due > 0
+           AND (${f.from}::timestamptz IS NULL OR s.occurred_at >= ${f.from}::timestamptz)
+           AND (${f.to}::timestamptz IS NULL OR s.occurred_at < ${f.to}::timestamptz)
+      )
+      SELECT t.n, t.sum_due, p.id::text AS id, p.sale_number, p.occurred_at, p.at_key, p.created_by_membership_id,
+             p.location_id, p.location_name, p.total, p.balance_due
+        FROM (SELECT count(*)::int AS n, coalesce(sum(due), 0.00)::text AS sum_due FROM s) t
+        LEFT JOIN LATERAL (
+          SELECT * FROM s
+           WHERE (${f.after?.at ?? null}::timestamptz IS NULL
+                  OR (occurred_at, id) > (${f.after?.at ?? null}::timestamptz, ${f.after?.id ?? null}::uuid))
+           ORDER BY occurred_at, id
+           LIMIT ${f.limit}
+        ) p ON true
+       ORDER BY p.occurred_at, p.id`;
+    return {
+      count: raw[0]?.n ?? 0,
+      sum: raw[0]?.sum_due ?? '0.00',
+      rows: raw
+        .filter((r) => r.id)
+        .map((r) => ({
+          saleId: r.id!,
+          saleNumber: r.sale_number!,
+          occurredAt: r.occurred_at!,
+          atKey: r.at_key!,
+          attendantId: r.created_by_membership_id!,
+          locationId: r.location_id!,
+          locationName: r.location_name!,
+          total: r.total!,
+          balanceDue: r.balance_due!,
+        })),
+    };
+  }
+
+  /**
+   * Recorded, unverified M-Pesa payments of completed sales (a voided sale's
+   * payments are REVERSED), placed in [from, to) or ever (null), oldest first.
+   * Duplicate-code payments are included and flagged.
+   */
+  async unverifiedMpesa(f: { from: Date | null; to: Date | null; after: ListAfter | null; limit: number }): Promise<ListPage<UnverifiedMpesaRow>> {
+    const biz = currentBusinessId();
+    const raw = await currentTx().$queryRaw<
+      ({ n: number; sum_amount: string } & Partial<{ id: string; sale_id: string; sale_number: number; occurred_at: Date; at_key: string; amount: string; mpesa_code: string; created_by_membership_id: string; duplicate: boolean }>)[]
+    >`
+      WITH x AS (
+        SELECT pm.id, pm.sale_id::text AS sale_id, s.sale_number, pm.occurred_at, pm.occurred_at::text AS at_key,
+               pm.amount::text AS amount, pm.amount AS paid, pm.mpesa_code, pm.created_by_membership_id::text AS created_by_membership_id,
+               (pm.duplicate_of_payment_id IS NOT NULL) AS duplicate
+          FROM payment pm
+          JOIN sale s ON s.business_id = pm.business_id AND s.id = pm.sale_id
+         WHERE pm.business_id = ${biz}::uuid AND pm.method = 'MPESA' AND pm.status = 'RECORDED' AND NOT pm.verified
+           AND s.status = 'COMPLETED'
+           AND (${f.from}::timestamptz IS NULL OR pm.occurred_at >= ${f.from}::timestamptz)
+           AND (${f.to}::timestamptz IS NULL OR pm.occurred_at < ${f.to}::timestamptz)
+      )
+      SELECT t.n, t.sum_amount, p.id::text AS id, p.sale_id, p.sale_number, p.occurred_at, p.at_key, p.amount, p.mpesa_code,
+             p.created_by_membership_id, p.duplicate
+        FROM (SELECT count(*)::int AS n, coalesce(sum(paid), 0.00)::text AS sum_amount FROM x) t
+        LEFT JOIN LATERAL (
+          SELECT * FROM x
+           WHERE (${f.after?.at ?? null}::timestamptz IS NULL
+                  OR (occurred_at, id) > (${f.after?.at ?? null}::timestamptz, ${f.after?.id ?? null}::uuid))
+           ORDER BY occurred_at, id
+           LIMIT ${f.limit}
+        ) p ON true
+       ORDER BY p.occurred_at, p.id`;
+    return {
+      count: raw[0]?.n ?? 0,
+      sum: raw[0]?.sum_amount ?? '0.00',
+      rows: raw
+        .filter((r) => r.id)
+        .map((r) => ({
+          paymentId: r.id!,
+          saleId: r.sale_id!,
+          saleNumber: r.sale_number!,
+          occurredAt: r.occurred_at!,
+          atKey: r.at_key!,
+          amount: r.amount!,
+          mpesaCode: r.mpesa_code!,
+          attendantId: r.created_by_membership_id!,
+          duplicate: r.duplicate!,
+        })),
+    };
+  }
+
+  /**
+   * Field settlements whose period_end is in [from, to), per attendant, with
+   * a totals row (ROLLUP): the money figures as stored on each settlement,
+   * and the lines' shortages and surpluses in pieces.
+   */
+  async field(f: { from: Date; to: Date; attendantId: string | null }): Promise<FieldReportRows> {
+    const biz = currentBusinessId();
+    const raw = await currentTx().$queryRaw<RawFieldRow[]>`
+      WITH fs AS (
+        SELECT id, business_id, attendant_membership_id, expected_cash, cash_received, cash_variance, mpesa_unverified_total, unpaid_total
+          FROM field_settlement
+         WHERE business_id = ${biz}::uuid
+           AND period_end >= ${f.from} AND period_end < ${f.to}
+           AND (${f.attendantId}::uuid IS NULL OR attendant_membership_id = ${f.attendantId}::uuid)
+      ), mon AS (
+        SELECT grouping(attendant_membership_id) AS is_total, attendant_membership_id::text AS k, count(*)::int AS n,
+               sum(expected_cash) AS expected_cash, sum(cash_received) AS cash_received, sum(cash_variance) AS cash_variance,
+               sum(mpesa_unverified_total) AS mpesa_unverified, sum(unpaid_total) AS unpaid
+          FROM fs GROUP BY ROLLUP (attendant_membership_id)
+      ), ln AS (
+        SELECT grouping(fs.attendant_membership_id) AS is_total, fs.attendant_membership_id::text AS k,
+               coalesce(sum(-l.variance * pt.units_per_pack) FILTER (WHERE l.variance < 0), 0) AS shortage,
+               coalesce(sum(l.variance * pt.units_per_pack) FILTER (WHERE l.variance > 0), 0) AS surplus,
+               coalesce(sum(-l.variance * pt.cost_price) FILTER (WHERE l.variance < 0), 0.00) AS shortage_value,
+               count(*) FILTER (WHERE l.variance < 0 AND pt.cost_price IS NULL)::int AS shortage_without_cost
+          FROM fs
+          JOIN field_settlement_line l ON l.business_id = fs.business_id AND l.settlement_id = fs.id
+          JOIN pack_type pt ON pt.business_id = l.business_id AND pt.id = l.pack_type_id
+         GROUP BY ROLLUP (fs.attendant_membership_id)
+      )
+      SELECT mon.is_total, mon.k, mon.n,
+             coalesce(mon.expected_cash, 0.00)::text AS expected_cash, coalesce(mon.cash_received, 0.00)::text AS cash_received,
+             coalesce(mon.cash_variance, 0.00)::text AS cash_variance, coalesce(mon.mpesa_unverified, 0.00)::text AS mpesa_unverified,
+             coalesce(mon.unpaid, 0.00)::text AS unpaid,
+             ln.shortage::text AS shortage, ln.surplus::text AS surplus, ln.shortage_value::text AS shortage_value, ln.shortage_without_cost
+        FROM mon
+        LEFT JOIN ln ON ln.is_total = mon.is_total AND ln.k IS NOT DISTINCT FROM mon.k`;
+    const fieldSums = (r: RawFieldRow | undefined): FieldSums => ({
+      settlementCount: r?.n ?? 0,
+      expectedCash: r?.expected_cash ?? '0.00',
+      cashReceived: r?.cash_received ?? '0.00',
+      cashVariance: r?.cash_variance ?? '0.00',
+      mpesaUnverifiedTotal: r?.mpesa_unverified ?? '0.00',
+      unpaidTotal: r?.unpaid ?? '0.00',
+      // A settlement with no lines has no ln row.
+      shortageUnits: wholeNumber(r?.shortage ?? '0'),
+      surplusUnits: wholeNumber(r?.surplus ?? '0'),
+      shortageValueAtCost: r?.shortage_value ?? '0.00',
+      shortageLinesWithoutCost: r?.shortage_without_cost ?? 0,
+    });
+    return {
+      totals: fieldSums(raw.find((r) => r.is_total === 1)),
+      rows: raw.filter((r) => r.is_total === 0).map((r) => ({ attendantId: r.k!, ...fieldSums(r) })),
     };
   }
 }

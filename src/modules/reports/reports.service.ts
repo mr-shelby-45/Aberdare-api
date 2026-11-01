@@ -1,17 +1,26 @@
 import { Injectable } from '@nestjs/common';
 import { ApiError } from '../../common/errors/api.error.js';
+import { type CursorValues, SignedCursor, cursorUuid } from '../../common/paging/signed-cursor.js';
 import { Clock } from '../../common/time/clock.js';
 import { daysBetween, nairobiDay, nairobiDayEnd, nairobiDayStart, parseDay } from '../../common/time/nairobi.js';
 import { AppConfig, MY_DAY_MAX_DAYS, REPORT_MAX_RANGE_DAYS } from '../../config/app.config.js';
 import { isQueryCanceled } from '../../database/db-errors.js';
 import { StaffService } from '../staff/staff.service.js';
+import type { ExceptionsQueryDto } from './dto/exceptions-query.dto.js';
+import type { FieldReportQueryDto } from './dto/field-report-query.dto.js';
 import type { MyDayQueryDto } from './dto/my-day-query.dto.js';
 import type { ProfitQueryDto } from './dto/profit-query.dto.js';
+import type { ReceivablesQueryDto } from './dto/receivables-query.dto.js';
 import type { SalesReportQueryDto } from './dto/sales-report-query.dto.js';
 import type { ShrinkageQueryDto } from './dto/shrinkage-query.dto.js';
 import type { StockReportQueryDto } from './dto/stock-report-query.dto.js';
 import type { TopProductsQueryDto } from './dto/top-products-query.dto.js';
 import {
+  type BelowListRow,
+  type FieldGroupRow,
+  type FieldSums,
+  type ListAfter,
+  type ListPage,
   type MyDayRows,
   type ProfitGroupBy,
   type ProfitReportRows,
@@ -25,6 +34,9 @@ import {
   type StockGroupRow,
   type StockSums,
   type TopProductsBy,
+  type UnpaidRow,
+  type UnverifiedMpesaRow,
+  type VoidRow,
 } from './reports.repository.js';
 
 // Shrinkage reasons in the order they are listed.
@@ -32,6 +44,15 @@ const SHRINKAGE_REASONS = ['DAMAGED', 'EXPIRED', 'LOST', 'FOUND', 'COUNT', 'SETT
 
 const TOP_PRODUCTS_DEFAULT_LIMIT = 10;
 const TOP_PRODUCTS_MAX_LIMIT = 50;
+const LIST_DEFAULT_LIMIT = 20;
+const LIST_MAX_LIMIT = 100;
+// SignedCursor kinds: a cursor from one list is refused by every other.
+const CURSOR_KINDS = {
+  voids: 'report-voids',
+  below_list: 'report-below-list',
+  unpaid: 'report-unpaid',
+  unverified_mpesa: 'report-unverified-mpesa',
+} as const;
 
 /** Inclusive Nairobi days and the half-open instants they cover. */
 export interface ReportRange {
@@ -92,6 +113,34 @@ export interface ShrinkageReport {
   names: Map<string, string>;
 }
 
+/** A page of a list report; count and sum cover the whole filtered set. */
+export interface ListReport<T> extends ListPage<T> {
+  range: ReportRange | null;
+  // Display names of every member named in the page.
+  names: Map<string, string>;
+  nextCursor: string | null;
+}
+
+export type ExceptionsReport =
+  | ({ type: 'voids' } & ListReport<VoidRow>)
+  | ({ type: 'below_list' } & ListReport<BelowListRow>);
+
+export type ReceivablesReport =
+  | ({ type: 'unpaid' } & ListReport<UnpaidRow & { ageDays: number }>)
+  | ({ type: 'unverified_mpesa' } & ListReport<UnverifiedMpesaRow>);
+
+/** Field figures, plus the cost ones only for costs.view (absent, not null, otherwise). */
+export type FieldFigures = Omit<FieldSums, 'shortageValueAtCost' | 'shortageLinesWithoutCost'> & {
+  costs?: Pick<FieldSums, 'shortageValueAtCost' | 'shortageLinesWithoutCost'>;
+};
+
+export interface FieldReport {
+  range: ReportRange;
+  totals: FieldFigures;
+  rows: (FieldFigures & Pick<FieldGroupRow, 'attendantId'>)[];
+  names: Map<string, string>;
+}
+
 export interface ProfitReport extends ProfitReportRows {
   range: ReportRange;
   groupBy: ProfitGroupBy;
@@ -110,6 +159,7 @@ export class ReportsService {
     private readonly staff: StaffService,
     private readonly config: AppConfig,
     private readonly clock: Clock,
+    private readonly cursor: SignedCursor,
   ) {}
 
   async sales(query: SalesReportQueryDto): Promise<SalesReport> {
@@ -232,6 +282,118 @@ export class ReportsService {
     return { range, groupBy, totals: figures(r.totals), rows, names };
   }
 
+  /** Voids (by voided_at) or below-list lines (by the sale's occurred_at), paged, newest first. No cost figures. */
+  async exceptions(query: ExceptionsQueryDto): Promise<ExceptionsReport> {
+    const range = reportRange(query.from, query.to);
+    const limit = listLimit(query.limit);
+    const filters: CursorValues = { from: range.from, to: range.to };
+    const kind = CURSOR_KINDS[query.type];
+    const after = this.readAfter(kind, query.cursor, filters, query.type === 'below_list');
+    if (query.type === 'voids') {
+      const page = await this.timed(() => this.repo.voids({ from: range.start, to: range.end, after, limit: limit + 1 }));
+      const rows = page.rows.slice(0, limit);
+      const ids = rows.flatMap((r) => [r.attendantId, r.voidedById, ...(r.approvedById ? [r.approvedById] : [])]);
+      return {
+        type: 'voids',
+        ...page,
+        rows,
+        range,
+        names: await this.staff.displayNames(ids),
+        nextCursor: this.nextCursor(kind, filters, page.rows.length > limit ? rows[rows.length - 1] : undefined, (r) => ({ at: r.atKey, id: r.saleId })),
+      };
+    }
+    const page = await this.timed(() => this.repo.belowList({ from: range.start, to: range.end, after, limit: limit + 1 }));
+    const rows = page.rows.slice(0, limit);
+    return {
+      type: 'below_list',
+      ...page,
+      rows,
+      range,
+      names: await this.staff.displayNames(rows.map((r) => r.attendantId)),
+      nextCursor: this.nextCursor(kind, filters, page.rows.length > limit ? rows[rows.length - 1] : undefined, (r) => ({ at: r.atKey, id: r.saleId, line: r.lineNo })),
+    };
+  }
+
+  /** Unpaid sales or unverified M-Pesa payments, paged, oldest first; all time unless a range is given. */
+  async receivables(query: ReceivablesQueryDto): Promise<ReceivablesReport> {
+    if ((query.from === undefined) !== (query.to === undefined)) {
+      throw new ApiError(422, 'VALIDATION_FAILED', 'Give both from and to, or neither.');
+    }
+    const range = query.from !== undefined && query.to !== undefined ? reportRange(query.from, query.to) : null;
+    const limit = listLimit(query.limit);
+    const filters: CursorValues = { from: range?.from ?? null, to: range?.to ?? null };
+    const kind = CURSOR_KINDS[query.type];
+    const after = this.readAfter(kind, query.cursor, filters, false);
+    const window = { from: range?.start ?? null, to: range?.end ?? null, after, limit: limit + 1 };
+    if (query.type === 'unpaid') {
+      const page = await this.timed(() => this.repo.unpaid(window));
+      // Whole Nairobi days from the sale's date to today's (the Clock's).
+      const today = nairobiDay(this.clock.now());
+      const rows = page.rows.slice(0, limit).map((r) => ({ ...r, ageDays: daysBetween(nairobiDay(r.occurredAt), today) }));
+      return {
+        type: 'unpaid',
+        ...page,
+        rows,
+        range,
+        names: await this.staff.displayNames(rows.map((r) => r.attendantId)),
+        nextCursor: this.nextCursor(kind, filters, page.rows.length > limit ? rows[rows.length - 1] : undefined, (r) => ({ at: r.atKey, id: r.saleId })),
+      };
+    }
+    const page = await this.timed(() => this.repo.unverifiedMpesa(window));
+    const rows = page.rows.slice(0, limit);
+    return {
+      type: 'unverified_mpesa',
+      ...page,
+      rows,
+      range,
+      names: await this.staff.displayNames(rows.map((r) => r.attendantId)),
+      nextCursor: this.nextCursor(kind, filters, page.rows.length > limit ? rows[rows.length - 1] : undefined, (r) => ({ at: r.atKey, id: r.paymentId })),
+    };
+  }
+
+  /** Field settlements per attendant by period_end; the shortage value only with costs.view. */
+  async field(query: FieldReportQueryDto, canSeeCosts: boolean): Promise<FieldReport> {
+    const range = reportRange(query.from, query.to);
+    const r = await this.timed(() => this.repo.field({ from: range.start, to: range.end, attendantId: query.attendant_id ?? null }));
+    const names = await this.staff.displayNames(r.rows.map((x) => x.attendantId));
+    const figures = ({ shortageValueAtCost, shortageLinesWithoutCost, ...rest }: FieldSums): FieldFigures => ({
+      ...rest,
+      ...(canSeeCosts ? { costs: { shortageValueAtCost, shortageLinesWithoutCost } } : {}),
+    });
+    const rows = [...r.rows]
+      .sort((a, b) => compare(names.get(a.attendantId) ?? '', names.get(b.attendantId) ?? '') || compare(a.attendantId, b.attendantId))
+      .map(({ attendantId, ...sums }) => ({ attendantId, ...figures(sums) }));
+    return { range, totals: figures(r.totals), rows, names };
+  }
+
+  /**
+   * The previous page's end from a cursor: genuine, of this list, issued for
+   * exactly these filters, with values of the right types. Anything else is
+   * 422 VALIDATION_FAILED.
+   */
+  private readAfter(kind: string, cursor: string | undefined, filters: CursorValues, withLine: boolean): ListAfter | null {
+    if (cursor === undefined) return null;
+    const v = this.cursor.read(kind, cursor);
+    const id = cursorUuid(v?.after_id);
+    const line = typeof v?.after_line === 'string' && /^\d{1,6}$/.test(v.after_line) ? Number(v.after_line) : null;
+    if (
+      !v ||
+      typeof v.after_at !== 'string' ||
+      !id ||
+      (withLine && line === null) ||
+      Object.entries(filters).some(([k, value]) => v[k] !== value)
+    ) {
+      throw new ApiError(422, 'VALIDATION_FAILED', 'The cursor is not valid.');
+    }
+    return withLine ? { at: v.after_at, id, line: line! } : { at: v.after_at, id };
+  }
+
+  private nextCursor<T>(kind: string, filters: CursorValues, last: T | undefined, key: (row: T) => ListAfter): string | null {
+    if (last === undefined) return null;
+    const k = key(last);
+    return this.cursor.sign(kind, { ...filters, after_at: k.at, after_id: k.id, ...(k.line === undefined ? {} : { after_line: String(k.line) }) });
+  }
+
   private async timed<T>(fn: () => Promise<T>): Promise<T> {
     await this.repo.limitStatementTime(this.config.reportStatementTimeoutMs);
     try {
@@ -263,6 +425,15 @@ function topProductsLimit(raw: string | undefined): number {
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 1 || n > TOP_PRODUCTS_MAX_LIMIT) {
     throw new ApiError(422, 'VALIDATION_FAILED', `limit must be 1 to ${TOP_PRODUCTS_MAX_LIMIT}.`);
+  }
+  return n;
+}
+
+function listLimit(raw: string | undefined): number {
+  if (raw === undefined) return LIST_DEFAULT_LIMIT;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > LIST_MAX_LIMIT) {
+    throw new ApiError(422, 'VALIDATION_FAILED', `limit must be 1 to ${LIST_MAX_LIMIT}.`);
   }
   return n;
 }

@@ -445,8 +445,11 @@ describe('G1a: sales report and my day', { timeout: 300_000 }, () => {
       }
     }
     expect(marked.sort()).toEqual([
+      'v1/reports/exceptions 10000',
+      'v1/reports/field 10000',
       'v1/reports/my-day 10000',
       'v1/reports/profit 10000',
+      'v1/reports/receivables 10000',
       'v1/reports/sales 10000',
       'v1/reports/shrinkage 10000',
       'v1/reports/stock 10000',

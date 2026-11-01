@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { SignedCursor } from '../../common/paging/signed-cursor.js';
 import { StaffModule } from '../staff/staff.module.js';
 import { ReportRateLimitGuard } from './report-rate-limit.guard.js';
 import { ReportsController } from './reports.controller.js';
@@ -11,6 +12,6 @@ import { ReportsService } from './reports.service.js';
 @Module({
   imports: [StaffModule],
   controllers: [ReportsController],
-  providers: [ReportsService, ReportsRepository, ReportRateLimitGuard],
+  providers: [ReportsService, ReportsRepository, ReportRateLimitGuard, SignedCursor],
 })
 export class ReportsModule {}
