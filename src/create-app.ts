@@ -19,7 +19,8 @@ import { ApiError } from './common/errors/api.error.js';
 import { AllExceptionsFilter } from './common/errors/all-exceptions.filter.js';
 import { loggerOptions } from './common/logging/logger.options.js';
 import { RequestLogController } from './common/logging/request-log.controller.js';
-import type { AppConfig } from './config/app.config.js';
+import type { AuthedRequest } from './common/auth/request-auth.js';
+import { type AppConfig, REPORT_RATE_LIMIT_MAX, REPORT_RATE_LIMIT_WINDOW_MS } from './config/app.config.js';
 
 export interface CreateAppOptions {
   // Where request log lines go (tests capture them). Default: stdout.
@@ -68,6 +69,17 @@ export async function configureApp(app: NestFastifyApplication, config: AppConfi
     // Becomes a 429 that AllExceptionsFilter turns into the standard shape.
     errorResponseBuilder: () => ({ statusCode: 429, message: 'Too many requests' }),
   });
+  // Phase G1: the per-member report limit, checked by ReportRateLimitGuard
+  // after the token is verified (route settings run before that, so they
+  // could only count per IP). Its own in-memory store, like the global limit's.
+  fastify.decorate(
+    'reportRateLimit',
+    fastify.createRateLimit({
+      max: REPORT_RATE_LIMIT_MAX,
+      timeWindow: REPORT_RATE_LIMIT_WINDOW_MS,
+      keyGenerator: (request) => `report:${(request as AuthedRequest).auth?.membershipId ?? ''}`,
+    }),
+  );
 
   app.useGlobalFilters(new AllExceptionsFilter());
   app.useGlobalPipes(

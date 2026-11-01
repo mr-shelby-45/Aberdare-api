@@ -55,6 +55,23 @@ export const ERROR_EVENT_RETENTION_DAYS = 90;
 /** Per-business jobs of a fan-out: this many at once per worker, each expiring after this long. */
 export const FANOUT_CONCURRENCY = 3;
 export const BUSINESS_JOB_EXPIRE_SECONDS = 300;
+/**
+ * Reports (Phase G1, docs/phase-g1-design.md section 4): a report statement is
+ * cancelled after 8 seconds (503 REPORT_TOO_SLOW). A long report holds back
+ * GET /v1/sync/changes for every shop while it runs, so this is a safety rule.
+ * Report routes get a 10 second transaction: Prisma's default of 5 seconds
+ * would end the transaction before the statement timeout could fire; the
+ * other 2 seconds cover loading the session.
+ */
+export const REPORT_STATEMENT_TIMEOUT_MS = 8_000;
+export const REPORT_TRANSACTION_TIMEOUT_MS = 10_000;
+/** Report routes: at most this many requests a minute per member, on top of the global limit. */
+export const REPORT_RATE_LIMIT_MAX = 30;
+export const REPORT_RATE_LIMIT_WINDOW_MS = 60_000;
+/** The longest report range in Nairobi days, both ends included. */
+export const REPORT_MAX_RANGE_DAYS = 92;
+/** "My day" reaches this many Nairobi days back, today included. */
+export const MY_DAY_MAX_DAYS = 7;
 
 export class AppConfig {
   @IsIn(APP_ENVS)
@@ -120,6 +137,11 @@ export class AppConfig {
   @Min(1)
   changeLogRetentionDays!: number;
 
+  // Phase G1: REPORT_STATEMENT_TIMEOUT_MS, a constant, not an environment setting.
+  @IsInt()
+  @Min(100)
+  reportStatementTimeoutMs!: number;
+
   // Phase F1: pg-boss's connection, as the queue_user role (it can reach only
   // the pgboss schema). Only the worker needs it; the worker refuses to start
   // without it.
@@ -149,6 +171,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     rateLimitMax: toInt(env.RATE_LIMIT_MAX, 100),
     rateLimitWindowMs: toInt(env.RATE_LIMIT_WINDOW_MS, 60_000),
     changeLogRetentionDays: CHANGE_LOG_RETENTION_DAYS,
+    reportStatementTimeoutMs: REPORT_STATEMENT_TIMEOUT_MS,
     queueDatabaseUrl: env.QUEUE_DATABASE_URL?.trim() || undefined,
     workerShutdownTimeoutMs: WORKER_SHUTDOWN_TIMEOUT_MS,
   });

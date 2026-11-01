@@ -71,8 +71,10 @@ export class TenantRunner {
    * argument true), so the setting disappears at commit or rollback and can
    * never leak to the next user of the pooled connection.
    * If fn throws, everything it wrote is rolled back.
+   * timeoutMs replaces Prisma's 5 second transaction limit; only report
+   * routes use it (Phase G1, through @TransactionTimeout).
    */
-  async run<T>(businessId: string, fn: () => Promise<T>): Promise<T> {
+  async run<T>(businessId: string, fn: () => Promise<T>, options: { timeoutMs?: number } = {}): Promise<T> {
     if (!UUID.test(businessId)) {
       throw new Error('TenantRunner.run: businessId must be a UUID');
     }
@@ -84,6 +86,6 @@ export class TenantRunner {
     return this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT set_config('app.business_id', ${businessId}, true)`;
       return storage.run({ businessId, tx }, fn);
-    });
+    }, options.timeoutMs === undefined ? undefined : { timeout: options.timeoutMs });
   }
 }

@@ -11,6 +11,7 @@ import { IS_PUBLIC } from '../../common/auth/public.decorator.js';
 import type { AuthedRequest, RequestAuth, RequestSession } from '../../common/auth/request-auth.js';
 import { REQUIRED_PERMISSIONS } from '../../common/auth/require-permission.decorator.js';
 import { OWN_TRANSACTIONS } from '../../common/auth/own-transactions.decorator.js';
+import { TRANSACTION_TIMEOUT } from '../../common/auth/transaction-timeout.decorator.js';
 import { type RequestContext, runWithRequestContext } from '../../common/context/request-context.js';
 import { ApiError } from '../../common/errors/api.error.js';
 import { TenantRunner } from '../../database/tenant.js';
@@ -68,6 +69,7 @@ export class TenantInterceptor implements NestInterceptor {
       );
     }
 
+    const timeoutMs = this.reflector.getAllAndOverride<number | undefined>(TRANSACTION_TIMEOUT, targets);
     return from(
       runWithRequestContext(requestContext, () => this.tenants.run(auth.businessId, async () => {
         const session = await this.loadSession(auth);
@@ -80,7 +82,7 @@ export class TenantInterceptor implements NestInterceptor {
         request.session = session;
         // The handler subscribes here, so all its work runs inside this transaction.
         return lastValueFrom(next.handle(), { defaultValue: undefined });
-      })),
+      }, { timeoutMs })),
     );
   }
 

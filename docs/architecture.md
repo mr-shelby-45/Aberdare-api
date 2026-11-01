@@ -39,6 +39,7 @@ API process (NestJS + Fastify)  ----->  PostgreSQL  <-----  Worker process (pg-b
 - Two processes from one codebase: `main.ts` (API) and `worker.ts` (jobs). They share the database.
 - The worker (Phase F, `docs/phase-f-design.md`) is the Nest application context without HTTP, built by `createWorker()` (`src/create-worker.ts`), plus pg-boss (`JobQueue`, `src/jobs/`). It uses two connections: business data as `app_user` through `TenantRunner`, one business per short transaction, never bypassing RLS (it learns the businesses from `list_business_ids()` and runs each one in its own tenant transaction); and the queue as `queue_user`, which can reach only the `pgboss` schema. pg-boss's tables are created and upgraded by `pnpm queue:migrate` as the migration role; the worker never migrates and runs no DDL (queues are never partitioned). SIGTERM stops fetching and lets the running job finish. No sender call (push, SMS, email) inside a database transaction.
 - The API never calls SMS, push or Daraja inside a request transaction. It writes a row; the worker acts on it.
+- Reports (Phase G1, approved exception to "a module never reads another module's tables", the second after the C2 stock reads in section 6): `ReportsRepository` (`src/modules/reports/`) runs read-only `SELECT` statements across `sale`, `sale_item`, `payment`, `stock_movement`, `stock_balance`, `field_settlement`, `field_settlement_line`, `location`, `product` and `pack_type`, in that one place, through the current tenant transaction, so RLS applies to every query. Reports are live queries (no pre-computed tables, no cache, no replica); a report never writes, never joins `membership` (names come from `StaffService.displayNames()`), and the `app_user` grants are unchanged by it.
 - Errors: Sentry on the server, Crashlytics on the phone. Details in section 11.
 
 ## 3. Tenant isolation (row-level security)
@@ -374,6 +375,8 @@ As built in Phase A5: `audit_log` is a tenant table (forced RLS, `shop_only` pol
 
 Time: all timestamps in UTC. Phone events carry `occurred_at` (phone clock) and the server records `received_at`. If they differ by more than about 5 minutes, flag clock skew to the user. Display in Africa/Nairobi.
 
+Days and ranges in reports (Phase G1, `docs/phase-g1-design.md` section 4, as built in G1a): `from` and `to` are `YYYY-MM-DD` Africa/Nairobi days, both included and both required. The query range is `[from 00:00 Nairobi, to + 1 day 00:00 Nairobi)` as instants, so a sale at 23:59:59 Nairobi (20:59:59 UTC) belongs to its own day and one at 00:00:00 (21:00:00 UTC) to the next. Kenya is UTC+3 all year with no daylight saving, so the conversion is a fixed offset (`src/common/time/nairobi.ts`); grouping by day in SQL uses `(occurred_at AT TIME ZONE 'Africa/Nairobi')::date`. Sales are placed by `occurred_at`, never `received_at`, and their payments by the sale's day. A date that does not exist, `from` after `to`, or a missing date is `422 VALIDATION_FAILED`; more than 92 days is `422 RANGE_TOO_LARGE`. "Today" comes from the injected Clock. Each report statement runs under an 8 second `statement_timeout` (`503 REPORT_TOO_SLOW`) inside a 10 second report transaction; report routes have their own limit of 30 requests a minute per member (`429 RATE_LIMITED`).
+
 ## 12. Data model
 
 Table list (exact columns are designed during the build and reviewed by Ian before the first migration of each group):
@@ -451,7 +454,18 @@ All under `/v1`, JSON, access token required unless stated.
 - **sales** (Phase E; writes are sync commands only): `GET /sales?from=&to=&location_id=&status=&created_by=&limit=&cursor=` (newest first; members without `sales.void` see only their own sales, and `created_by` is ignored for them), `GET /sales/:id` (items, payments, void details; `cost_price` only with `costs.view`; another member's sale is `404` for an attendant). Approvals keep their Phase C routes: `GET /stock/approvers?purpose=` (default `STOCK_CONVERT`, or `SALE_VOID`) and `POST /stock/approvals` with `purpose: "SALE_VOID"`; moving them to a neutral prefix was not worth the break
 - **field settlements** (Phase T, `field.settle`; the close is the `settlement.close` sync command): `GET /field/settlements/preview?location_id=` (the figures a close would store, read only), `GET /field/settlements?location_id=&limit=&cursor=` (newest first, signed cursor), `GET /field/settlements/:id` (with lines). Location reads, the stock reads and sync follow the field attendant's location scope. `POST /locations` takes `kind` and, for `FIELD`, `assigned_membership_id` (a `FIELD_ATTENDANT`); a field location is reassigned by archiving it and creating a new one.
 - **notifications** (Phase F, the recipient only, active member on an active device; no business parameter): `GET /notifications?unread=&limit=&cursor=` (only the caller's `IN_APP` rows, newest first by `(created_at, id)`, signed cursor, limit 20 by default, at most 100; rows `id, type, data, message, created_at, read_at`), `GET /notifications/unread-count` (`{ unread }`), `POST /notifications/read` (`{ ids: [...] }` 1 to 100, or `{ all: true }`; marks only the caller's, ignores other ids without saying which; idempotent)
-- **reads**: `/payments/pending`, `/orders`, `/reports/*`, `/audit-log`, `/subscription`
+- **reports** (Phase G1, `docs/phase-g1-design.md` section 5; online only, never synced; Nairobi days as in section 11; any business parameter is `422`; cost, value and profit keys absent without `costs.view`):
+  - `GET /reports/sales?from=&to=&group_by=day|attendant|location&location_id=&attendant_id=` (`reports.view`; built in G1a): completed sales by `occurred_at`. `{ range, group_by, totals, rows, payments }`; `totals` and each row hold `sale_count`, `total`, `paid_total`, `balance_due`; a row is keyed by `date`, `attendant: { membership_id, display_name }` or `location: { id, name }`, sorted by date or by name then id; groups without sales are left out. `payments` holds the recorded payments of those sales: `cash`, `mpesa_unverified`, `mpesa_verified` (zero until Phase M); they add up to `totals.paid_total`
+  - `GET /reports/my-day?date=` (`sales.create`, attendants and field attendants included; built in G1a): only the caller's own sales on one Nairobi day, today or one of the 6 days before (default today): `date`, `sale_count`, `total`, `paid_total`, `balance_due` (completed sales), `voided_count`, `payments`. No other member's data, no costs
+  - `GET /reports/top-products?from=&to=&by=quantity|value&limit=&location_id=` (`reports.view`; G1b)
+  - `GET /reports/profit?from=&to=&group_by=day|product|attendant` (`reports.view` and `costs.view`; G1b): lines without a recorded cost are left out of profit and reported as `lines_without_cost` and `revenue_without_cost`
+  - `GET /reports/stock?location_id=&include_zero=&group_by=product|location` (`reports.view`; G1c), equal to `GET /stock`; `value_at_cost` and `pools_without_cost` with `costs.view`
+  - `GET /reports/shrinkage?from=&to=&group_by=reason|person|location|product` (`reports.view`; G1c)
+  - `GET /reports/exceptions?from=&to=&type=voids|below_list` (`reports.view`; paged; G1d)
+  - `GET /reports/receivables?type=unpaid|unverified_mpesa&from=&to=` (`reports.view`; paged; G1d)
+  - `GET /reports/field?from=&to=&attendant_id=` (`reports.view`; G1d)
+  - `GET /reports/sales/export.csv` and `GET /reports/stock/export.csv` (`reports.view`; UTF-8 with a byte-order mark, at most 50,000 rows, cells neutralised against formula injection, one `report.exported` audit row each; G1e)
+- **reads**: `/payments/pending`, `/orders`, `/audit-log`, `/subscription`
 - **sync**: `POST /sync/commands` (Phase B), `GET /sync/snapshot?table=&cursor=&limit=` (Phase D, any active member; `start_cursor` on the first page; cost fields only with `costs.view`, balances only with `stock.view`), `GET /sync/changes?cursor=&limit=` (Phase D; `410 SNAPSHOT_REQUIRED` for a cursor older than the retained history or issued under another cost visibility)
 - **manager actions**: voids are the `sale.void` sync command (Phase E), not a REST route; `POST /payments/:id/approve` (Phase M)
 - **orders**: `PATCH /orders/:id`; `POST /orders-inbox/key` (create or regenerate the shop key)
@@ -599,3 +613,17 @@ Found in the Phase F design (`docs/phase-f-design.md` section 15):
 77. Retention for `sync_command` and `audit_log` is undecided (`change_log` 30 days, notifications and error events 90 days).
 78. Notification language (Swahili) and quiet hours are the phone's job or later.
 79. Approval notifications go to the approver and owners; notifying a requester on refusal is not built.
+
+Found in the Phase G1 design (`docs/phase-g1-design.md` section 15):
+
+80. Pre-computed report summaries if a large wholesaler's reports get slow (measure first).
+81. A read replica for reports. Until then a long report holds back `changes` for every shop while it runs, so the 8 second limit matters.
+82. Excel (`.xlsx`) export, charts, comparison with the previous period.
+83. Scheduled reports by email or SMS (a daily summary to the owner) once real senders exist.
+84. Categories, customers and tax reports (those features do not exist yet).
+85. A per-business timezone if the product ever leaves Kenya.
+86. Reports of M-Pesa verification status become meaningful after Phase M.
+87. Stock valuation uses the current cost price, not a costing method (average or FIFO).
+88. Cost-bearing exports leave the system as plain files; the owner is responsible for them. Audit rows record that it happened.
+89. Which reports matter most should be confirmed with the client; the order of building within G1 may change after that.
+90. The report rate limit, like the global one, counts in each API process's memory, and a burst of more than 30 requests arriving at once is refused whole (found in G1a). A shared store is part of the open rate-limit risk (section 11).

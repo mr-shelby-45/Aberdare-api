@@ -262,5 +262,7 @@ export function stockApi(t: TestApp, ip: string, phoneBase: number) {
     sell,
     resetOutboxes,
     activeStaff,
+    // Phase G1a: a business of its own (tenant isolation, exactness).
+    signupOwner,
   };
 }

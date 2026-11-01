@@ -52,3 +52,8 @@ export function isForeignKeyViolation(err: unknown): boolean {
 export function isNumericOverflow(err: unknown): boolean {
   return postgresErrorCode(err) === '22003';
 }
+
+/** True when Postgres cancelled the statement (SQLSTATE 57014), for example at statement_timeout. */
+export function isQueryCanceled(err: unknown): boolean {
+  return postgresErrorCode(err) === '57014';
+}
