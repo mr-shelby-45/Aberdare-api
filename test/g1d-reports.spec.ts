@@ -291,7 +291,9 @@ describe('G1d: exceptions, receivables and field reports', { timeout: 300_000 },
     const first = await list('exceptions', 'type=voids&from=2026-10-20&to=2026-10-25&limit=1', amina.token);
     const c = first.next_cursor!;
     const refused = async (q: string) => errorOf(await get(`/v1/reports/exceptions?${q}`, amina.token));
-    const tampered = `${c.slice(0, -2)}${c.endsWith('AA') ? 'BB' : 'AA'}`;
+    // The first character, which always changes the signed bytes (the last one of a
+    // base64url MAC carries only 4 bits: swapping A and B there can leave it genuine).
+    const tampered = `${c[0] === 'e' ? 'f' : 'e'}${c.slice(1)}`;
     expect(await refused(`type=voids&from=2026-10-20&to=2026-10-25&limit=1&cursor=${encodeURIComponent(tampered)}`)).toEqual({ status: 422, code: 'VALIDATION_FAILED' });
     expect(await refused(`type=below_list&from=2026-10-20&to=2026-10-25&limit=1&cursor=${encodeURIComponent(c)}`)).toEqual({ status: 422, code: 'VALIDATION_FAILED' });
     expect(await refused(`type=voids&from=2026-10-21&to=2026-10-25&limit=1&cursor=${encodeURIComponent(c)}`)).toEqual({ status: 422, code: 'VALIDATION_FAILED' });

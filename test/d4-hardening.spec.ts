@@ -301,7 +301,10 @@ describe('D4: sync hardening', { timeout: 600_000 }, () => {
     // A 410 (the owner's cursor, which carries costs, used by the attendant) and a 422 (tampered).
     const att = await get(`/v1/sync/changes?cursor=${encodeURIComponent(first.start_cursor as string)}`, s.attendant.token);
     expect((att as LightMyRequestResponse).statusCode).toBe(410);
-    const tampered = `${(first.start_cursor as string).slice(0, -2)}xx`;
+    // The first character, which always changes the signed bytes (found in G1f: changing the last
+    // characters of a base64url value can leave its bytes the same).
+    const start = first.start_cursor as string;
+    const tampered = `${start[0] === 'A' ? 'B' : 'A'}${start.slice(1)}`;
     expect((await get(`/v1/sync/changes?cursor=${encodeURIComponent(tampered)}`, s.owner.token)).statusCode).toBe(422);
 
     const raw = t.rawLogs();

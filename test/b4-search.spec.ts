@@ -318,7 +318,10 @@ describe('B4: search and listing', { timeout: 180_000 }, () => {
     // Tampering: a changed body, a changed signature, garbage, or the wrong include_archived.
     const [body, mac] = good.split('.');
     const forged = Buffer.from(JSON.stringify({ v: 1, n: 'A', i: randomUUID(), a: false })).toString('base64url');
-    for (const bad of [`${forged}.${mac}`, `${body}.${mac.slice(0, -2)}AA`, 'garbage', `${body}`, `${body}.${mac}.x`]) {
+    // The signature's first character: it always changes the bytes (the last characters of a
+    // base64url MAC carry fewer bits, so "AA" there could leave it genuine; found in G1f).
+    const badMac = `${mac[0] === 'A' ? 'B' : 'A'}${mac.slice(1)}`;
+    for (const bad of [`${forged}.${mac}`, `${body}.${badMac}`, 'garbage', `${body}`, `${body}.${mac}.x`]) {
       expect(errorOf(await get(o.token, { cursor: bad })), bad).toMatchObject({ status: 422, code: 'VALIDATION_FAILED' });
     }
     expect(errorOf(await get(o.token, { cursor: good, include_archived: 'true' }))).toMatchObject({ status: 422 });

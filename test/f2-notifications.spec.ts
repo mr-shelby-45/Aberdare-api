@@ -177,7 +177,11 @@ describe('F2: notifications', { timeout: 180_000 }, () => {
     expect(unreadPage.body.notifications.map((n) => n.data.sale_number)).toEqual([5, 3]);
     const switched = await list(w.manager.token, `?unread=false&cursor=${encodeURIComponent(unreadPage.body.next_cursor!)}`);
     expect([switched.status, switched.body.error?.code]).toEqual([422, 'VALIDATION_FAILED']);
-    const tampered = unreadPage.body.next_cursor!.replace(/.$/, (c) => (c === 'A' ? 'B' : 'A'));
+    // The first character, which always changes the signed bytes. (The last one of a base64url
+    // MAC carries only 4 bits: swapping A and B there left the cursor genuine in about 6% of
+    // runs, found in G1f.)
+    const first = unreadPage.body.next_cursor!;
+    const tampered = `${first[0] === 'e' ? 'f' : 'e'}${first.slice(1)}`;
     expect((await list(w.manager.token, `?unread=true&cursor=${encodeURIComponent(tampered)}`)).status).toBe(422);
     for (const q of ['?limit=0', '?limit=101', '?limit=abc', '?unread=yes', `?business_id=${w.owner.businessId}`]) {
       expect((await list(w.manager.token, q)).status, q).toBe(422);

@@ -121,11 +121,26 @@ describe('F6: notification hardening', { timeout: 900_000 }, () => {
     const b = await shop('Duka B', { owner: false }); // B's owner has no push token: NO_PUSH_TOKEN
     const fates = new Map<string, Fate>();
     const calls = new Map<string, number>();
-    // The first three pushes asked get fixed fates, so every run covers each case; the rest by the seed's hash.
+    // The first pushes asked get fixed fates, so every run covers each case; the rest by the seed's hash.
+    // The device of the fixed permanent failure is never answered DEAD_TOKEN: a dead token there
+    // would clear it before the retries, so the push would end NO_PUSH_TOKEN and no run would see a
+    // PUSH_FAILED (found in G1f: seed 1001 failed 2 of 3 replays). Its DEAD_TOKEN goes to the next
+    // push on another device.
     const fixed: Fate[] = ['PERMANENT', 'DEAD_TOKEN', 'RETRY_THEN_OK'];
-    const decide = (push: PushMessage): FakePushAnswer => {
-      const fate = fates.get(push.notificationId) ?? fixed[fates.size] ?? fateOf(seed, push.notificationId);
-      fates.set(push.notificationId, fate);
+    let permanentToken: string | null = null;
+    const decide = (push: PushMessage, _call: number, token: string): FakePushAnswer => {
+      let fate = fates.get(push.notificationId);
+      if (fate === undefined) {
+        const next = fixed[0];
+        if (next !== undefined && !(next === 'DEAD_TOKEN' && token === permanentToken)) {
+          fate = fixed.shift()!;
+          if (fate === 'PERMANENT') permanentToken = token;
+        } else {
+          fate = fateOf(seed, push.notificationId);
+        }
+        if (fate === 'DEAD_TOKEN' && token === permanentToken) fate = 'OK';
+        fates.set(push.notificationId, fate);
+      }
       const call = (calls.get(push.notificationId) ?? 0) + 1;
       calls.set(push.notificationId, call);
       if (fate === 'PERMANENT') return 'FAILED';

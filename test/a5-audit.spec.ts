@@ -548,7 +548,8 @@ describe('A5: audit log and hardening', { timeout: 120_000 }, () => {
       const pin = (deviceId: string, secret: string, value: string) => () =>
         post('/v1/auth/pin', { device_id: deviceId, device_secret: secret, pin: value });
       const unknown = await scryptWork(pin(randomUUID(), o.deviceSecret, PIN));
-      const wrongSecret = await scryptWork(pin(o.deviceId, `${o.deviceSecret.slice(0, -2)}AA`, PIN));
+      // The first character: always a different secret (one ending in "AA" stayed the same; found in G1f).
+      const wrongSecret = await scryptWork(pin(o.deviceId, `${o.deviceSecret![0] === 'A' ? 'B' : 'A'}${o.deviceSecret!.slice(1)}`, PIN));
       const wrongPin = await scryptWork(pin(o.deviceId, o.deviceSecret, '0000'));
       expect(visible(wrongSecret.res)).toEqual(visible(unknown.res));
       expect(visible(wrongPin.res)).toEqual(visible(unknown.res));
